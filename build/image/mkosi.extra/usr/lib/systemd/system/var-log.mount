@@ -1,0 +1,14 @@
+[Unit]
+Description=Volatile /var/log (tmpfs)
+DefaultDependencies=no
+Before=local-fs.target
+ConditionPathIsReadWrite=!/var/log
+
+[Mount]
+What=tmpfs
+Where=/var/log
+Type=tmpfs
+Options=mode=0755,size=64M
+
+[Install]
+WantedBy=local-fs.target

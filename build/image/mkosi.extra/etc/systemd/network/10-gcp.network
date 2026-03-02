@@ -1,0 +1,12 @@
+[Match]
+Name=en*
+Type=ether
+
+[Network]
+DHCP=yes
+IPv6AcceptRA=yes
+
+[DHCPv4]
+UseDNS=yes
+UseNTP=yes
+UseHostname=yes

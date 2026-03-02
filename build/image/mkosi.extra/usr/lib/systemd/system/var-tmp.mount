@@ -1,0 +1,14 @@
+[Unit]
+Description=Volatile /var/tmp (tmpfs)
+DefaultDependencies=no
+Before=local-fs.target
+ConditionPathIsReadWrite=!/var/tmp
+
+[Mount]
+What=tmpfs
+Where=/var/tmp
+Type=tmpfs
+Options=mode=1777,size=64M
+
+[Install]
+WantedBy=local-fs.target

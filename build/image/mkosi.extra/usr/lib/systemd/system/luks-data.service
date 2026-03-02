@@ -1,0 +1,15 @@
+[Unit]
+Description=LUKS setup for data partition
+DefaultDependencies=no
+After=local-fs-pre.target
+Before=data.mount
+RequiredBy=data.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/luks-setup
+ExecStop=/usr/sbin/cryptsetup luksClose data-crypt
+
+[Install]
+WantedBy=local-fs.target

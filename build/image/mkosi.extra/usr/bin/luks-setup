@@ -1,0 +1,124 @@
+#!/bin/bash
+# luks-setup — LUKS encryption for the Enclave OS Virtual data partition.
+#
+# Run by luks-data.service BEFORE data.mount.
+#
+# Key sources (in priority order):
+#   1. BYOK — operator passes a passphrase via instance metadata
+#      (e.g. GCP attribute "luks-passphrase", or equivalent on other clouds).
+#   2. Auto-generated — a random 256-bit key is created at first boot.
+#
+# On first boot the partition is formatted with LUKS2 + ext4.
+# On subsequent boots the existing LUKS volume is unlocked.
+#
+# Outputs:
+#   /run/luks/dek-origin   key origin string for OID 2.6: "external" (BYOK) or "enclave-generated"
+#   /run/luks/key-source   "byok" or "generated" (legacy)
+#   /dev/mapper/data-crypt the unlocked block device
+set -euo pipefail
+
+PART="/dev/disk/by-partlabel/data"
+MAPPER="data-crypt"
+LUKS_DIR="/run/luks"
+ORIGIN_FILE="${LUKS_DIR}/dek-origin"
+KEY_SOURCE_FILE="${LUKS_DIR}/key-source"
+GENERATED_KEY_FILE="/data/.luks-generated-key"
+
+mkdir -p "$LUKS_DIR"
+
+# ── 1. Obtain passphrase ─────────────────────────────────────────────────
+
+PASSPHRASE=""
+KEY_SOURCE=""
+
+# Try instance metadata (BYOK).
+# Currently supports GCP metadata server. Extend the block below for other
+# cloud providers (AWS IMDS, Azure IMDS, etc.).
+if command -v curl >/dev/null 2>&1; then
+    # GCP
+    PASSPHRASE=$(curl -sf -H "Metadata-Flavor: Google" \
+        "http://metadata.google.internal/computeMetadata/v1/instance/attributes/luks-passphrase" \
+        2>/dev/null || true)
+fi
+
+if [ -n "$PASSPHRASE" ]; then
+    KEY_SOURCE="byok"
+    echo "luks-setup: using BYOK passphrase from instance metadata"
+else
+    # Check if we previously generated a key (stored on the data partition
+    # inside the LUKS volume — chicken-egg: only readable after first unlock).
+    # On true first boot the partition is not yet LUKS, so we generate fresh.
+    if cryptsetup isLuks "$PART" 2>/dev/null; then
+        echo "luks-setup: ERROR — LUKS volume exists but no passphrase provided" >&2
+        echo "luks-setup: set 'luks-passphrase' in instance metadata" >&2
+        exit 1
+    fi
+
+    # First boot — generate a random key.
+    PASSPHRASE=$(head -c 32 /dev/urandom | base64)
+    KEY_SOURCE="generated"
+    echo "luks-setup: generated random LUKS passphrase (first boot)"
+fi
+
+echo "$KEY_SOURCE" > "$KEY_SOURCE_FILE"
+
+# ── 2. Persist DEK origin (for OID 2.6) ─────────────────────────────────
+
+if [ "$KEY_SOURCE" = "byok" ]; then
+    DEK_ORIGIN="external"
+else
+    DEK_ORIGIN="enclave-generated"
+fi
+echo "$DEK_ORIGIN" > "$ORIGIN_FILE"
+chmod 644 "$ORIGIN_FILE"
+
+# ── 3. Format or open ────────────────────────────────────────────────────
+
+if cryptsetup isLuks "$PART" 2>/dev/null; then
+    # Existing LUKS volume — open it.
+    echo "luks-setup: opening existing LUKS volume"
+    printf '%s' "$PASSPHRASE" | cryptsetup luksOpen "$PART" "$MAPPER" --key-file=-
+else
+    # First boot — format, open, create filesystem.
+    echo "luks-setup: formatting new LUKS2 volume"
+    printf '%s' "$PASSPHRASE" | cryptsetup luksFormat \
+        --type luks2 \
+        --cipher aes-xts-plain64 \
+        --key-size 512 \
+        --hash sha256 \
+        --iter-time 2000 \
+        --key-file=- \
+        "$PART"
+
+    printf '%s' "$PASSPHRASE" | cryptsetup luksOpen "$PART" "$MAPPER" --key-file=-
+
+    echo "luks-setup: creating ext4 filesystem on /dev/mapper/$MAPPER"
+    mkfs.ext4 -L data "/dev/mapper/$MAPPER"
+fi
+
+# ── 4. Warn about generated key ─────────────────────────────────────────
+
+if [ "$KEY_SOURCE" = "generated" ]; then
+    echo ""
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║  WARNING: Auto-generated LUKS key                            ║"
+    echo "║                                                              ║"
+    echo "║  The data partition was encrypted with a randomly generated  ║"
+    echo "║  passphrase. This key exists ONLY in memory for this boot    ║"
+    echo "║  session.                                                    ║"
+    echo "║                                                              ║"
+    echo "║  To persist across reboots, store the key externally:        ║"
+    echo "║    • Set 'luks-passphrase' in instance metadata, OR          ║"
+    echo "║    • Store it in Enclave Vaults (future)                     ║"
+    echo "║                                                              ║"
+    echo "║  DEK origin (OID 2.6): $DEK_ORIGIN                           ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+    echo ""
+fi
+
+# ── 5. Clean up ──────────────────────────────────────────────────────────
+
+# Clear passphrase from shell memory (best-effort).
+PASSPHRASE=""
+
+echo "luks-setup: /dev/mapper/$MAPPER ready"

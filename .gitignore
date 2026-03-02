@@ -1,0 +1,42 @@
+# Binaries
+/manager
+*.exe
+
+# Go
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+/dist/
+build/image/mkosi.builddir/
+build/image/*.raw
+build/image/*.tar.gz
+tmp/
+
+# Temporary debug/inspect scripts
+build/inspect*.sh
+
+# Old boot config (superseded by boot.conf)
+build/image/mkosi.conf.d/uki.conf
+
+# Secrets (never commit)
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local status tracking
+status.md
+
+# Private operations docs
+GCP-Ops.md

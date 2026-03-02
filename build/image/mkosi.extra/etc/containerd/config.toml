@@ -1,0 +1,11 @@
+# Containerd configuration for Enclave OS Virtual.
+#
+# Root partition is read-only erofs with dm-verity.  Persistent state
+# lives on the ext4 data partition mounted at /data.
+version = 2
+
+root = "/data/containerd"
+state = "/run/containerd"
+
+[grpc]
+  address = "/run/containerd/containerd.sock"

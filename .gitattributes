@@ -1,0 +1,4 @@
+# Treat symlink placeholder files as text so Git preserves them
+# across platforms. The CI recreates them as real symlinks before build.
+build/image/mkosi.extra/etc/systemd/system/**/* text eol=lf
+build/image/mkosi.extra/etc/resolv.conf text eol=lf
