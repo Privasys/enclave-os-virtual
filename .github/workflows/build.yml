@@ -110,54 +110,60 @@ jobs:
       - name: Extract dm-verity root hash
         id: verity
         run: |
-          echo "── Build output files ──"
-          ls -la build/image/enclave-os-virtual_*
-          echo "───────────────────"
+          RAW=$(ls build/image/enclave-os-virtual_*.raw)
+          LOOPDEV=$(sudo losetup --find --show --partscan "$RAW")
+          sudo partprobe "$LOOPDEV" 2>/dev/null || true
+          sleep 1
+
+          # Find the verity hash partition via blkid TYPE=DM_verity_hash
+          VERITY_PART=""
+          DATA_PART=""
+          for part in "${LOOPDEV}p"*; do
+            TYPE=$(sudo blkid -o value -s TYPE "$part" 2>/dev/null || true)
+            if [ "$TYPE" = "DM_verity_hash" ]; then
+              VERITY_PART="$part"
+            elif [ "$TYPE" = "erofs" ]; then
+              DATA_PART="$part"
+            fi
+          done
 
           ROOT_HASH=""
+          if [ -n "$VERITY_PART" ] && [ -n "$DATA_PART" ]; then
+            echo "Data partition:   $DATA_PART"
+            echo "Verity partition: $VERITY_PART"
 
-          # Method 1: mkosi roothash sidecar file
-          ROOTHASH_FILE=$(ls build/image/enclave-os-virtual_*.roothash 2>/dev/null || true)
-          if [ -n "$ROOTHASH_FILE" ] && [ -f "$ROOTHASH_FILE" ]; then
-            ROOT_HASH=$(cat "$ROOTHASH_FILE" | tr -d '[:space:]')
-            echo "Extracted root hash from mkosi sidecar: $ROOTHASH_FILE"
-          fi
+            # Read existing verity parameters from the superblock
+            DUMP=$(sudo veritysetup dump "$VERITY_PART" 2>/dev/null || true)
+            echo "$DUMP"
+            SALT=$(echo "$DUMP" | grep 'Salt:' | awk '{print $NF}')
+            DATA_BS=$(echo "$DUMP" | grep 'Data block size:' | awk '{print $NF}')
+            HASH_BS=$(echo "$DUMP" | grep 'Hash block size:' | awk '{print $NF}')
 
-          # Method 2: systemd-dissect
-          if [ -z "$ROOT_HASH" ]; then
-            RAW=$(ls build/image/enclave-os-virtual_*.raw)
-            echo "Trying systemd-dissect on $RAW..."
-            ROOT_HASH=$(sudo systemd-dissect "$RAW" 2>/dev/null \
-              | grep -i 'root hash' | awk '{print $NF}') || true
-            if [ -n "$ROOT_HASH" ]; then
-              echo "Extracted root hash via systemd-dissect"
-            fi
-          fi
-
-          # Method 3: veritysetup dump (scan all partitions)
-          if [ -z "$ROOT_HASH" ]; then
-            RAW=$(ls build/image/enclave-os-virtual_*.raw)
-            LOOPDEV=$(sudo losetup --find --show --partscan "$RAW")
-            sudo partprobe "$LOOPDEV" 2>/dev/null || true
-            sleep 1
-            echo "── Partition table ──"
-            sudo fdisk -l "$LOOPDEV"
-            for part in "${LOOPDEV}p"*; do
-              echo "Trying veritysetup dump on $part..."
-              sudo veritysetup dump "$part" 2>&1 | head -20 || true
-              HASH=$(sudo veritysetup dump "$part" 2>/dev/null \
-                | grep 'Root hash:' | awk '{print $NF}') || true
-              if [ -n "$HASH" ]; then
-                ROOT_HASH="$HASH"
-                echo "Found verity root hash on $part"
-                break
+            if [ -n "$SALT" ] && [ -n "$DATA_BS" ] && [ -n "$HASH_BS" ]; then
+              # Recompute the root hash: veritysetup format with the same salt
+              # produces the identical Merkle tree and root hash.
+              truncate -s 40M /tmp/verity-recompute.img
+              ROOT_HASH=$(sudo veritysetup format "$DATA_PART" /tmp/verity-recompute.img \
+                --data-block-size="$DATA_BS" --hash-block-size="$HASH_BS" \
+                --salt="$SALT" --format=1 2>&1 \
+                | grep 'Root hash:' | awk '{print $NF}')
+              rm -f /tmp/verity-recompute.img
+              if [ -n "$ROOT_HASH" ]; then
+                echo "✓ Computed dm-verity root hash: $ROOT_HASH"
               fi
-            done
-            sudo losetup -d "$LOOPDEV"
+            else
+              echo "::warning::Could not parse verity superblock parameters"
+            fi
+          else
+            echo "::warning::Could not identify data ($DATA_PART) or verity ($VERITY_PART) partition"
+            sudo fdisk -l "$LOOPDEV"
+            sudo blkid "${LOOPDEV}"* || true
           fi
 
+          sudo losetup -d "$LOOPDEV"
+
           if [ -z "$ROOT_HASH" ]; then
-            echo "::error::Failed to extract dm-verity root hash (all methods failed)"
+            echo "::error::Failed to extract dm-verity root hash"
             exit 1
           fi
           echo "root_hash=$ROOT_HASH" >> "$GITHUB_OUTPUT"
