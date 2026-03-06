@@ -1,18 +1,21 @@
 // Package oids defines the X.509 OID extensions used in Enclave OS (Virtual)
 // RA-TLS certificates. These mirror the Privasys OID arc used in Enclave OS
-// Mini (SGX) but are extended for container workloads.
+// Mini (SGX) with unified naming conventions for cross-product alignment.
 //
 // OID hierarchy under 1.3.6.1.4.1.65230 (Privasys arc):
 //
 //	1.1   Platform Config Merkle Root (enclave/VM-wide)
 //	2.*   Platform-wide module OIDs
-//	  2.4 Containerd runtime version hash
-//	  2.5 Combined container images hash
-//	  2.6 Data Encryption Key Origin ("external" or "enclave-generated")
+//	  2.1 Egress CA bundle hash (Mini only)
+//	  2.4 Runtime version hash (containerd in Virtual, Wasmtime in Mini)
+//	  2.5 Combined workloads hash (container images in Virtual, WASM apps in Mini)
+//	  2.6 Data Encryption Key Origin ("byok:<fingerprint>" or "generated")
+//	  2.7 Attestation Servers Hash
 //	3.*   Per-container OIDs (via SNI routing)
 //	  3.1 Container Config Merkle Root
 //	  3.2 Container Image Digest (SHA-256 of OCI manifest)
 //	  3.3 Container Image Reference (e.g. ghcr.io/example/myapp@sha256:...)
+//	  3.4 Container Volume Encryption
 //
 // The TDX and SGX quote OIDs are defined by Intel:
 //
@@ -47,14 +50,19 @@ var PlatformConfigMerkleRoot = append(append(asn1.ObjectIdentifier{}, privasysAr
 
 // --- Module OIDs (1.3.6.1.4.1.65230.2.*) --------------------------------
 
-// ContainerdVersionHash is the SHA-256 of the containerd binary version
-// string, establishing the runtime version in use.
-var ContainerdVersionHash = append(append(asn1.ObjectIdentifier{}, privasysArc...), 2, 4)
+// RuntimeVersionHash is the SHA-256 of the runtime binary version
+// string. In Virtual this is the containerd version; in Mini it is
+// reserved for the Wasmtime engine version.
+//
+// Aligned with enclave-os-mini OID 2.4 (Runtime Version Hash).
+var RuntimeVersionHash = append(append(asn1.ObjectIdentifier{}, privasysArc...), 2, 4)
 
-// CombinedContainerImagesHash is the SHA-256 of all container image digests
-// (sorted by name, concatenated), providing a single check for the full set
-// of loaded workloads.
-var CombinedContainerImagesHash = append(append(asn1.ObjectIdentifier{}, privasysArc...), 2, 5)
+// CombinedWorkloadsHash is the SHA-256 of all workload code hashes
+// (sorted by name, concatenated). In Virtual this covers container image
+// digests; in Mini it covers WASM app bytecode hashes.
+//
+// Aligned with enclave-os-mini OID 2.5 (Combined Workloads Hash).
+var CombinedWorkloadsHash = append(append(asn1.ObjectIdentifier{}, privasysArc...), 2, 5)
 
 // DataEncryptionKeyOrigin describes how the LUKS data-encryption key was
 // provisioned.  The value is a UTF-8 string:
@@ -66,6 +74,13 @@ var CombinedContainerImagesHash = append(append(asn1.ObjectIdentifier{}, privasy
 // Its presence in the certificate proves data-at-rest is encrypted; the value
 // tells the verifier whether the key is externally managed or ephemeral.
 var DataEncryptionKeyOrigin = append(append(asn1.ObjectIdentifier{}, privasysArc...), 2, 6)
+
+// AttestationServersHash is the SHA-256 of the canonical attestation
+// server URL list (sorted, newline-joined). Proves which remote
+// verification servers are trusted by the platform.
+//
+// Aligned with enclave-os-mini OID 2.7 (Attestation Servers Hash).
+var AttestationServersHash = append(append(asn1.ObjectIdentifier{}, privasysArc...), 2, 7)
 
 // --- Per-container OIDs (1.3.6.1.4.1.65230.3.*) -------------------------
 
@@ -108,17 +123,20 @@ func Extension(oid asn1.ObjectIdentifier, value []byte) pkix.Extension {
 
 // PlatformExtensions returns the set of X.509 extensions for a platform-wide
 // (non-per-container) RA-TLS certificate.  If dekOrigin is non-empty the Data
-// Encryption Key Origin (OID 2.6) extension is included, proving at the TLS
-// level that the data partition is LUKS-encrypted and how the key was provisioned.
-func PlatformExtensions(quote []byte, quoteOID asn1.ObjectIdentifier, merkleRoot [32]byte, containerdHash [32]byte, combinedImagesHash [32]byte, dekOrigin string) []pkix.Extension {
+// Encryption Key Origin (OID 2.6) extension is included.  If attestationServersHash
+// is non-nil the Attestation Servers Hash (OID 2.7) extension is included.
+func PlatformExtensions(quote []byte, quoteOID asn1.ObjectIdentifier, merkleRoot [32]byte, runtimeVersionHash [32]byte, combinedWorkloadsHash [32]byte, dekOrigin string, attestationServersHash *[32]byte) []pkix.Extension {
 	exts := []pkix.Extension{
 		Extension(quoteOID, quote),
 		Extension(PlatformConfigMerkleRoot, merkleRoot[:]),
-		Extension(ContainerdVersionHash, containerdHash[:]),
-		Extension(CombinedContainerImagesHash, combinedImagesHash[:]),
+		Extension(RuntimeVersionHash, runtimeVersionHash[:]),
+		Extension(CombinedWorkloadsHash, combinedWorkloadsHash[:]),
 	}
 	if dekOrigin != "" {
 		exts = append(exts, Extension(DataEncryptionKeyOrigin, []byte(dekOrigin)))
+	}
+	if attestationServersHash != nil {
+		exts = append(exts, Extension(AttestationServersHash, attestationServersHash[:]))
 	}
 	return exts
 }

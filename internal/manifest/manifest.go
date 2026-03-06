@@ -54,8 +54,10 @@ type Platform struct {
 	// CAKeyPath is the path to the PEM-encoded intermediary CA private key.
 	CAKeyPath string `yaml:"ca_key"`
 
-	// AttestationBackend is the TEE backend: "tdx" or "sev-snp".
-	AttestationBackend string `yaml:"attestation_backend"`
+	// AttestationServers is a list of attestation server URLs for remote
+	// quote verification.  The list is hashed (sorted, newline-joined)
+	// and published as OID 2.7 for verifier transparency.
+	AttestationServers []string `yaml:"attestation_servers"`
 }
 
 // Container defines a single OCI container workload.
@@ -144,9 +146,6 @@ func Parse(data []byte) (*Manifest, error) {
 func (m *Manifest) Validate() error {
 	if m.Version != "1" {
 		return fmt.Errorf("manifest: unsupported version %q (expected \"1\")", m.Version)
-	}
-	if m.Platform.AttestationBackend == "" {
-		return fmt.Errorf("manifest: platform.attestation_backend is required")
 	}
 	if m.Platform.CACertPath == "" {
 		return fmt.Errorf("manifest: platform.ca_cert is required")

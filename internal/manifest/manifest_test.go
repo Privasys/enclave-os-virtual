@@ -12,7 +12,7 @@ func sampleManifest() *Manifest {
 			Hostname:           "manager.prod1.example.com",
 			CACertPath:         "/data/ca.crt",
 			CAKeyPath:          "/data/ca.key",
-			AttestationBackend: "tdx",
+			AttestationServers: []string{"https://as.privasys.org/verify"},
 		},
 		Containers: []Container{
 			{
@@ -43,7 +43,8 @@ platform:
   hostname: manager.prod1.example.com
   ca_cert: /data/ca.crt
   ca_key: /data/ca.key
-  attestation_backend: tdx
+  attestation_servers:
+    - https://as.privasys.org/verify
 containers:
   - name: web
     image: "registry.example.com/web@sha256:aabbccdd"

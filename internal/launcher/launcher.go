@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -90,8 +91,12 @@ type Config struct {
 	// CAKeyPath is the intermediary CA private key for RA-TLS.
 	CAKeyPath string
 
-	// AttestationBackend is the TEE backend: "tdx" or "sev-snp".
-	AttestationBackend string
+	// AttestationServers is a list of attestation server URLs for remote
+	// quote verification.  The list is hashed (sorted, newline-joined,
+	// SHA-256) into the platform Merkle tree and published as OID 2.7.
+	//
+	// Aligned with enclave-os-mini's attestation_servers configuration.
+	AttestationServers []string
 
 	// DEKOriginFile is the path to a file containing the data-encryption key
 	// origin string ("external" or "enclave-generated").  Written by
@@ -218,6 +223,12 @@ type Launcher struct {
 	containerdHash  []byte
 	combinedImgHash [32]byte
 
+	// attestationServersHash is the SHA-256 of the canonical attestation
+	// server URL list (sorted, newline-joined).  Nil-like (zero) when no
+	// servers are configured.
+	attestationServersHash [32]byte
+	hasAttestationServers  bool
+
 	// dekOrigin is the data-encryption key origin string ("byok:<fingerprint>"
 	// or "generated").  Empty when the data partition is not encrypted.
 	dekOrigin string
@@ -247,6 +258,17 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		volumeEncryption: make(map[string]string),
 	}
 
+	// Compute attestation servers hash (sorted, newline-joined, SHA-256)
+	// matching the canonical form used in enclave-os-mini.
+	if len(cfg.AttestationServers) > 0 {
+		sorted := make([]string, len(cfg.AttestationServers))
+		copy(sorted, cfg.AttestationServers)
+		sort.Strings(sorted)
+		canonical := strings.Join(sorted, "\n")
+		l.attestationServersHash = sha256.Sum256([]byte(canonical))
+		l.hasAttestationServers = true
+	}
+
 	// Initialise per-container volume manager.
 	vm := volume.NewManager(log)
 	if vm.IsVGReady() {
@@ -256,12 +278,16 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		l.log.Info("per-container encrypted volumes disabled (no VG 'containers')")
 	}
 
+	// Auto-detect TEE backend from hardware.
+	backend := detectTEEBackend()
+	log.Info("detected TEE backend", zap.String("backend", backend))
+
 	// Initialise Caddy client when extensions_dir is configured.
 	if cfg.ExtensionsDir != "" {
 		caddyCfg := caddy.Config{
 			AdminAddr:     cfg.CaddyAdminAddr,
 			ListenAddr:    cfg.CaddyListenAddr,
-			Backend:       cfg.AttestationBackend,
+			Backend:       backend,
 			CACertPath:    cfg.CACertPath,
 			CAKeyPath:     cfg.CAKeyPath,
 			ExtensionsDir: cfg.ExtensionsDir,
@@ -319,7 +345,7 @@ func (l *Launcher) Run(ctx context.Context) error {
 	platformRoot := l.platformTree.Root()
 	l.log.Info("manager ready (no containers loaded)",
 		zap.String("platform_merkle_root", hex.EncodeToString(platformRoot[:])),
-		zap.String("attestation_backend", l.cfg.AttestationBackend),
+		zap.Int("attestation_servers", len(l.cfg.AttestationServers)),
 		zap.String("machine_name", l.cfg.MachineName),
 		zap.String("platform_hostname", l.cfg.PlatformHostname),
 	)
@@ -643,11 +669,17 @@ func (l *Launcher) recomputeAttestation() {
 		Data: caCertDER,
 	})
 
-	// Attestation backend.
-	leaves = append(leaves, merkle.Leaf{
-		Name: "platform.attestation_backend",
-		Data: []byte(l.cfg.AttestationBackend),
-	})
+	// Attestation servers (sorted, newline-joined canonical form).
+	if l.hasAttestationServers {
+		sorted := make([]string, len(l.cfg.AttestationServers))
+		copy(sorted, l.cfg.AttestationServers)
+		sort.Strings(sorted)
+		canonical := strings.Join(sorted, "\n")
+		leaves = append(leaves, merkle.Leaf{
+			Name: "platform.attestation_servers",
+			Data: []byte(canonical),
+		})
+	}
 
 	// Per-container image digests.
 	for _, c := range containers {
@@ -688,7 +720,11 @@ func (l *Launcher) PlatformExtensions(quote []byte, quoteOID asn1.ObjectIdentifi
 	root := l.platformTree.Root()
 	var cdHash [32]byte
 	copy(cdHash[:], l.containerdHash)
-	return oids.PlatformExtensions(quote, quoteOID, root, cdHash, l.combinedImgHash, l.dekOrigin)
+	var asHash *[32]byte
+	if l.hasAttestationServers {
+		asHash = &l.attestationServersHash
+	}
+	return oids.PlatformExtensions(quote, quoteOID, root, cdHash, l.combinedImgHash, l.dekOrigin, asHash)
 }
 
 // ContainerExtensions returns the RA-TLS X.509 extensions for a
@@ -760,11 +796,15 @@ func (l *Launcher) writePlatformExtensions() error {
 	// Build the extensions list (without the quote — ra-tls-caddy adds that).
 	exts := []pkix.Extension{
 		oids.Extension(oids.PlatformConfigMerkleRoot, root[:]),
-		oids.Extension(oids.ContainerdVersionHash, cdHash[:]),
-		oids.Extension(oids.CombinedContainerImagesHash, l.combinedImgHash[:]),
+		oids.Extension(oids.RuntimeVersionHash, cdHash[:]),
+		oids.Extension(oids.CombinedWorkloadsHash, l.combinedImgHash[:]),
 	}
 	if l.dekOrigin != "" {
 		exts = append(exts, oids.Extension(oids.DataEncryptionKeyOrigin, []byte(l.dekOrigin)))
+	}
+	if l.hasAttestationServers {
+		h := l.attestationServersHash
+		exts = append(exts, oids.Extension(oids.AttestationServersHash, h[:]))
 	}
 
 	return extensions.Write(l.cfg.ExtensionsDir, l.cfg.PlatformHostname, exts)
@@ -847,4 +887,18 @@ func verifyPinnedDigest(imageRef string, resolvedDigest []byte) error {
 			imageRef, resolvedDigest, pinnedBytes)
 	}
 	return nil
+}
+
+// detectTEEBackend auto-detects the Trusted Execution Environment from
+// available hardware interfaces.  Returns "tdx" when /dev/tdx_guest exists,
+// "sev-snp" when /dev/sev-guest exists, or "tdx" as default fallback.
+func detectTEEBackend() string {
+	if _, err := os.Stat("/dev/tdx_guest"); err == nil {
+		return "tdx"
+	}
+	if _, err := os.Stat("/dev/sev-guest"); err == nil {
+		return "sev-snp"
+	}
+	// Default to tdx — the most common deployment target.
+	return "tdx"
 }

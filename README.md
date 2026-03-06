@@ -64,9 +64,10 @@ All Privasys OIDs live under the arc `1.3.6.1.4.1.65230`:
 | `1.2.840.113741.1.5.5.1.6` | TDX Quote | Intel TDX attestation quote |
 | `1.2.840.113741.1.13.1.0` | SGX Quote | Intel SGX attestation quote |
 | `1.3.6.1.4.1.65230.1.1` | Platform Config Merkle Root | SHA-256 root of the platform config tree |
-| `1.3.6.1.4.1.65230.2.4` | containerd Version Hash | SHA-256 of the containerd version string |
-| `1.3.6.1.4.1.65230.2.5` | Combined Images Hash | SHA-256 covering all container image digests |
+| `1.3.6.1.4.1.65230.2.4` | Runtime Version Hash | SHA-256 of the runtime (containerd) version string |
+| `1.3.6.1.4.1.65230.2.5` | Combined Workloads Hash | SHA-256 covering all container image digests |
 | `1.3.6.1.4.1.65230.2.6` | Data Encryption Key Origin | `"byok:<fingerprint>"` or `"generated"` — proves data-at-rest encryption and key provenance |
+| `1.3.6.1.4.1.65230.2.7` | Attestation Servers Hash | SHA-256 of the attestation server URL list |
 | `1.3.6.1.4.1.65230.3.1` | Container Config Merkle Root | SHA-256 root of a per-container config tree |
 | `1.3.6.1.4.1.65230.3.2` | Container Image Digest | Raw SHA-256 digest of the OCI image |
 | `1.3.6.1.4.1.65230.3.3` | Container Image Ref | Full OCI image reference string |
@@ -81,7 +82,8 @@ platform:
   hostname: example.com
   ca_cert: /data/ca.crt
   ca_key: /data/ca.key
-  attestation_backend: tdx
+  attestation_servers:
+    - https://as.privasys.org/verify
 containers:
   - name: postgres
     image: "docker.io/library/postgres@sha256:..."
@@ -145,7 +147,7 @@ go build -o manager ./cmd/manager/
 ```bash
 # Start the workload launcher and management API
 manager serve \
-  --attestation-backend tdx \
+  --attestation-servers https://as.privasys.org/verify \
   --ca-cert /data/ca.crt \
   --ca-key /data/ca.key \
   --machine-name prod1 \

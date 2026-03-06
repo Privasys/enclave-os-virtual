@@ -12,7 +12,7 @@ EnvironmentFile=-/data/manager.env
 ExecStart=/usr/bin/manager serve \
     --ca-cert ${CA_CERT:-/data/ca.crt} \
     --ca-key ${CA_KEY:-/data/ca.key} \
-    --attestation-backend tdx \
+    --attestation-servers ${ATTESTATION_SERVERS} \
     --caddy-listen :443 \
     --extensions-dir /run/manager/extensions \
     --machine-name %H \

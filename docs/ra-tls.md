@@ -16,7 +16,7 @@ proof of:
    loaded container's image digest, environment, volumes, and command
 3. **What the VM reports** — the `ReportData` field (64 bytes chosen by the
    enclave, binding the TLS key to the quote)
-4. **What runtime is in use** — the containerd version hash embedded in the
+4. **What runtime is in use** — the runtime version hash embedded in the
    certificate
 
 All of this is verified **before the TLS handshake completes**.  The client
@@ -89,9 +89,10 @@ Root CA (operator-provisioned)
       ├── Platform RA-TLS certificate (management API hostname)
       │        ├── TDX/SGX Quote         (OID 1.2.840.113741.1.5.5.1.6)
       │        ├── Platform Merkle Root  (OID 1.3.6.1.4.1.65230.1.1)
-      │        ├── containerd Hash       (OID 1.3.6.1.4.1.65230.2.4)
-      │        ├── Combined Images Hash  (OID 1.3.6.1.4.1.65230.2.5)
-      │        └── DEK Origin            (OID 1.3.6.1.4.1.65230.2.6)
+      │        ├── Runtime Version Hash  (OID 1.3.6.1.4.1.65230.2.4)
+      │        ├── Combined Workloads Hash (OID 1.3.6.1.4.1.65230.2.5)
+      │        ├── DEK Origin            (OID 1.3.6.1.4.1.65230.2.6)
+      │        └── Attestation Servers   (OID 1.3.6.1.4.1.65230.2.7)
       │
       ├── Container RA-TLS cert: "myapp.prod1.example.com"
       │        ├── TDX/SGX Quote         (OID 1.2.840.113741.1.5.5.1.6)
@@ -144,7 +145,7 @@ Clients verify an RA-TLS certificate in three steps:
 2. **Hardware quote** — extract the TDX/SGX quote from the Intel OID,
    verify the DCAP signature, check the platform measurement
 3. **Configuration state** — check the Privasys OID extensions (Merkle
-   roots, image digests, containerd hash) against known-good values
+   roots, image digests, runtime version hash) against known-good values
 
 ---
 
@@ -162,9 +163,10 @@ that encode the VM's attestation data and configuration state.
 1.3.6.1.4.1.65230                     Privasys arc
 ├── 1.1                               Platform Config Merkle Root
 ├── 2.*                               Platform-wide module OIDs
-│   ├── 2.4                           containerd Version Hash
-│   ├── 2.5                           Combined Container Images Hash
-│   └── 2.6                           Data Encryption Key Origin
+│   ├── 2.4                           Runtime Version Hash
+│   ├── 2.5                           Combined Workloads Hash
+│   ├── 2.6                           Data Encryption Key Origin
+│   └── 2.7                           Attestation Servers Hash
 └── 3.*                               Per-container OIDs
     ├── 3.1                           Container Config Merkle Root
     ├── 3.2                           Container Image Digest
@@ -180,9 +182,10 @@ Present in the **management API certificate** (platform hostname).
 |-----|------|-------|------|
 | `1.2.840.113741.1.5.5.1.6` | TDX Quote | Raw DCAP quote bytes | ~4 KB |
 | `1.3.6.1.4.1.65230.1.1` | Platform Config Merkle Root | SHA-256 hash | 32 bytes |
-| `1.3.6.1.4.1.65230.2.4` | containerd Version Hash | SHA-256 of containerd version string | 32 bytes |
-| `1.3.6.1.4.1.65230.2.5` | Combined Container Images Hash | SHA-256 of all image digests | 32 bytes |
+| `1.3.6.1.4.1.65230.2.4` | Runtime Version Hash | SHA-256 of containerd version string | 32 bytes |
+| `1.3.6.1.4.1.65230.2.5` | Combined Workloads Hash | SHA-256 of all image digests | 32 bytes |
 | `1.3.6.1.4.1.65230.2.6` | Data Encryption Key Origin | `"byok:<fingerprint>"` or `"generated"` | variable |
+| `1.3.6.1.4.1.65230.2.7` | Attestation Servers Hash | SHA-256 of server URL list | 32 bytes |
 
 ### Per-Container OIDs
 
@@ -234,7 +237,7 @@ The platform-wide Merkle tree includes these leaves (alphabetically sorted):
 
 | Leaf name | Input |
 |-----------|-------|
-| `platform.attestation_backend` | Backend string (e.g. `"tdx"`) |
+| `platform.attestation_servers` | Sorted, newline-joined attestation server URLs |
 | `platform.ca_cert` | Intermediary CA certificate (DER bytes) |
 | `container.<name>.image_digest` | SHA-256 digest of each loaded container |
 
@@ -264,7 +267,7 @@ Each container gets its own Merkle tree with these leaves:
 excluded from the Merkle tree.  Changing the vault token does not change the
 container's attested identity.
 
-### Combined Images Hash (OID 2.5)
+### Combined Workloads Hash (OID 2.5)
 
 For clients that want a single-check covering all loaded containers:
 
@@ -282,7 +285,7 @@ Clients can choose their verification depth:
 |----------|--------------|-------------|
 | **TDX measurement only** | Hardware quote → platform matches known value | VM image is correct, but containers unknown |
 | **Measurement + Merkle root** | + OID `1.3.6.1.4.1.65230.1.1` | VM image and full container set verified |
-| **Fast-path module OIDs** | + OIDs `2.4`, `2.5`, `2.6` | Verify runtime version, container set, and encryption provenance without Merkle audit |
+| **Fast-path module OIDs** | + OIDs `2.4`, `2.5`, `2.6`, `2.7` | Verify runtime version, container set, encryption provenance, and attestation servers without Merkle audit |
 | **Per-container verification** | + OIDs `3.1`, `3.2`, `3.3`, `3.4` (via SNI) | Verify a specific container's image, configuration, and volume encryption |
 | **Full Merkle audit** | Request manifest, recompute root | Complete transparency of all inputs |
 
@@ -373,7 +376,7 @@ The launcher:
 4. Recomputes all Merkle trees
 5. Writes OID extensions to `/run/manager/extensions/myapp.<machine-name>.<hostname>.json`
 6. Registers a Caddy route: `myapp.<machine-name>.<hostname>` → `localhost:8080`
-7. Updates the platform extensions (combined images hash changed)
+7. Updates the platform extensions (combined workloads hash changed)
 
 When unloading:
 
@@ -386,7 +389,7 @@ When unloading:
 
 | Scope | Certificate | OIDs present |
 |-------|-------------|-------------|
-| **Platform** | Management API hostname | TDX Quote, Platform Merkle Root (`1.1`), containerd Hash (`2.4`), Combined Images Hash (`2.5`), DEK Origin (`2.6`) |
+| **Platform** | Management API hostname | TDX Quote, Platform Merkle Root (`1.1`), Runtime Version Hash (`2.4`), Combined Workloads Hash (`2.5`), DEK Origin (`2.6`), Attestation Servers Hash (`2.7`) |
 | **Per-container** | Container hostname (via SNI) | TDX Quote, Container Merkle Root (`3.1`), Image Digest (`3.2`), Image Ref (`3.3`), Volume Encryption (`3.4`) |
 
 ---
@@ -479,7 +482,7 @@ on every container load/unload.
 | **Workload type** | WASM apps | OCI containers |
 | **Per-workload certs** | Per-app via SNI | Per-container via SNI |
 | **OID arc** | Same (`1.3.6.1.4.1.65230`) | Same (`1.3.6.1.4.1.65230`) |
-| **Module OIDs** | `2.1` Egress CA, `2.3` WASM apps hash | `2.4` containerd hash, `2.5` Combined images hash |
+| **Module OIDs** | `2.1` Egress CA, `2.5` Combined workloads, `2.7` Attestation servers | `2.4` Runtime version, `2.5` Combined workloads, `2.6` DEK origin, `2.7` Attestation servers |
 | **Challenge extension** | `0xFFBB` in ClientHello | `0xFFBB` in ClientHello |
 | **Mutual RA-TLS** | Full bidirectional (vault GetSecret) | Server-side (container verification) |
 | **ReportData formula** | Same: `SHA-512(SHA-256(pk) \|\| binding)` | Same: `SHA-512(SHA-256(pk) \|\| binding)` |

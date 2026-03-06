@@ -96,7 +96,7 @@ provided — the manager will refuse to start without them.
 | `--oidc-issuer` | — | **Required.** OIDC issuer URL (e.g. `https://auth.example.com`) |
 | `--machine-name` | — | Machine name for this instance (e.g. `prod1`); determines all RA-TLS hostnames |
 | `--hostname` | — | **Required.** Hostname suffix appended to the machine name (e.g. `example.com`) |
-| `--attestation-backend` | `tdx` | TEE backend: `tdx` or `sev-snp` |
+| `--attestation-servers` | — | Comma-separated list of attestation server URLs (e.g. `https://as1.example.com,https://as2.example.com`) |
 | `--containerd-socket` | `/run/containerd/containerd.sock` | containerd socket path |
 | `--caddy-listen` | `:443` | External HTTPS listen address for Caddy |
 | `--extensions-dir` | `/run/manager/extensions` | Per-hostname RA-TLS OID extension files |
@@ -139,7 +139,7 @@ HOSTNAME_SUFFIX=example.com
 ```ini
 EnvironmentFile=-/data/manager.env
 ExecStart=/usr/bin/manager serve \
-    --attestation-backend tdx \
+    --attestation-servers ${ATTESTATION_SERVERS} \
     --ca-cert ${CA_CERT:-/data/ca.crt} \
     --ca-key ${CA_KEY:-/data/ca.key} \
     --caddy-listen :443 \

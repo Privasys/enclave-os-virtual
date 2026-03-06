@@ -21,6 +21,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -32,6 +33,20 @@ import (
 )
 
 const version = "0.2.0"
+
+// stringSliceFlag implements flag.Value for comma-separated string lists.
+type stringSliceFlag []string
+
+func (s *stringSliceFlag) String() string { return strings.Join(*s, ",") }
+func (s *stringSliceFlag) Set(val string) error {
+	for _, v := range strings.Split(val, ",") {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			*s = append(*s, v)
+		}
+	}
+	return nil
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -84,8 +99,9 @@ func runServe(args []string) error {
 		"Path to the PEM-encoded CA certificate for platform attestation (required)")
 	caKeyPath := fs.String("ca-key", "",
 		"Path to the PEM-encoded intermediary CA private key for RA-TLS (required)")
-	attestationBackend := fs.String("attestation-backend", "tdx",
-		"TEE attestation backend: tdx or sev-snp (required)")
+	var attestationServers stringSliceFlag
+	fs.Var(&attestationServers, "attestation-servers",
+		"Comma-separated list of attestation server URLs for remote quote verification")
 	containerdSocket := fs.String("containerd-socket", "",
 		"containerd socket path (default: /run/containerd/containerd.sock)")
 
@@ -145,7 +161,7 @@ func runServe(args []string) error {
 
 	log.Info("starting manager",
 		zap.String("version", version),
-		zap.String("attestation_backend", *attestationBackend),
+		zap.Int("attestation_servers", len(attestationServers)),
 	)
 
 	// Build OIDC config.
@@ -187,7 +203,7 @@ func runServe(args []string) error {
 		ManagementPort:     "9443",
 		CACertPath:         *caCert,
 		CAKeyPath:          *caKeyPath,
-		AttestationBackend: *attestationBackend,
+		AttestationServers: []string(attestationServers),
 		DEKOriginFile:      *dekOriginFile,
 	}
 	l := launcher.New(launcherCfg, log)
