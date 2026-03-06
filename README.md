@@ -17,7 +17,7 @@ Part of the [Privasys](https://privasys.org) Confidential Computing platform, al
 │  │                                                  │   │
 │  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  │   │
 │  │  │ ra-tls-    │  │ Workload   │  │ Management │  │   │
-│  │  │ caddy      │  │ Launcher   │  │ Agent      │  │   │
+│  │  │ caddy      │  │ Launcher   │  │ Server     │  │   │
 │  │  │ (TLS +     │  │ (containerd│  │ (HTTP on   │  │   │
 │  │  │  reverse   │  │  lifecycle)│  │  localhost)│  │   │
 │  │  │  proxy)    │  │            │  │            │  │   │
@@ -106,7 +106,7 @@ See [dist/examples/manifest-example.yaml](dist/examples/manifest-example.yaml) f
 
 ## Data-at-Rest Encryption
 
-The data partition (`/data`) is always **LUKS2-encrypted**. The encryption key can be:
+The data partition (`/data`) is always **LUKS2-encrypted with authenticated encryption (AEAD)**, providing both confidentiality and per-sector integrity protection. The encryption key can be:
 
 | Mode | Source | How |
 |------|--------|-----|

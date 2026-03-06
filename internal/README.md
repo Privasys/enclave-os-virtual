@@ -4,8 +4,8 @@ Internal packages implementing the Enclave OS (Virtual) runtime.
 
 | Package | Description |
 |---------|-------------|
-| `agent` | Management API server (HTTPS, auth middleware, Prometheus metrics) |
-| `auth` | Two-phase authentication: operations cert JWT + OIDC bearer tokens |
+| `manager` | Management API server (HTTP on localhost, OIDC auth middleware, Prometheus metrics, TLS rotation) |
+| `auth` | OIDC-only bearer token verification, JWKS discovery, role checking |
 | `caddy` | Caddy admin API client for dynamic RA-TLS route management |
 | `container` | OCI container lifecycle via containerd (pull, create, health checks) |
 | `extensions` | Per-hostname OID extension file writer for ra-tls-caddy |

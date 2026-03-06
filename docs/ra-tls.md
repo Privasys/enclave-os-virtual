@@ -472,7 +472,7 @@ on every container load/unload.
 | **TEE** | Intel SGX enclave | Intel TDX / AMD SEV-SNP VM |
 | **TLS termination** | Enclave binary (rustls) | Caddy (ra-tls-caddy module) |
 | **Key generation** | Inside enclave, sealed to MRENCLAVE | Inside TEE, managed by certmagic |
-| **CA storage** | Sealed to disk via `sgx_tseal` | dm-verity protected root filesystem |
+| **CA storage** | Sealed to disk via `sgx_tseal` | LUKS2 + AEAD integrity on data partition (`/data/`) |
 | **Quote per-cert** | Yes (per-connection in challenge mode) | Yes (per-connection in challenge mode) |
 | **Workload type** | WASM apps | OCI containers |
 | **Per-workload certs** | Per-app via SNI | Per-container via SNI |
@@ -498,7 +498,7 @@ RA-TLS client that verifies certificates from either platform.
 | **Data encryption provenance** | OID 2.6 proves data-at-rest encryption and whether the key is operator-supplied or enclave-generated |
 | **Container identity** | Per-container OIDs prove the exact image digest, reference, and config |
 | **Freshness** | Challenge nonce or timestamp prevents replay of old certificates |
-| **CA isolation** | The CA private key is on the dm-verity protected root filesystem inside the TEE |
+| **CA isolation** | The CA private key is on the LUKS-encrypted data partition (AEAD integrity-protected) inside the TEE |
 | **Honest reporter** | The VM cannot suppress configuration state — Merkle roots change with every load/unload |
 | **Digest pinning** | Only images with matching `@sha256:` digests are loaded — no tag-based pulls |
 | **Runtime exclusion** | Vault tokens are excluded from attestation — runtime secrets don't change the attested identity |

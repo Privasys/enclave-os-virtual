@@ -86,6 +86,7 @@ else
         --cipher aes-xts-plain64 \
         --key-size 512 \
         --hash sha256 \
+        --integrity aead \
         --iter-time 2000 \
         --key-file=- \
         "$PART"

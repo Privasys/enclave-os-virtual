@@ -176,7 +176,7 @@ and `--hostname` are required.
 
 ## Data-at-rest encryption (LUKS)
 
-The data partition is LUKS2-encrypted at every boot. Key provisioning:
+The data partition is LUKS2-encrypted with authenticated encryption (AEAD) at every boot. The `--integrity aead` flag enables dm-integrity under LUKS, providing both confidentiality and per-sector integrity protection — any tampering with ciphertext is detected. Key provisioning:
 
 | Mode | Source | Mechanism |
 |------|--------|-----------|
@@ -187,7 +187,7 @@ The data partition is LUKS2-encrypted at every boot. Key provisioning:
 
 1. `luks-data.service` runs (Before `data.mount`)
 2. Reads passphrase from instance metadata or generates one
-3. First boot: `cryptsetup luksFormat` + `mkfs.ext4`; subsequent boots: `cryptsetup luksOpen`
+3. First boot: `cryptsetup luksFormat --integrity aead` + `mkfs.ext4`; subsequent boots: `cryptsetup luksOpen`
 4. Writes key origin (`"external"` or `"enclave-generated"`) to `/run/luks/dek-origin`
 5. `data.mount` mounts `/dev/mapper/data-crypt`
 6. `manager.service` reads `/run/luks/dek-origin` → publishes as OID `1.3.6.1.4.1.65230.2.6`

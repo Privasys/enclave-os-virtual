@@ -20,7 +20,7 @@ The production instance's boot disk contains four partitions:
 | 1 | `esp` | vfat | EFI System Partition |
 | 2 | `root` | erofs | Read-only root (dm-verity protected) |
 | 3 | `root-verity` | DM_verity_hash | Verity hash tree |
-| 4 | `data` | LUKS2 → ext4 | Encrypted application data |
+| 4 | `data` | LUKS2 (AEAD) → ext4 | Encrypted + integrity-protected application data |
 
 Only partition 4 contains user data. The procedure below attaches the disk to a
 standard (non-confidential) VM and unlocks the LUKS volume with your passphrase.
