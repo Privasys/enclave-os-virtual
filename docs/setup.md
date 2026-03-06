@@ -161,40 +161,68 @@ and `--hostname` are required.
 ## File layout (on image)
 
 ```
-/data/
-    ca.crt                  ← intermediary CA certificate (RA-TLS)
-    ca.key                  ← intermediary CA private key (RA-TLS)
-    manager.env             ← instance-specific configuration
+/data/                          ← OS data partition (2 GB, LUKS2+AEAD)
+    ca.crt                      ← intermediary CA certificate (RA-TLS)
+    ca.key                      ← intermediary CA private key (RA-TLS)
+    manager.env                 ← instance-specific configuration
 
-/run/manager/extensions/    ← RuntimeDirectory, created by launcher
-    <hostname>.json         ← per-hostname OID extensions for ra-tls-caddy
+/run/containers/<name>/         ← per-container encrypted volume (LVM + LUKS2+AEAD)
 
-/usr/bin/manager            ← static binary
-/usr/bin/caddy              ← Caddy with ra-tls-caddy module
-/usr/bin/luks-setup         ← LUKS data partition setup script
+/run/manager/extensions/        ← RuntimeDirectory, created by launcher
+    <hostname>.json             ← per-hostname OID extensions for ra-tls-caddy
+
+/usr/bin/manager                ← static binary
+/usr/bin/caddy                  ← Caddy with ra-tls-caddy module
+/usr/bin/luks-setup             ← LUKS data partition setup script
 ```
 
 ## Data-at-rest encryption (LUKS)
 
-The data partition is LUKS2-encrypted with authenticated encryption (AEAD) at every boot. The `--integrity aead` flag enables dm-integrity under LUKS, providing both confidentiality and per-sector integrity protection — any tampering with ciphertext is detected. Key provisioning:
+All data-at-rest is LUKS2-encrypted with authenticated encryption (AEAD). The `--integrity aead` flag enables dm-integrity under LUKS, providing both confidentiality and per-sector integrity protection — any tampering with ciphertext is detected.
+
+The disk has two encrypted regions:
+
+| Partition | Label | Size | Purpose |
+|-----------|-------|------|---------|
+| OS data | `data` | 2 GB fixed | Platform config: ca.crt, ca.key, manager.env |
+| Container volumes | `containers` | Remaining disk | LVM PV → per-container LVs, each LUKS2+AEAD |
+
+### OS data partition
 
 | Mode | Source | Mechanism |
 |------|--------|-----------|
 | **BYOK** | Operator passphrase | Passed via instance metadata (e.g. `luks-passphrase` attribute) |
 | **Auto-generated** | Random 256-bit | Generated at first boot if no external key is provided |
 
-### Boot sequence
+**Boot sequence:**
 
 1. `luks-data.service` runs (Before `data.mount`)
 2. Reads passphrase from instance metadata or generates one
 3. First boot: `cryptsetup luksFormat --integrity aead` + `mkfs.ext4`; subsequent boots: `cryptsetup luksOpen`
-4. Writes key origin (`"external"` or `"enclave-generated"`) to `/run/luks/dek-origin`
+4. Writes key origin (`"byok:<fingerprint>"` or `"generated"`) to `/run/luks/dek-origin`
 5. `data.mount` mounts `/dev/mapper/data-crypt`
 6. `manager.service` reads `/run/luks/dek-origin` → publishes as OID `1.3.6.1.4.1.65230.2.6`
 
+### Per-container encrypted volumes
+
+Each container receives an independent LVM logical volume on the `containers` partition, encrypted with its own LUKS2+AEAD key. Keys are never shared between containers and never stored on the OS data partition — held only in TEE-encrypted memory.
+
+| Key source | Mechanism |
+|------------|-----------|
+| **BYOK** | Per-container key provided in the `POST /api/v1/containers` request |
+| **Enclave Vaults** | Key fetched from the vault constellation via mutual RA-TLS |
+
+**Container load flow:**
+
+1. `lvcreate` allocates an LV on `vg-containers`
+2. `cryptsetup luksFormat --integrity aead` with per-container key
+3. `cryptsetup luksOpen` → `mkfs.ext4` → mount at `/run/containers/<name>`
+4. Volume bind-mounted into the container
+5. On unload: unmount → `luksClose` → `lvremove` (or keep for persistent data)
+
 ### Deploying with BYOK
 
-Pass the LUKS passphrase via your cloud provider's instance metadata mechanism. Example (GCP):
+Pass the OS data passphrase via your cloud provider's instance metadata mechanism. Example (GCP):
 
 ```bash
 gcloud compute instances create my-instance \
@@ -204,3 +232,11 @@ gcloud compute instances create my-instance \
 ```
 
 For Azure or AWS, set the `luks-passphrase` attribute in the equivalent metadata service.
+
+### Choosing the disk size
+
+The OS image (ESP + root + verity + OS data) uses ~4 GB. The container volumes partition fills remaining space, so usable container storage is roughly `disk_size - 4 GB`.
+
+**Set the disk size at instance creation time** — for example, `--create-disk=size=50` gives ~46 GB of per-container encrypted storage. The minimum disk size is 12 GB (8 GB container volumes minimum).
+
+> **Online resize is not supported.** LUKS with `--integrity aead` uses dm-integrity underneath, which cannot be grown in place. To increase storage, create a new instance with a larger disk and migrate the data.

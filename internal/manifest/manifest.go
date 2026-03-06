@@ -93,6 +93,12 @@ type Container struct {
 	// Internal marks this container as not externally accessible.
 	// It will not get an RA-TLS certificate or Caddy route.
 	Internal bool `yaml:"internal,omitempty"`
+
+	// Storage is the requested size for a per-container encrypted volume
+	// (e.g. "1G", "500M"). If non-empty the launcher provisions a
+	// LUKS2+AEAD LV and bind-mounts it into the container at /data.
+	// This field IS measured into the per-container Config Merkle Tree.
+	Storage string `yaml:"storage,omitempty"`
 }
 
 // HealthCheck defines a container health check.

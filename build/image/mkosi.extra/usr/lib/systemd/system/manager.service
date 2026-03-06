@@ -1,9 +1,9 @@
 [Unit]
 Description=Enclave OS (Virtual) — Workload Manager
 Documentation=https://github.com/Privasys/enclave-os-virtual
-After=containerd.service network-online.target data.mount luks-data.service
+After=containerd.service network-online.target data.mount luks-data.service container-volumes.service
 Requires=containerd.service
-Wants=network-online.target
+Wants=network-online.target container-volumes.service
 
 [Service]
 Type=simple

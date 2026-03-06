@@ -1,0 +1,49 @@
+#!/bin/bash
+# container-volumes-setup — initialise LVM on the containers partition.
+#
+# Run once by container-volumes.service AFTER local-fs.target.
+#
+# This script:
+#   1. Checks if the "containers" partition exists (by-partlabel).
+#   2. Creates an LVM Physical Volume (PV) if not already initialised.
+#   3. Creates the "containers" Volume Group (VG).
+#
+# Individual per-container Logical Volumes are created dynamically by the
+# manager when a container is loaded with storage={size}.
+set -euo pipefail
+
+PART="/dev/disk/by-partlabel/containers"
+VG="containers"
+
+# ── 1. Partition check ───────────────────────────────────────────────────
+
+if [ ! -b "$PART" ]; then
+    echo "container-volumes-setup: no 'containers' partition found — skipping"
+    echo "container-volumes-setup: per-container encrypted volumes are not available"
+    exit 0
+fi
+
+RESOLVED=$(readlink -f "$PART")
+echo "container-volumes-setup: found containers partition at $RESOLVED"
+
+# ── 2. Check if VG already exists ───────────────────────────────────────
+
+if vgs --noheadings -o vg_name "$VG" &>/dev/null; then
+    echo "container-volumes-setup: VG '$VG' already exists — nothing to do"
+    exit 0
+fi
+
+# ── 3. Create PV (idempotent — skipped if already a PV) ─────────────────
+
+if ! pvs --noheadings -o pv_name "$RESOLVED" &>/dev/null; then
+    echo "container-volumes-setup: creating PV on $RESOLVED"
+    pvcreate -f "$RESOLVED"
+fi
+
+# ── 4. Create VG ────────────────────────────────────────────────────────
+
+echo "container-volumes-setup: creating VG '$VG' on $RESOLVED"
+vgcreate "$VG" "$RESOLVED"
+
+echo "container-volumes-setup: VG '$VG' ready"
+vgs "$VG"

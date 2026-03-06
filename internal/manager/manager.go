@@ -325,6 +325,8 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 		zap.String("image", req.Image),
 		zap.Int("port", req.Port),
 		zap.Bool("vault_token", req.VaultToken != ""),
+		zap.String("storage", req.Storage),
+		zap.Bool("storage_key", req.StorageKey != ""),
 		zap.String("auth_source", result.Source),
 		zap.String("auth_subject", result.Subject),
 	)

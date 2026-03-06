@@ -168,7 +168,8 @@ that encode the VM's attestation data and configuration state.
 └── 3.*                               Per-container OIDs
     ├── 3.1                           Container Config Merkle Root
     ├── 3.2                           Container Image Digest
-    └── 3.3                           Container Image Ref
+    ├── 3.3                           Container Image Ref
+    └── 3.4                           Container Volume Encryption
 ```
 
 ### Platform-Wide OIDs
@@ -181,7 +182,7 @@ Present in the **management API certificate** (platform hostname).
 | `1.3.6.1.4.1.65230.1.1` | Platform Config Merkle Root | SHA-256 hash | 32 bytes |
 | `1.3.6.1.4.1.65230.2.4` | containerd Version Hash | SHA-256 of containerd version string | 32 bytes |
 | `1.3.6.1.4.1.65230.2.5` | Combined Container Images Hash | SHA-256 of all image digests | 32 bytes |
-| `1.3.6.1.4.1.65230.2.6` | Data Encryption Key Origin | `"external"` (BYOK) or `"enclave-generated"` | variable |
+| `1.3.6.1.4.1.65230.2.6` | Data Encryption Key Origin | `"byok:<fingerprint>"` or `"generated"` | variable |
 
 ### Per-Container OIDs
 
@@ -193,6 +194,7 @@ Present in **per-container certificates** (container hostname via SNI).
 | `1.3.6.1.4.1.65230.3.1` | Container Config Merkle Root | SHA-256 tree of container config | 32 bytes |
 | `1.3.6.1.4.1.65230.3.2` | Container Image Digest | SHA-256 of OCI image manifest | 32 bytes |
 | `1.3.6.1.4.1.65230.3.3` | Container Image Ref | Full image reference string | variable |
+| `1.3.6.1.4.1.65230.3.4` | Container Volume Encryption | `"byok:<fingerprint>"` or `"generated"` — omitted when no volume | variable |
 
 ---
 
@@ -281,7 +283,7 @@ Clients can choose their verification depth:
 | **TDX measurement only** | Hardware quote → platform matches known value | VM image is correct, but containers unknown |
 | **Measurement + Merkle root** | + OID `1.3.6.1.4.1.65230.1.1` | VM image and full container set verified |
 | **Fast-path module OIDs** | + OIDs `2.4`, `2.5`, `2.6` | Verify runtime version, container set, and encryption provenance without Merkle audit |
-| **Per-container verification** | + OIDs `3.1`, `3.2`, `3.3` (via SNI) | Verify a specific container's image and configuration |
+| **Per-container verification** | + OIDs `3.1`, `3.2`, `3.3`, `3.4` (via SNI) | Verify a specific container's image, configuration, and volume encryption |
 | **Full Merkle audit** | Request manifest, recompute root | Complete transparency of all inputs |
 
 ---
@@ -385,7 +387,7 @@ When unloading:
 | Scope | Certificate | OIDs present |
 |-------|-------------|-------------|
 | **Platform** | Management API hostname | TDX Quote, Platform Merkle Root (`1.1`), containerd Hash (`2.4`), Combined Images Hash (`2.5`), DEK Origin (`2.6`) |
-| **Per-container** | Container hostname (via SNI) | TDX Quote, Container Merkle Root (`3.1`), Image Digest (`3.2`), Image Ref (`3.3`) |
+| **Per-container** | Container hostname (via SNI) | TDX Quote, Container Merkle Root (`3.1`), Image Digest (`3.2`), Image Ref (`3.3`), Volume Encryption (`3.4`) |
 
 ---
 
@@ -495,7 +497,7 @@ RA-TLS client that verifies certificates from either platform.
 | **Key binding** | The TLS public key is cryptographically bound to the TDX/SGX quote via ReportData |
 | **Platform identity** | TDX measurement proves the VM image, firmware, and boot chain |
 | **Config identity** | Platform Merkle root proves all loaded containers and their configurations |
-| **Data encryption provenance** | OID 2.6 proves data-at-rest encryption and whether the key is operator-supplied or enclave-generated |
+| **Data encryption provenance** | OID 2.6 proves data-at-rest encryption and whether the key is operator-supplied (BYOK) or generated |
 | **Container identity** | Per-container OIDs prove the exact image digest, reference, and config |
 | **Freshness** | Challenge nonce or timestamp prevents replay of old certificates |
 | **CA isolation** | The CA private key is on the LUKS-encrypted data partition (AEAD integrity-protected) inside the TEE |

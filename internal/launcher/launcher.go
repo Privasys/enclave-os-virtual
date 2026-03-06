@@ -41,6 +41,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/manifest"
 	"github.com/Privasys/enclave-os-virtual/internal/merkle"
 	"github.com/Privasys/enclave-os-virtual/internal/oids"
+	"github.com/Privasys/enclave-os-virtual/internal/volume"
 
 	"github.com/containerd/containerd/v2/client"
 )
@@ -134,6 +135,22 @@ type LoadRequest struct {
 	// excluded from the per-container Config Merkle Tree. Changing
 	// the vault token does not change the attested container identity.
 	VaultToken string `json:"vault_token,omitempty"`
+
+	// Storage is the requested size for a per-container encrypted volume
+	// (e.g. "1G", "500M"). If non-empty a LUKS2+AEAD logical volume of
+	// this size is created on the "containers" VG and bind-mounted into
+	// the container at /data.
+	//
+	// This field IS measured into the per-container Merkle tree — changing
+	// the storage size changes the attested container identity.
+	Storage string `json:"storage,omitempty"`
+
+	// StorageKey is the LUKS passphrase for the per-container volume.
+	// If empty, a random 256-bit key is generated inside the enclave.
+	//
+	// IMPORTANT: This is a runtime secret and is deliberately excluded
+	// from the per-container Config Merkle Tree.
+	StorageKey string `json:"storage_key,omitempty"`
 }
 
 // Validate checks the load request for required fields.
@@ -166,6 +183,7 @@ func (r *LoadRequest) toContainerSpec() manifest.Container {
 		Command:     r.Command,
 		Internal:    r.Internal,
 		HealthCheck: r.HealthCheck,
+		Storage:     r.Storage,
 	}
 }
 
@@ -189,6 +207,10 @@ type Launcher struct {
 	// Caddy integration is disabled (no ExtensionsDir configured).
 	caddyClient *caddy.Client
 
+	// volMgr manages per-container encrypted volumes (LVM + LUKS2).
+	// Nil when the "containers" VG is not available.
+	volMgr *volume.Manager
+
 	// Computed attestation data - recomputed on every load/unload.
 	platformTree    *merkle.Tree
 	containerTrees  map[string]*merkle.Tree
@@ -196,9 +218,13 @@ type Launcher struct {
 	containerdHash  []byte
 	combinedImgHash [32]byte
 
-	// dekOrigin is the data-encryption key origin string ("external" or
-	// "enclave-generated").  Empty when the data partition is not encrypted.
+	// dekOrigin is the data-encryption key origin string ("byok:<fingerprint>"
+	// or "generated").  Empty when the data partition is not encrypted.
 	dekOrigin string
+
+	// volumeEncryption tracks per-container volume encryption status.
+	// Values: "byok:<fingerprint>" or "generated".  Absent when no volume.
+	volumeEncryption map[string]string
 
 	// Loaded container specs (mirrors what is running).
 	specs map[string]manifest.Container
@@ -212,12 +238,22 @@ type Launcher struct {
 // New creates a new Launcher with the given config.
 func New(cfg Config, log *zap.Logger) *Launcher {
 	l := &Launcher{
-		cfg:            cfg,
-		log:            log.Named("launcher"),
-		containerTrees: make(map[string]*merkle.Tree),
-		imageDigests:   make(map[string][]byte),
-		pulledImages:   make(map[string]client.Image),
-		specs:          make(map[string]manifest.Container),
+		cfg:              cfg,
+		log:              log.Named("launcher"),
+		containerTrees:   make(map[string]*merkle.Tree),
+		imageDigests:     make(map[string][]byte),
+		pulledImages:     make(map[string]client.Image),
+		specs:            make(map[string]manifest.Container),
+		volumeEncryption: make(map[string]string),
+	}
+
+	// Initialise per-container volume manager.
+	vm := volume.NewManager(log)
+	if vm.IsVGReady() {
+		l.volMgr = vm
+		l.log.Info("per-container encrypted volumes enabled (VG 'containers' found)")
+	} else {
+		l.log.Info("per-container encrypted volumes disabled (no VG 'containers')")
 	}
 
 	// Initialise Caddy client when extensions_dir is configured.
@@ -261,8 +297,8 @@ func (l *Launcher) Run(ctx context.Context) error {
 	if l.cfg.DEKOriginFile != "" {
 		if raw, err := os.ReadFile(l.cfg.DEKOriginFile); err == nil {
 			origin := strings.TrimSpace(string(raw))
-			switch origin {
-			case "external", "enclave-generated":
+			switch {
+			case origin == "generated", strings.HasPrefix(origin, "byok:"):
 				l.dekOrigin = origin
 				l.log.Info("LUKS DEK origin loaded (OID 2.6)",
 					zap.String("dek_origin", origin))
@@ -425,6 +461,21 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		zap.String("digest", hex.EncodeToString(digest)),
 	)
 
+	// Provision per-container encrypted volume if requested.
+	var volEncryption string
+	if req.Storage != "" {
+		if l.volMgr == nil {
+			return nil, fmt.Errorf("launcher: encrypted storage requested but no 'containers' VG available")
+		}
+		vi, err := l.volMgr.Create(req.Name, req.Storage, req.StorageKey)
+		if err != nil {
+			return nil, fmt.Errorf("launcher: failed to create encrypted volume: %w", err)
+		}
+		volEncryption = vi.KeyOrigin
+		// Auto-inject the volume mount: /run/containers/<name>:/data
+		spec.Volumes = append(spec.Volumes, vi.MountPath+":/data")
+	}
+
 	// Start container. Inject runtime env vars (vault token etc.) into a
 	// copy of the spec — these are NOT stored in l.specs and therefore NOT
 	// included in the attestation Merkle tree.
@@ -447,6 +498,10 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	}
 	mc, err := l.mgr.Create(ctx, runtimeSpec, img)
 	if err != nil {
+		// Clean up volume if container creation fails.
+		if req.Storage != "" && l.volMgr != nil {
+			_ = l.volMgr.Remove(req.Name)
+		}
 		return nil, err
 	}
 	mc.ImageDigest = digest
@@ -458,6 +513,9 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	l.specs[req.Name] = spec
 	l.pulledImages[req.Name] = img
 	l.imageDigests[req.Name] = digest
+	if volEncryption != "" {
+		l.volumeEncryption[req.Name] = volEncryption
+	}
 
 	// Recompute attestation.
 	l.recomputeAttestation()
@@ -512,11 +570,20 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 		return err
 	}
 
+	// Tear down per-container encrypted volume if one was provisioned.
+	if l.volumeEncryption[name] != "" && l.volMgr != nil {
+		if err := l.volMgr.Remove(name); err != nil {
+			l.log.Warn("failed to remove encrypted volume (data may leak)",
+				zap.String("container", name), zap.Error(err))
+		}
+	}
+
 	// Clean up state.
 	delete(l.specs, name)
 	delete(l.pulledImages, name)
 	delete(l.imageDigests, name)
 	delete(l.containerTrees, name)
+	delete(l.volumeEncryption, name)
 
 	// Recompute attestation.
 	l.recomputeAttestation()
@@ -642,8 +709,9 @@ func (l *Launcher) ContainerExtensions(containerName string) ([]pkix.Extension, 
 
 	root := tree.Root()
 	digest := l.imageDigests[containerName]
+	volEnc := l.volumeEncryption[containerName]
 
-	return oids.ContainerExtensions(root, digest, spec.Image), nil
+	return oids.ContainerExtensions(root, digest, spec.Image, volEnc), nil
 }
 
 // StatusReport returns a summary of all containers and their health.
@@ -724,9 +792,10 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string) erro
 
 	root := tree.Root()
 	digest := l.imageDigests[containerName]
+	volEnc := l.volumeEncryption[containerName]
 
 	// Build the extensions list (without the quote — ra-tls-caddy adds that).
-	exts := oids.ContainerExtensions(root, digest, spec.Image)
+	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc)
 
 	return extensions.Write(l.cfg.ExtensionsDir, hostname, exts)
 }

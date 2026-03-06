@@ -12,7 +12,7 @@
 # On subsequent boots the existing LUKS volume is unlocked.
 #
 # Outputs:
-#   /run/luks/dek-origin   key origin string for OID 2.6: "external" (BYOK) or "enclave-generated"
+#   /run/luks/dek-origin   key origin string for OID 2.6: "byok:<fingerprint>" or "generated"
 #   /run/luks/key-source   "byok" or "generated" (legacy)
 #   /dev/mapper/data-crypt the unlocked block device
 set -euo pipefail
@@ -65,9 +65,10 @@ echo "$KEY_SOURCE" > "$KEY_SOURCE_FILE"
 # ── 2. Persist DEK origin (for OID 2.6) ─────────────────────────────────
 
 if [ "$KEY_SOURCE" = "byok" ]; then
-    DEK_ORIGIN="external"
+    FINGERPRINT=$(printf '%s' "$PASSPHRASE" | sha256sum | awk '{print $1}')
+    DEK_ORIGIN="byok:${FINGERPRINT}"
 else
-    DEK_ORIGIN="enclave-generated"
+    DEK_ORIGIN="generated"
 fi
 echo "$DEK_ORIGIN" > "$ORIGIN_FILE"
 chmod 644 "$ORIGIN_FILE"

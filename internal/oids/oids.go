@@ -59,8 +59,9 @@ var CombinedContainerImagesHash = append(append(asn1.ObjectIdentifier{}, privasy
 // DataEncryptionKeyOrigin describes how the LUKS data-encryption key was
 // provisioned.  The value is a UTF-8 string:
 //
-//   - "external"          — operator-supplied via BYOK (GCP instance metadata)
-//   - "enclave-generated" — randomly generated inside the enclave at first boot
+//   - "byok:<fingerprint>" — operator-supplied via BYOK (GCP instance metadata);
+//     <fingerprint> is the hex SHA-256 of the passphrase bytes
+//   - "generated"         — randomly generated inside the enclave at first boot
 //
 // Its presence in the certificate proves data-at-rest is encrypted; the value
 // tells the verifier whether the key is externally managed or ephemeral.
@@ -79,6 +80,19 @@ var ContainerImageDigest = append(append(asn1.ObjectIdentifier{}, privasysArc...
 // ContainerImageRef is the full image reference string (e.g.
 // "ghcr.io/example/myapp@sha256:abc123...") for a specific container.
 var ContainerImageRef = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 3)
+
+// ContainerVolumeEncryption indicates whether a per-container encrypted
+// volume is provisioned and how the volume key was obtained.  The value
+// is a UTF-8 string:
+//
+//   - "byok:<fingerprint>" — volume key supplied via the API;
+//     <fingerprint> is the hex SHA-256 of the raw key bytes
+//   - "generated"          — volume key randomly generated inside the enclave
+//
+// The OID is omitted entirely when no encrypted volume is attached.
+// Its presence proves the container's persistent data is individually
+// encrypted with its own LUKS2+AEAD key.
+var ContainerVolumeEncryption = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 4)
 
 // --- Extension builders --------------------------------------------------
 
@@ -110,11 +124,15 @@ func PlatformExtensions(quote []byte, quoteOID asn1.ObjectIdentifier, merkleRoot
 }
 
 // ContainerExtensions returns the set of X.509 extensions for a per-container
-// RA-TLS leaf certificate.
-func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef string) []pkix.Extension {
-	return []pkix.Extension{
+// RA-TLS leaf certificate.  volumeEncryption may be empty to omit the OID.
+func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef string, volumeEncryption string) []pkix.Extension {
+	exts := []pkix.Extension{
 		Extension(ContainerConfigMerkleRoot, configMerkleRoot[:]),
 		Extension(ContainerImageDigest, imageDigest),
 		Extension(ContainerImageRef, []byte(imageRef)),
 	}
+	if volumeEncryption != "" {
+		exts = append(exts, Extension(ContainerVolumeEncryption, []byte(volumeEncryption)))
+	}
+	return exts
 }

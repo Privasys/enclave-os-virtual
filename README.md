@@ -9,34 +9,34 @@ Part of the [Privasys](https://privasys.org) Confidential Computing platform, al
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Intel TDX / AMD SEV-SNP Confidential VM                │
-│                                                         │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │  Enclave OS (Virtual)                            │   │
-│  │                                                  │   │
-│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  │   │
-│  │  │ ra-tls-    │  │ Workload   │  │ Management │  │   │
-│  │  │ caddy      │  │ Launcher   │  │ Server     │  │   │
-│  │  │ (TLS +     │  │ (containerd│  │ (HTTP on   │  │   │
-│  │  │  reverse   │  │  lifecycle)│  │  localhost)│  │   │
-│  │  │  proxy)    │  │            │  │            │  │   │
-│  │  └─────┬──────┘  └─────┬──────┘  └────────────┘  │   │
-│  │        │               │                         │   │
-│  │        │    ┌──────────┴──────────┐              │   │
-│  │        │    │     containerd      │              │   │
-│  │        │    └──────────┬──────────┘              │   │
-│  │        │    ┌──────────┴──────────┐              │   │
-│  │        └────┤  OCI Containers     │              │   │
-│  │             │  ┌─────┐  ┌──────┐  │              │   │
-│  │             │  │App  │  │ DB   │  │              │   │
-│  │             │  │     │  │      │  │              │   │
-│  │             │  └─────┘  └──────┘  │              │   │
-│  │             └─────────────────────┘              │   │
-│  └──────────────────────────────────────────────────┘   │
-│                                                         │
-│    dm-verity root │ UKI Secure Boot │ measured /etc/    │
-└─────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│  Intel TDX / AMD SEV-SNP Confidential VM               │
+│                                                        │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │  Enclave OS (Virtual)                            │  │
+│  │                                                  │  │
+│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  │  │
+│  │  │ ra-tls-    │  │ Workload   │  │ Management │  │  │
+│  │  │ caddy      │  │ Launcher   │  │ Server     │  │  │
+│  │  │ (TLS +     │  │ (containerd│  │ (HTTP on   │  │  │
+│  │  │  reverse   │  │  lifecycle)│  │  localhost)│  │  │
+│  │  │  proxy)    │  │            │  │            │  │  │
+│  │  └─────┬──────┘  └─────┬──────┘  └────────────┘  │  │
+│  │        │               │                         │  │
+│  │        │    ┌──────────┴──────────┐              │  │
+│  │        │    │     containerd      │              │  │
+│  │        │    └──────────┬──────────┘              │  │
+│  │        │    ┌──────────┴──────────┐              │  │
+│  │        └────┤  OCI Containers     │              │  │
+│  │             │  ┌─────┐  ┌──────┐  │              │  │
+│  │             │  │App  │  │ DB   │  │              │  │
+│  │             │  │     │  │      │  │              │  │
+│  │             │  └─────┘  └──────┘  │              │  │
+│  │             └─────────────────────┘              │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                        │
+│   dm-verity root │ UKI Secure Boot │ measured /etc/    │
+└────────────────────────────────────────────────────────┘
 ```
 
 ## How it works
@@ -66,10 +66,11 @@ All Privasys OIDs live under the arc `1.3.6.1.4.1.65230`:
 | `1.3.6.1.4.1.65230.1.1` | Platform Config Merkle Root | SHA-256 root of the platform config tree |
 | `1.3.6.1.4.1.65230.2.4` | containerd Version Hash | SHA-256 of the containerd version string |
 | `1.3.6.1.4.1.65230.2.5` | Combined Images Hash | SHA-256 covering all container image digests |
-| `1.3.6.1.4.1.65230.2.6` | Data Encryption Key Origin | `"external"` (BYOK) or `"enclave-generated"` — proves data-at-rest encryption and key provenance |
+| `1.3.6.1.4.1.65230.2.6` | Data Encryption Key Origin | `"byok:<fingerprint>"` or `"generated"` — proves data-at-rest encryption and key provenance |
 | `1.3.6.1.4.1.65230.3.1` | Container Config Merkle Root | SHA-256 root of a per-container config tree |
 | `1.3.6.1.4.1.65230.3.2` | Container Image Digest | Raw SHA-256 digest of the OCI image |
 | `1.3.6.1.4.1.65230.3.3` | Container Image Ref | Full OCI image reference string |
+| `1.3.6.1.4.1.65230.3.4` | Container Volume Encryption | `"byok:<fingerprint>"` or `"generated"` — present only when encrypted volume is attached |
 
 ## Workload Manifest
 
@@ -106,20 +107,31 @@ See [dist/examples/manifest-example.yaml](dist/examples/manifest-example.yaml) f
 
 ## Data-at-Rest Encryption
 
-The data partition (`/data`) is always **LUKS2-encrypted with authenticated encryption (AEAD)**, providing both confidentiality and per-sector integrity protection. The encryption key can be:
+The disk has two encrypted regions:
 
-| Mode | Source | How |
-|------|--------|-----|
-| **BYOK** | Operator-supplied passphrase | Passed via cloud instance metadata or configuration |
-| **Auto-generated** | Random 256-bit key | Generated at first boot when no external key is provided |
+| Partition | Size | Purpose | Encryption |
+|-----------|------|---------|------------|
+| **OS data** (`/data`) | 2 GB | CA cert+key, manager.env | LUKS2+AEAD, single key (BYOK or auto-generated) |
+| **Container volumes** | Remaining disk | Per-container writable storage | LUKS2+AEAD per LVM volume, independent key per container |
+
+### OS data partition
 
 At boot, `luks-data.service` runs before `data.mount`:
 1. Reads the passphrase from instance metadata (BYOK) or generates one
-2. Formats the partition with LUKS2 on first boot, or opens an existing volume
-3. Writes the key origin (`"external"` or `"enclave-generated"`) to `/run/luks/dek-origin`
+2. Formats the partition with LUKS2+AEAD on first boot, or opens an existing volume
+3. Writes the key origin (`"byok:<fingerprint>"` or `"generated"`) to `/run/luks/dek-origin`
 4. The manager reads the origin and publishes it as **OID 2.6** in every RA-TLS certificate
 
-Clients can verify data-at-rest encryption status and key provenance in the TLS handshake.
+### Per-container encrypted volumes
+
+Each container receives an independent **LVM logical volume** with its own LUKS2+AEAD encryption key. Keys are never shared between containers and never stored on the OS data partition — they are held only in TEE-encrypted memory at runtime.
+
+| Key source | Mechanism |
+|------------|----------|
+| **BYOK** | Per-container key provided in the `POST /api/v1/containers` request |
+| **Enclave Vaults** | Key fetched from the vault constellation via mutual RA-TLS |
+
+The container volumes partition fills all remaining disk space. Choose your disk size at instance creation time (e.g. `--create-disk=size=50` for ~46 GB of container storage). Online resize is not supported because `--integrity aead` (dm-integrity) cannot be grown in place.
 
 ## Building
 

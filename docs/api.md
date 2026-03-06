@@ -111,6 +111,7 @@ a permitted entry.
   "volumes": ["/data/myapp:/data"],
   "command": ["serve"],
   "internal": false,
+  "storage": "2G",
   "health_check": {
     "http": "http://127.0.0.1:8080/healthz",
     "interval_seconds": 10,
@@ -131,6 +132,8 @@ a permitted entry.
 | `internal` | bool | no | If true, not externally accessible |
 | `health_check` | object | no | Health check (see below) |
 | `vault_token` | string | no | Injected as `VAULT_TOKEN` env var (runtime secret, excluded from attestation) |
+| `storage` | string | no | Per-container encrypted volume size (e.g. `"1G"`, `"500M"`). Creates a LUKS2+AEAD LV, mounted at `/data` inside the container. Measured into attestation. |
+| `storage_key` | string | no | LUKS passphrase for the per-container volume. If omitted, a random 256-bit key is generated inside the enclave (runtime secret, excluded from attestation). |
 
 **Hostname derivation** — External hostnames are derived automatically from
 the instance's `--machine-name` and `--hostname` flags:

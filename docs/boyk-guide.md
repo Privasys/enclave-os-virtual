@@ -19,7 +19,7 @@ openssl rand -base64 32
 
 ## Create the production instance
 
-Pass the passphrase via the `luks-passphrase` metadata attribute. The luks-setup script reads it from the GCP metadata server at boot and uses it to format (first boot) or unlock (subsequent boots) the LUKS2 volume. The OID 2.6 `DataEncryptionKeyOrigin` will report `external`.
+Pass the passphrase via the `luks-passphrase` metadata attribute. The luks-setup script reads it from the GCP metadata server at boot and uses it to format (first boot) or unlock (subsequent boots) the LUKS2 volume. The OID 2.6 `DataEncryptionKeyOrigin` will report `byok:<fingerprint>` where the fingerprint is the hex SHA-256 of your passphrase.
 
 ```bash
 gcloud compute instances create enclave-os-production \
@@ -45,7 +45,9 @@ Replace `YOUR_PASSPHRASE_HERE` with the value you generated above.
 2. Script fetches `luks-passphrase` from GCP metadata → sets `KEY_SOURCE=byok`
 3. Detects `/dev/disk/by-partlabel/data` is NOT yet LUKS → runs `cryptsetup luksFormat --type luks2 --integrity aead`
 4. Opens the volume → creates ext4 on `/dev/mapper/data-crypt`
-5. Writes `external` to `/run/luks/dek-origin` → OID 2.6 reports `external` in the RA-TLS certificate
+5. Writes `byok:<fingerprint>` to `/run/luks/dek-origin` → OID 2.6 reports `byok:<fingerprint>` in the RA-TLS certificate
+
+Note: The BYOK passphrase protects the OS data partition only (ca.crt, ca.key, manager.env). Container volumes use separate per-container encryption keys — see [setup.md](setup.md#per-container-encrypted-volumes).
 
 ## On reboots
 

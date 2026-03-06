@@ -13,17 +13,17 @@ available in memory while the instance is running).
 
 ## Scenario: Export and mount on a recovery VM
 
-The production instance's boot disk contains four partitions:
+The production instance's boot disk contains five partitions:
 
 | # | Label | Filesystem | Purpose |
-|---|-------|-----------|---------|
+|---|-------|-----------|--------|
 | 1 | `esp` | vfat | EFI System Partition |
 | 2 | `root` | erofs | Read-only root (dm-verity protected) |
 | 3 | `root-verity` | DM_verity_hash | Verity hash tree |
-| 4 | `data` | LUKS2 (AEAD) → ext4 | Encrypted + integrity-protected application data |
+| 4 | `data` | LUKS2 (AEAD) → ext4 | Encrypted OS config (ca.crt, ca.key, manager.env) |
+| 5 | `containers` | LVM PV → per-container LUKS2 (AEAD) → ext4 | Per-container encrypted volumes |
 
-Only partition 4 contains user data. The procedure below attaches the disk to a
-standard (non-confidential) VM and unlocks the LUKS volume with your passphrase.
+Partition 4 contains platform configuration. Partition 5 contains per-container data, each LV encrypted with a separate key. The procedure below attaches the disk to a standard (non-confidential) VM and unlocks volumes with your passphrase(s).
 
 ### 1. Stop the production instance (or snapshot its disk)
 
