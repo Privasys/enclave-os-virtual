@@ -1,24 +1,17 @@
-// Package auth implements the two-phase authentication model for the
-// Enclave OS Virtual management API.
+// Package auth implements OIDC-based authentication for the
+// Enclave OS (Virtual) management API.
 //
-// # Operations Certificate JWT (always accepted)
+// # OIDC Bearer Tokens
 //
-// The operator presents a JWT (compact JWS) signed with ES256 by the
-// Privasys management key. This is a permanent break-glass credential
-// that works regardless of whether an OIDC provider is running.
-//
-// # OIDC Bearer Tokens (when configured)
-//
-// When --oidc-issuer is set, the manager also accepts standard OIDC
-// bearer tokens validated via JWKS discovery. OIDC tokens must carry
-// either the manager role (enclave-os-virtual:manager) for mutating
-// operations, or the monitoring role (enclave-os-virtual:monitoring)
-// for read-only access (healthz, readyz, status, metrics).
+// The manager accepts standard OIDC bearer tokens validated via JWKS
+// discovery. Tokens must carry either the manager role
+// (enclave-os-virtual:manager) for mutating operations, or the
+// monitoring role (enclave-os-virtual:monitoring) for read-only access
+// (healthz, readyz, status, metrics).
 //
 // # Policy: containers claim
 //
-// Both token types can carry a "containers" claim listing permitted
-// image digests:
+// Tokens can carry a "containers" claim listing permitted image digests:
 //
 //	{
 //	 "containers": [
@@ -40,16 +33,13 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/sha512"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -67,25 +57,24 @@ type ContainerPermission struct {
 // AuthResult is returned by successful authentication, carrying the
 // parsed claims relevant for authorization.
 type AuthResult struct {
-	// Source is "operations-jwt" or "oidc".
+	// Source is always "oidc".
 	Source string
 
-	// Role is the matched role: "manager", "monitoring", or "" (operations
-	// JWT gets implicit manager-level access).
+	// Role is the matched role: "manager" or "monitoring".
 	Role string
 
 	// Containers is the list of permitted containers from the token.
 	// If nil, all containers are permitted (implicit trust).
 	Containers []ContainerPermission
 
-	// Subject is the authenticated identity.
+	// Subject is the authenticated identity (OIDC "sub" claim).
 	Subject string
 }
 
 // HasManagerAccess returns true if the result has manager-level
-// (mutating) access — either via operations JWT or OIDC manager role.
+// (mutating) access.
 func (r *AuthResult) HasManagerAccess() bool {
-	return r.Source == "operations-jwt" || r.Role == "manager"
+	return r.Role == "manager"
 }
 
 // HasMonitoringAccess returns true if the result has at least
@@ -126,7 +115,7 @@ func (r *AuthResult) IsUnloadPermitted(name string) bool {
 
 // OIDCConfig holds OIDC verification configuration.
 type OIDCConfig struct {
-	// Issuer is the OIDC issuer URL (e.g. https://auth.privasys.org).
+	// Issuer is the OIDC issuer URL (e.g. https://auth.example.com).
 	Issuer string
 
 	// Audience is the expected "aud" claim (e.g. "enclave-os-virtual").
@@ -145,174 +134,52 @@ type OIDCConfig struct {
 	RoleClaim string
 }
 
-// Verifier validates management API requests using operations cert JWT
-// and/or OIDC tokens.
+// Verifier validates management API requests using OIDC tokens.
 type Verifier struct {
-	mgmtCert   *x509.Certificate
-	mgmtPubKey *ecdsa.PublicKey
-	oidc       *OIDCConfig
-	jwks       *jwksCache
-	jwksMu     sync.RWMutex
-	log        *zap.Logger
+	oidc   *OIDCConfig
+	jwks   *jwksCache
+	jwksMu sync.RWMutex
+	log    *zap.Logger
 }
 
-// NewVerifier loads the management certificate and returns a Verifier.
-// If oidcCfg is non-nil, OIDC token verification is also enabled.
-func NewVerifier(certPath string, oidcCfg *OIDCConfig, log *zap.Logger) (*Verifier, error) {
-	data, err := os.ReadFile(certPath)
-	if err != nil {
-		return nil, fmt.Errorf("auth: failed to read management cert %q: %w", certPath, err)
+// NewVerifier creates a Verifier for OIDC token verification.
+func NewVerifier(oidcCfg *OIDCConfig, log *zap.Logger) (*Verifier, error) {
+	if oidcCfg == nil {
+		return nil, errors.New("auth: OIDC configuration is required")
+	}
+	if oidcCfg.Issuer == "" {
+		return nil, errors.New("auth: OIDC issuer is required")
 	}
 
-	block, _ := pem.Decode(data)
-	if block == nil {
-		return nil, fmt.Errorf("auth: no PEM block found in %q", certPath)
+	if oidcCfg.RoleClaim == "" {
+		oidcCfg.RoleClaim = "urn:zitadel:iam:org:project:roles"
 	}
-
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("auth: failed to parse certificate: %w", err)
+	if oidcCfg.ManagerRole == "" {
+		oidcCfg.ManagerRole = "enclave-os-virtual:manager"
 	}
-
-	pub, ok := cert.PublicKey.(*ecdsa.PublicKey)
-	if !ok {
-		return nil, fmt.Errorf("auth: management cert is not ECDSA (got %T)", cert.PublicKey)
+	if oidcCfg.MonitoringRole == "" {
+		oidcCfg.MonitoringRole = "enclave-os-virtual:monitoring"
 	}
 
 	v := &Verifier{
-		mgmtCert:   cert,
-		mgmtPubKey: pub,
-		oidc:       oidcCfg,
-		log:        log.Named("auth"),
+		oidc: oidcCfg,
+		log:  log.Named("auth"),
 	}
 
-	log.Info("management certificate loaded",
-		zap.String("subject", cert.Subject.CommonName),
-		zap.String("issuer", cert.Issuer.CommonName),
-		zap.Time("not_after", cert.NotAfter),
-		zap.String("fingerprint", v.CertFingerprint()),
+	log.Info("OIDC authentication configured",
+		zap.String("issuer", oidcCfg.Issuer),
+		zap.String("audience", oidcCfg.Audience),
+		zap.String("manager_role", oidcCfg.ManagerRole),
+		zap.String("monitoring_role", oidcCfg.MonitoringRole),
+		zap.String("role_claim", oidcCfg.RoleClaim),
 	)
-
-	if oidcCfg != nil {
-		if oidcCfg.RoleClaim == "" {
-			oidcCfg.RoleClaim = "urn:zitadel:iam:org:project:roles"
-		}
-		if oidcCfg.ManagerRole == "" {
-			oidcCfg.ManagerRole = "enclave-os-virtual:manager"
-		}
-		if oidcCfg.MonitoringRole == "" {
-			oidcCfg.MonitoringRole = "enclave-os-virtual:monitoring"
-		}
-		log.Info("OIDC verification configured",
-			zap.String("issuer", oidcCfg.Issuer),
-			zap.String("audience", oidcCfg.Audience),
-			zap.String("manager_role", oidcCfg.ManagerRole),
-			zap.String("monitoring_role", oidcCfg.MonitoringRole),
-			zap.String("role_claim", oidcCfg.RoleClaim),
-		)
-	}
 
 	return v, nil
 }
 
-// Authenticate attempts to verify a bearer token. It tries the
-// operations cert JWT first, then OIDC if configured.
+// Authenticate verifies an OIDC bearer token.
 func (v *Verifier) Authenticate(tokenStr string) (*AuthResult, error) {
-	// 1. Try operations cert JWT (always available).
-	if result, err := v.verifyOperationsJWT(tokenStr); err == nil {
-		return result, nil
-	}
-
-	// 2. Try OIDC if configured.
-	if v.oidc != nil {
-		if result, err := v.verifyOIDCToken(tokenStr); err == nil {
-			return result, nil
-		}
-	}
-
-	return nil, errors.New("auth: token verification failed (tried operations JWT and OIDC)")
-}
-
-// VerifyBootstrapJWT is a convenience wrapper for backward compatibility.
-// It returns nil on success, error on failure.
-func (v *Verifier) VerifyBootstrapJWT(tokenStr string) error {
-	_, err := v.verifyOperationsJWT(tokenStr)
-	return err
-}
-
-// verifyOperationsJWT validates a compact JWS (ES256) token against
-// the management certificate's public key.
-func (v *Verifier) verifyOperationsJWT(tokenStr string) (*AuthResult, error) {
-	parts := strings.SplitN(tokenStr, ".", 3)
-	if len(parts) != 3 {
-		return nil, errors.New("auth: malformed JWT (expected 3 parts)")
-	}
-
-	// Decode header.
-	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
-	if err != nil {
-		return nil, fmt.Errorf("auth: failed to decode JWT header: %w", err)
-	}
-	var header struct {
-		Alg string `json:"alg"`
-	}
-	if err := json.Unmarshal(headerJSON, &header); err != nil {
-		return nil, fmt.Errorf("auth: failed to parse JWT header: %w", err)
-	}
-	if header.Alg != "ES256" {
-		return nil, fmt.Errorf("auth: unsupported algorithm %q (expected ES256)", header.Alg)
-	}
-
-	// Verify ES256 signature against management cert.
-	signingInput := parts[0] + "." + parts[1]
-	sigBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil {
-		return nil, fmt.Errorf("auth: failed to decode signature: %w", err)
-	}
-	if len(sigBytes) != 64 {
-		return nil, fmt.Errorf("auth: ES256 signature must be 64 bytes, got %d", len(sigBytes))
-	}
-
-	r := new(big.Int).SetBytes(sigBytes[:32])
-	s := new(big.Int).SetBytes(sigBytes[32:])
-	hash := sha256.Sum256([]byte(signingInput))
-
-	if !ecdsa.Verify(v.mgmtPubKey, hash[:], r, s) {
-		return nil, errors.New("auth: signature verification failed")
-	}
-
-	// Decode claims.
-	claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil, fmt.Errorf("auth: failed to decode claims: %w", err)
-	}
-	var claims struct {
-		Iss        string                `json:"iss"`
-		Exp        int64                 `json:"exp"`
-		Containers []ContainerPermission `json:"containers"`
-	}
-	if err := json.Unmarshal(claimsJSON, &claims); err != nil {
-		return nil, fmt.Errorf("auth: failed to parse claims: %w", err)
-	}
-
-	if claims.Iss != "privasys-operations" {
-		return nil, fmt.Errorf("auth: invalid issuer %q", claims.Iss)
-	}
-	if claims.Exp > 0 && time.Now().Unix() > claims.Exp {
-		return nil, fmt.Errorf("auth: JWT expired at %d", claims.Exp)
-	}
-
-	v.log.Info("operations JWT verified",
-		zap.String("iss", claims.Iss),
-		zap.Int("permitted_containers", len(claims.Containers)),
-	)
-
-	return &AuthResult{
-		Source:     "operations-jwt",
-		Role:       "manager",
-		Subject:    claims.Iss,
-		Containers: claims.Containers,
-	}, nil
+	return v.verifyOIDCToken(tokenStr)
 }
 
 // verifyOIDCToken validates a standard OIDC bearer token via JWKS.
@@ -408,13 +275,6 @@ func (v *Verifier) verifyOIDCToken(tokenStr string) (*AuthResult, error) {
 		Subject:    sub,
 		Containers: containers,
 	}, nil
-}
-
-// CertFingerprint returns the hex-encoded SHA-256 fingerprint of the
-// management certificate.
-func (v *Verifier) CertFingerprint() string {
-	h := sha256.Sum256(v.mgmtCert.Raw)
-	return fmt.Sprintf("%x", h)
 }
 
 // --- Audience / Role helpers ---

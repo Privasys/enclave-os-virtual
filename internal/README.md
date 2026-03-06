@@ -1,6 +1,6 @@
 # internal/
 
-Internal packages implementing the Enclave OS Virtual runtime.
+Internal packages implementing the Enclave OS (Virtual) runtime.
 
 | Package | Description |
 |---------|-------------|

@@ -9,16 +9,16 @@ func sampleManifest() *Manifest {
 	return &Manifest{
 		Version: "1",
 		Platform: Platform{
-			Hostname:           "enclave.example.com",
-			CACertPath:         "/etc/enclave-os/ca.pem",
-			CAKeyPath:          "/etc/enclave-os/ca-key.pem",
+			Hostname:           "manager.prod1.example.com",
+			CACertPath:         "/data/ca.crt",
+			CAKeyPath:          "/data/ca.key",
 			AttestationBackend: "tdx",
 		},
 		Containers: []Container{
 			{
 				Name:     "myapp",
 				Image:    "ghcr.io/example/myapp@sha256:abcdef1234567890",
-				Hostname: "app.example.com",
+				Hostname: "myapp.prod1.example.com",
 				Port:     8080,
 				Env: map[string]string{
 					"DATABASE_HOST": "localhost",
@@ -40,14 +40,14 @@ func TestParse(t *testing.T) {
 	yaml := `
 version: "1"
 platform:
-  hostname: enclave.example.com
-  ca_cert: /etc/enclave-os/ca.pem
-  ca_key: /etc/enclave-os/ca-key.pem
+  hostname: manager.prod1.example.com
+  ca_cert: /data/ca.crt
+  ca_key: /data/ca.key
   attestation_backend: tdx
 containers:
   - name: web
     image: "registry.example.com/web@sha256:aabbccdd"
-    hostname: www.example.com
+    hostname: web.prod1.example.com
     port: 8080
     env:
       APP_MODE: production
@@ -85,7 +85,7 @@ func TestValidate_DuplicateName(t *testing.T) {
 
 func TestValidate_DuplicateHostname(t *testing.T) {
 	m := sampleManifest()
-	m.Containers[1].Hostname = "app.example.com"
+	m.Containers[1].Hostname = "myapp.prod1.example.com"
 	m.Containers[1].Internal = false
 	if err := m.Validate(); err == nil {
 		t.Fatal("expected error for duplicate hostname")

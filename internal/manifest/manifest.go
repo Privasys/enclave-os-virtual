@@ -9,7 +9,7 @@
 //
 // The workload launcher reads the manifest from (in priority order):
 //  1. Path specified via --manifest flag
-//  2. /etc/enclave-os/manifest.yaml (baked into the image)
+//  2. /data/manifest.yaml (on the LUKS-encrypted data partition)
 //  3. GCP instance metadata key "enclave-os-manifest" (base64-encoded)
 //
 // # Security model
@@ -44,8 +44,8 @@ type Manifest struct {
 
 // Platform contains platform-level configuration.
 type Platform struct {
-	// Hostname is the VM's primary hostname, used for the platform-wide
-	// RA-TLS certificate when no container-specific SNI matches.
+	// Hostname is the VM's primary FQDN, derived from the machine name:
+	// manager.<machine_name>.<hostname> (e.g. "manager.prod1.example.com").
 	Hostname string `yaml:"hostname"`
 
 	// CACertPath is the path to the PEM-encoded intermediary CA certificate.
@@ -68,8 +68,8 @@ type Container struct {
 	// Tags without digest pins are rejected.
 	Image string `yaml:"image"`
 
-	// Hostname is the external hostname for SNI routing. If set, this
-	// container gets its own per-container RA-TLS leaf certificate.
+	// Hostname is the external FQDN for SNI routing, auto-derived by the
+	// launcher: <name>.<machine_name>.<hostname>.
 	// If empty, the container is internal-only (no external TLS).
 	Hostname string `yaml:"hostname,omitempty"`
 

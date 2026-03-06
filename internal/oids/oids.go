@@ -1,4 +1,4 @@
-// Package oids defines the X.509 OID extensions used in Enclave OS Virtual
+// Package oids defines the X.509 OID extensions used in Enclave OS (Virtual)
 // RA-TLS certificates. These mirror the Privasys OID arc used in Enclave OS
 // Mini (SGX) but are extended for container workloads.
 //

@@ -1,5 +1,5 @@
 // Package merkle implements a deterministic Merkle tree for configuration
-// attestation. It mirrors the design used in Enclave OS Mini (SGX) but
+// attestation. It mirrors the design used in Enclave OS (Mini) (SGX) but
 // operates on container workload configurations instead of WASM modules.
 //
 // The tree is constructed from named leaves, each containing arbitrary data.

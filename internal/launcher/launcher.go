@@ -2,24 +2,22 @@
 //
 // Unlike the previous manifest-at-boot model, the launcher starts with
 // zero containers and exposes methods for dynamic load/unload operations.
-// This is how Enclave OS Mini works - containers are loaded at runtime
+// This is how Enclave OS (Mini) works - containers are loaded at runtime
 // via the management API.
 //
 // The boot sequence is now:
 //
 //  1. Manager starts, connects to containerd
-//  2. Management API comes online (with bootstrap JWT auth)
+//  2. Management API comes online (OIDC authentication)
 //  3. Operator calls POST /api/v1/containers with a container spec
 //  4. Launcher pulls image, verifies digest, starts container
 //  5. Attestation Merkle trees are recomputed
 //  6. Any RA-TLS certificate issued after this point includes the new state
 //
-// Bootstrap authentication:
+// Authentication:
 //
-//   - When zero containers are running, the only accepted auth is a JWT
-//     signed by the Privasys management key (baked into the image).
-//   - Once an OIDC provider is running inside the enclave, OIDC
-//     tokens are also accepted for subsequent operations.
+//   - All API requests require an OIDC bearer token with the appropriate
+//     role (manager for mutations, monitoring for read-only).
 package launcher
 
 import (
@@ -65,8 +63,18 @@ type Config struct {
 	// are not written and Caddy integration is disabled.
 	ExtensionsDir string
 
-	// PlatformHostname is the hostname for the management API route in
-	// Caddy.  If empty, the management API is not exposed via Caddy.
+	// MachineName is the instance machine name (e.g. "prod1").  Together
+	// with Hostname it determines all RA-TLS hostnames:
+	//   Manager:   manager.<MachineName>.<Hostname>
+	//   Container: <name>.<MachineName>.<Hostname>
+	MachineName string
+
+	// Hostname is the domain suffix for RA-TLS hostnames
+	// (e.g. "example.com").
+	Hostname string
+
+	// PlatformHostname is the computed FQDN for the management API route
+	// in Caddy (manager.<MachineName>.<Hostname>).  Set by the caller.
 	PlatformHostname string
 
 	// ManagementPort is the local port for the management API
@@ -99,9 +107,6 @@ type LoadRequest struct {
 	// Image is the full OCI image reference WITH digest pinning.
 	// Example: "ghcr.io/example/myapp@sha256:abc123..."
 	Image string `json:"image"`
-
-	// Hostname is the external hostname for SNI routing (optional).
-	Hostname string `json:"hostname,omitempty"`
 
 	// Port is the container's listening port.
 	Port int `json:"port"`
@@ -155,7 +160,6 @@ func (r *LoadRequest) toContainerSpec() manifest.Container {
 	return manifest.Container{
 		Name:        r.Name,
 		Image:       r.Image,
-		Hostname:    r.Hostname,
 		Port:        r.Port,
 		Env:         r.Env,
 		Volumes:     r.Volumes,
@@ -280,6 +284,8 @@ func (l *Launcher) Run(ctx context.Context) error {
 	l.log.Info("manager ready (no containers loaded)",
 		zap.String("platform_merkle_root", hex.EncodeToString(platformRoot[:])),
 		zap.String("attestation_backend", l.cfg.AttestationBackend),
+		zap.String("machine_name", l.cfg.MachineName),
+		zap.String("platform_hostname", l.cfg.PlatformHostname),
 	)
 
 	// 3. Set up Caddy routes if configured.
@@ -315,6 +321,57 @@ func (l *Launcher) ContainerCount() int {
 	return len(l.specs)
 }
 
+// CACertPath returns the configured path to the intermediary CA certificate.
+func (l *Launcher) CACertPath() string {
+	return l.cfg.CACertPath
+}
+
+// ReloadCA writes the new CA certificate and key to the configured paths,
+// reloads the Caddy configuration so ra-tls-caddy picks up the new CA, and
+// recomputes all attestation data (the platform Merkle tree includes the CA
+// cert as a leaf, so changing it changes the attestation root).
+func (l *Launcher) ReloadCA(certPEM, keyPEM []byte) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// Write certificate atomically (tmp + rename).
+	if err := atomicWrite(l.cfg.CACertPath, certPEM); err != nil {
+		return fmt.Errorf("launcher: failed to write CA cert: %w", err)
+	}
+	if err := atomicWrite(l.cfg.CAKeyPath, keyPEM); err != nil {
+		return fmt.Errorf("launcher: failed to write CA key: %w", err)
+	}
+
+	l.log.Info("CA certificate updated, recomputing attestation",
+		zap.String("cert_path", l.cfg.CACertPath),
+		zap.String("key_path", l.cfg.CAKeyPath),
+	)
+
+	// Recompute all attestation (CA cert leaf changes).
+	l.recomputeAttestation()
+
+	// Reload Caddy so it picks up the new CA.
+	if l.caddyClient != nil {
+		if err := l.caddyClient.Reload(); err != nil {
+			l.log.Warn("failed to reload Caddy after CA update (will use new CA on next route change)",
+				zap.Error(err),
+			)
+		}
+	}
+
+	return nil
+}
+
+// atomicWrite writes data to a file atomically by writing to a temporary
+// file in the same directory and renaming.
+func atomicWrite(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // Load pulls, verifies, and starts a container. Returns the resolved image
 // digest. The caller is responsible for authentication.
 func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
@@ -330,19 +387,30 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		return nil, fmt.Errorf("launcher: container %q already loaded", req.Name)
 	}
 
-	// Check for duplicate hostname.
-	if req.Hostname != "" {
+	spec := req.toContainerSpec()
+
+	// Auto-derive the external hostname from the machine name scheme:
+	//   <name>.<machine_name>.<hostname>
+	if !req.Internal && l.cfg.MachineName != "" {
+		spec.Hostname = req.Name + "." + l.cfg.MachineName + "." + l.cfg.Hostname
+	}
+
+	// Check for duplicate hostname (should not happen with deterministic
+	// derivation, but guard against name collisions).
+	if spec.Hostname != "" {
 		for _, s := range l.specs {
-			if s.Hostname == req.Hostname {
-				return nil, fmt.Errorf("launcher: hostname %q already in use by %q", req.Hostname, s.Name)
+			if s.Hostname == spec.Hostname {
+				return nil, fmt.Errorf("launcher: hostname %q already in use by %q", spec.Hostname, s.Name)
 			}
 		}
 	}
 
-	spec := req.toContainerSpec()
-
 	// Pull image.
-	l.log.Info("pulling image", zap.String("name", req.Name), zap.String("image", req.Image))
+	l.log.Info("pulling image",
+		zap.String("name", req.Name),
+		zap.String("image", req.Image),
+		zap.String("hostname", spec.Hostname),
+	)
 	img, digest, err := l.mgr.Pull(ctx, spec)
 	if err != nil {
 		return nil, err
@@ -402,15 +470,15 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		}
 
 		// Write per-container extensions and add Caddy route if hostname is set.
-		if req.Hostname != "" && !req.Internal {
-			if err := l.writeContainerExtensions(req.Name, req.Hostname); err != nil {
+		if spec.Hostname != "" && !req.Internal {
+			if err := l.writeContainerExtensions(req.Name, spec.Hostname); err != nil {
 				l.log.Warn("failed to write container extensions",
 					zap.String("name", req.Name), zap.Error(err))
 			}
 			upstream := fmt.Sprintf("localhost:%d", req.Port)
-			if err := l.caddyClient.AddRoute(req.Hostname, upstream); err != nil {
+			if err := l.caddyClient.AddRoute(spec.Hostname, upstream); err != nil {
 				l.log.Warn("failed to add Caddy route",
-					zap.String("hostname", req.Hostname), zap.Error(err))
+					zap.String("hostname", spec.Hostname), zap.Error(err))
 			}
 		}
 	}

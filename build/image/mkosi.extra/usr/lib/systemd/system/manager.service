@@ -1,5 +1,5 @@
 [Unit]
-Description=Enclave OS Virtual — Workload Manager
+Description=Enclave OS (Virtual) — Workload Manager
 Documentation=https://github.com/Privasys/enclave-os-virtual
 After=containerd.service network-online.target data.mount luks-data.service
 Requires=containerd.service
@@ -7,25 +7,21 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-RuntimeDirectory=manager/tls manager/extensions
+RuntimeDirectory=manager/extensions
+EnvironmentFile=-/data/manager.env
 ExecStart=/usr/bin/manager serve \
-    --operations-cert /etc/enclave-os/operations.crt \
-    --ca-cert /etc/enclave-os/ca.crt \
-    --ca-key /etc/enclave-os/ca.key \
+    --ca-cert ${CA_CERT:-/data/ca.crt} \
+    --ca-key ${CA_KEY:-/data/ca.key} \
     --attestation-backend tdx \
-    --agent-addr :9443 \
-    --agent-tls-cert /run/manager/tls/server.pem \
-    --agent-tls-key /run/manager/tls/server-key.pem \
-    --agent-ca-cert /run/manager/tls/ca.pem \
-    --caddy-admin localhost:2019 \
     --caddy-listen :443 \
     --extensions-dir /run/manager/extensions \
-    --platform-hostname %H \
+    --machine-name %H \
+    --hostname ${HOSTNAME_SUFFIX} \
     --dek-origin-file /run/luks/dek-origin \
-    --oidc-issuer https://auth.privasys.org \
-    --oidc-audience enclave-os-virtual \
-    --oidc-manager-role enclave-os-virtual:manager \
-    --oidc-monitoring-role enclave-os-virtual:monitoring \
+    --oidc-issuer ${OIDC_ISSUER} \
+    --oidc-audience ${OIDC_AUDIENCE:-enclave-os-virtual} \
+    --oidc-manager-role ${OIDC_MANAGER_ROLE:-enclave-os-virtual:manager} \
+    --oidc-monitoring-role ${OIDC_MONITORING_ROLE:-enclave-os-virtual:monitoring} \
     --log-level info
 Restart=on-failure
 RestartSec=5

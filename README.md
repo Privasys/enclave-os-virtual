@@ -2,9 +2,9 @@
 
 **Container workloads inside Confidential VMs, attested end-to-end.**
 
-Enclave OS Virtual runs OCI containers inside [Intel TDX](https://www.intel.com/content/www/us/en/developer/tools/trust-domain-extensions/overview.html) (or AMD SEV-SNP) Confidential VMs. Every container image digest, environment variable, volume mount, and platform configuration is measured into a deterministic Merkle tree and embedded in X.509 certificate extensions via [RA-TLS](https://github.com/Privasys/ra-tls-caddy). Clients can verify the full workload stack in a single TLS handshake — no out-of-band attestation protocol required.
+Enclave OS (Virtual) runs OCI containers inside [Intel TDX](https://www.intel.com/content/www/us/en/developer/tools/trust-domain-extensions/overview.html) (or AMD SEV-SNP) Confidential VMs. Every container image digest, environment variable, volume mount, and platform configuration is measured into a deterministic Merkle tree and embedded in X.509 certificate extensions via [RA-TLS](https://github.com/Privasys/ra-tls-caddy). Clients can verify the full workload stack in a single TLS handshake — no out-of-band attestation protocol required.
 
-Part of the [Privasys](https://privasys.org) Confidential Computing platform, alongside [Enclave OS Mini](https://github.com/Privasys/enclave-os-mini) (SGX/WASM).
+Part of the [Privasys](https://privasys.org) Confidential Computing platform, alongside [Enclave OS (Mini)](https://github.com/Privasys/enclave-os-mini) (SGX/WASM).
 
 ## Architecture
 
@@ -13,13 +13,13 @@ Part of the [Privasys](https://privasys.org) Confidential Computing platform, al
 │  Intel TDX / AMD SEV-SNP Confidential VM                │
 │                                                         │
 │  ┌──────────────────────────────────────────────────┐   │
-│  │  Enclave OS Virtual                              │   │
+│  │  Enclave OS (Virtual)                            │   │
 │  │                                                  │   │
 │  │  ┌────────────┐  ┌────────────┐  ┌────────────┐  │   │
 │  │  │ ra-tls-    │  │ Workload   │  │ Management │  │   │
 │  │  │ caddy      │  │ Launcher   │  │ Agent      │  │   │
-│  │  │ (TLS +     │  │ (containerd│  │ (mTLS API) │  │   │
-│  │  │  reverse   │  │  lifecycle)│  │            │  │   │
+│  │  │ (TLS +     │  │ (containerd│  │ (HTTP on   │  │   │
+│  │  │  reverse   │  │  lifecycle)│  │  localhost)│  │   │
 │  │  │  proxy)    │  │            │  │            │  │   │
 │  │  └─────┬──────┘  └─────┬──────┘  └────────────┘  │   │
 │  │        │               │                         │   │
@@ -43,7 +43,7 @@ Part of the [Privasys](https://privasys.org) Confidential Computing platform, al
 
 1. **Boot** — The VM starts from a dm-verity protected, UKI Secure Boot image built with [tdx-image-base](https://github.com/Privasys/tdx-image-base).
 
-2. **Dynamic Loading** — The manager starts with zero containers. Operators call `POST /api/v1/containers` (authenticated via operations JWT or OIDC) to load containers at runtime. Each request specifies a digest-pinned OCI image reference, environment, volumes, and ports.
+2. **Dynamic Loading** — The manager starts with zero containers. Operators call `POST /api/v1/containers` (authenticated via OIDC bearer token) to load containers at runtime. Each request specifies a digest-pinned OCI image reference, environment, volumes, and ports.
 
 3. **Pull & Verify** — OCI images are pulled via containerd. Each image digest is verified against the pinned `@sha256:...` reference in the load request.
 
@@ -53,7 +53,7 @@ Part of the [Privasys](https://privasys.org) Confidential Computing platform, al
 
 6. **TLS Handshake** — Clients connecting via TLS receive a certificate chain that proves: which TEE is running, what OS image booted, which containers are deployed (by digest), and how they're configured.
 
-7. **Health & Metrics** — The Management Agent exposes `/healthz`, `/readyz`, `/api/v1/status`, and Prometheus `/metrics` over an mTLS-protected channel.
+7. **Health & Metrics** — The management API exposes `/healthz`, `/readyz`, `/api/v1/status`, and Prometheus `/metrics` over RA-TLS at `manager.<machine-name>.<hostname>`.
 
 ## OID Extensions
 
@@ -76,9 +76,10 @@ All Privasys OIDs live under the arc `1.3.6.1.4.1.65230`:
 ```yaml
 version: "1"
 platform:
-  hostname: enclave.example.com
-  ca_cert: /etc/enclave-os/tls/ca.pem
-  ca_key: /etc/enclave-os/tls/ca-key.pem
+  machine_name: prod1
+  hostname: example.com
+  ca_cert: /data/ca.crt
+  ca_key: /data/ca.key
   attestation_backend: tdx
 containers:
   - name: postgres
@@ -91,11 +92,15 @@ containers:
       tcp: "127.0.0.1:5432"
   - name: myapp
     image: "ghcr.io/example/myapp@sha256:..."
-    hostname: app.example.com
     port: 8080
     health_check:
       http: "http://127.0.0.1:8080/healthz"
 ```
+
+Hostnames are derived automatically from the machine name and hostname:
+- Management API: `manager.prod1.example.com`
+- Container `myapp`: `myapp.prod1.example.com`
+- Container `postgres`: internal (no external hostname)
 
 See [dist/examples/manifest-example.yaml](dist/examples/manifest-example.yaml) for a complete web-app + PostgreSQL example.
 
@@ -128,12 +133,12 @@ go build -o manager ./cmd/manager/
 ```bash
 # Start the workload launcher and management API
 manager serve \
-  --operations-cert /etc/enclave-os/operations.crt \
   --attestation-backend tdx \
-  --agent-addr :9443 \
-  --agent-tls-cert /run/manager/tls/server.pem \
-  --agent-tls-key /run/manager/tls/server-key.pem \
-  --oidc-issuer https://auth.privasys.org
+  --ca-cert /data/ca.crt \
+  --ca-key /data/ca.key \
+  --machine-name prod1 \
+  --hostname example.com \
+  --oidc-issuer https://auth.example.com
 ```
 
 See [docs/setup.md](docs/setup.md) for all flags and configuration options.
@@ -156,8 +161,8 @@ See [GitHub Releases](https://github.com/Privasys/enclave-os-virtual/releases) f
 
 | Product | TEE | Workload Model | Repo |
 |---------|-----|----------------|------|
-| **Enclave OS Mini** | Intel SGX | WASM modules | [enclave-os-mini](https://github.com/Privasys/enclave-os-mini) |
-| **Enclave OS Virtual** | Intel TDX / AMD SEV-SNP | OCI containers | This repo |
+| **Enclave OS (Mini)** | Intel SGX | WASM modules | [enclave-os-mini](https://github.com/Privasys/enclave-os-mini) |
+| **Enclave OS (Virtual)** | Intel TDX / AMD SEV-SNP | OCI containers | This repo |
 
 Both share the same RA-TLS attestation model, OID arc, and Merkle tree design.
 

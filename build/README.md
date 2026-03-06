@@ -1,6 +1,6 @@
 # build/
 
-Image build infrastructure for Enclave OS Virtual.
+Image build infrastructure for Enclave OS (Virtual).
 
 ## image/
 

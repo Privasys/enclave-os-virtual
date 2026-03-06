@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the Enclave OS Virtual disk image.
+# Build the Enclave OS (Virtual) disk image.
 #
 # This script:
 #   1. Cross-compiles the enclave-os Go binary for linux/amd64
@@ -22,7 +22,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMAGE_DIR="$SCRIPT_DIR/image"
 EXTRA_DIR="$IMAGE_DIR/mkosi.extra"
 
-echo "=== Enclave OS Virtual Image Builder ==="
+echo "=== Enclave OS (Virtual) Image Builder ==="
 echo "Repo root: $REPO_ROOT"
 echo "Image dir: $IMAGE_DIR"
 
@@ -54,8 +54,8 @@ echo "Binary built: $EXTRA_DIR/usr/bin/manager"
 if [ -n "$MANIFEST_PATH" ]; then
     echo ""
     echo "=== Step 2: Baking manifest into image ==="
-    mkdir -p "$EXTRA_DIR/etc/enclave-os"
-    cp "$MANIFEST_PATH" "$EXTRA_DIR/etc/enclave-os/manifest.yaml"
+    mkdir -p "$EXTRA_DIR/data"
+    cp "$MANIFEST_PATH" "$EXTRA_DIR/data/manifest.yaml"
     echo "Manifest copied: $MANIFEST_PATH"
 else
     echo ""

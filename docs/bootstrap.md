@@ -1,41 +1,19 @@
 # Authentication & Bootstrap
 
-Enclave OS Virtual starts empty — no containers, no OIDC provider. This
-document explains the two authentication mechanisms and how the initial
-bootstrap works.
+Enclave OS (Virtual) uses OIDC bearer tokens as the sole authentication
+mechanism. The OIDC provider must be running **before** the enclave
+instance boots.
 
 See also: [API Reference](api.md) · [Setup & Configuration](setup.md)
 
-## Authentication methods
+## Authentication
 
 Every API request (except `GET /healthz`) must carry a bearer token in the
-`Authorization: Bearer <token>` header. The manager accepts two token types:
+`Authorization: Bearer <token>` header.
 
-### 1. Operations Certificate JWT (break-glass)
-
-A short-lived JWT signed with the Privasys operations private key (ECDSA
-P-256). The corresponding public certificate is baked into the image at
-`/etc/enclave-os/operations.crt` and cannot be changed at runtime.
-
-| Field | Value |
-|-------|-------|
-| Algorithm | ES256 |
-| Issuer (`iss`) | `privasys-operations` |
-| Expiry (`exp`) | Required, typically 5–15 minutes |
-
-This token type is **always accepted**, regardless of OIDC configuration. It
-receives implicit `manager` role privileges. Use it for:
-
-- **Bootstrap**: loading the first containers before any OIDC
-  provider exists.
-- **Break-glass**: emergency access when OIDC is unavailable.
-- **Automation**: CI/CD pipelines that deploy directly.
-
-### 2. OIDC bearer token
-
-A standard JWT issued by the configured OIDC provider. The manager
-discovers signing keys via `/.well-known/openid-configuration` → JWKS,
-with a 5-minute cache.
+The token is a standard JWT issued by the configured OIDC provider. The
+manager discovers signing keys via `/.well-known/openid-configuration` →
+JWKS, with a 5-minute cache.
 
 | Field | Value |
 |-------|-------|
@@ -52,6 +30,8 @@ Two roles control what the bearer can do:
 | Manager | `enclave-os-virtual:manager` | Full: load/unload containers, status, metrics |
 | Monitoring | `enclave-os-virtual:monitoring` | Read-only: readyz, status, metrics |
 
+Manager access implies monitoring access.
+
 The manager checks for roles in three claim locations (to support different
 providers):
 
@@ -60,12 +40,9 @@ providers):
 2. **Standard**: `roles` — a flat string array.
 3. **Keycloak**: `realm_access.roles` — a nested string array.
 
-Operations certificate JWTs do not need a role claim — they always have
-manager-level access.
-
 ## Containers claim (policy)
 
-Both token types support an optional `containers` claim to restrict which
+Tokens support an optional `containers` claim to restrict which
 containers the bearer can load/unload:
 
 ```json
@@ -84,24 +61,27 @@ containers the bearer can load/unload:
 
 ## Bootstrap sequence
 
+The OIDC provider runs on a separate (classic) VM and must be reachable
+before the enclave instance is started. This avoids a chicken-and-egg
+problem — the enclave can verify tokens from boot.
+
 ```
 ┌───────────────────────────────────────────────────────────┐
+│  0. OIDC provider is already running on a classic VM      │
+│     (e.g. Zitadel, Keycloak, or any OIDC-compliant IdP)   │
+│                                                           │
 │  1. Instance boots — manager starts with no containers    │
-│     Only operations cert JWT is accepted                  │
+│     --oidc-issuer points to the external OIDC provider    │
 │                                                           │
-│  2. Operator signs a short-lived JWT with the             │
-│     operations private key, containing:                   │
-│     { iss: "privasys-operations", exp: ...,               │
-│       containers: [{ name: "myapp", digest: "..." },      │
-│                    { name: "postgres", digest: "..." }] } │
+│  2. Operator obtains an OIDC token with manager role:     │
+│     { aud: "enclave-os-virtual",                          │
+│       roles: ["enclave-os-virtual:manager"],              │
+│       containers: [{ name: "myapp", digest: "..." }] }    │
 │                                                           │
-│  3. POST /api/v1/containers with operations JWT           │
-│     → loads application + database containers             │
+│  3. POST /api/v1/containers with OIDC bearer token        │
+│     → loads application containers                        │
 │                                                           │
-│  4. OIDC provider starts (if loaded)                      │
-│     Now OIDC tokens are also accepted                     │
-│                                                           │
-│  5. Subsequent operations use OIDC bearer tokens:         │
+│  4. Subsequent operations use OIDC bearer tokens:         │
 │     - enclave-os-virtual:manager for mutations            │
 │     - enclave-os-virtual:monitoring for read-only         │
 └───────────────────────────────────────────────────────────┘

@@ -1,6 +1,6 @@
 # cmd/
 
-Entry points for Enclave OS Virtual binaries.
+Entry points for Enclave OS (Virtual) binaries.
 
 ## manager
 

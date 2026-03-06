@@ -1,6 +1,6 @@
 // Package caddy provides a client for the Caddy admin API, used to
 // dynamically add and remove reverse-proxy routes with RA-TLS termination
-// for containers managed by Enclave OS Virtual.
+// for containers managed by Enclave OS (Virtual).
 //
 // Architecture:
 //
@@ -143,6 +143,14 @@ func (c *Client) RouteCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.routes)
+}
+
+// Reload forces a full Caddy config reload. This is used after updating
+// the CA certificate/key so ra-tls-caddy picks up the new files.
+func (c *Client) Reload() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reload()
 }
 
 // ---------------------------------------------------------------------------

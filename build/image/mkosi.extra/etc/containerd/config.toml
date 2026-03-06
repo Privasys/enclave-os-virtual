@@ -1,4 +1,4 @@
-# Containerd configuration for Enclave OS Virtual.
+# Containerd configuration for Enclave OS (Virtual).
 #
 # Root partition is read-only erofs with dm-verity.  Persistent state
 # lives on the ext4 data partition mounted at /data.

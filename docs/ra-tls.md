@@ -85,7 +85,7 @@ during certificate issuance.
 
 ```
 Root CA (operator-provisioned)
- └── Intermediary CA (inside the VM, /etc/enclave-os/tls/ca.pem)
+ └── Intermediary CA (inside the VM, /data/ca.crt)
       ├── Platform RA-TLS certificate (management API hostname)
       │        ├── TDX/SGX Quote         (OID 1.2.840.113741.1.5.5.1.6)
       │        ├── Platform Merkle Root  (OID 1.3.6.1.4.1.65230.1.1)
@@ -93,13 +93,13 @@ Root CA (operator-provisioned)
       │        ├── Combined Images Hash  (OID 1.3.6.1.4.1.65230.2.5)
       │        └── DEK Origin            (OID 1.3.6.1.4.1.65230.2.6)
       │
-      ├── Container RA-TLS cert: "myapp.example.com"
+      ├── Container RA-TLS cert: "myapp.prod1.example.com"
       │        ├── TDX/SGX Quote         (OID 1.2.840.113741.1.5.5.1.6)
       │        ├── Config Merkle Root    (OID 1.3.6.1.4.1.65230.3.1)
       │        ├── Image Digest          (OID 1.3.6.1.4.1.65230.3.2)
       │        └── Image Ref             (OID 1.3.6.1.4.1.65230.3.3)
       │
-      └── Container RA-TLS cert: "api.example.com"
+      └── Container RA-TLS cert: "postgres.prod1.example.com"
                ├── ...
                └── ...
 ```
@@ -111,12 +111,12 @@ by the operator and baked into the image:
 
 | File | Path |
 |------|------|
-| CA certificate | `/etc/enclave-os/tls/ca.pem` |
-| CA private key | `/etc/enclave-os/tls/ca-key.pem` |
+| CA certificate | `/data/ca.crt` |
+| CA private key | `/data/ca.key` |
 
 Both are passed to Caddy via `--ca-cert` and `--ca-key`.  The CA private key
 never leaves the VM — it exists only in TEE-encrypted memory and on the
-dm-verity protected root filesystem.
+LUKS-encrypted data partition.
 
 ### Leaf Certificates
 
@@ -343,9 +343,9 @@ Per-container certificates solve two requirements:
 
 The Caddy reverse proxy uses **SNI-based routing**:
 
-1. Client connects to `myapp.example.com:443`
+1. Client connects to `myapp.prod1.example.com:443`
 2. Caddy matches the SNI hostname to a registered route
-3. ra-tls-caddy reads `/run/manager/extensions/myapp.example.com.json`
+3. ra-tls-caddy reads `/run/manager/extensions/myapp.prod1.example.com.json`
 4. If in challenge-response mode: generate fresh key + TDX quote + extensions
 5. If in deterministic mode: serve cached cert (auto-renewed every 24h)
 6. TLS established — traffic is reverse-proxied to `localhost:8080`
@@ -359,7 +359,6 @@ POST /api/v1/containers
 {
   "name": "myapp",
   "image": "ghcr.io/example/myapp@sha256:abc123...",
-  "hostname": "myapp.example.com",
   "port": 8080
 }
 ```
@@ -368,10 +367,11 @@ The launcher:
 
 1. Pulls and verifies the image digest
 2. Starts the container via containerd
-3. Recomputes all Merkle trees
-4. Writes OID extensions to `/run/manager/extensions/myapp.example.com.json`
-5. Registers a Caddy route: `myapp.example.com` → `localhost:8080`
-6. Updates the platform extensions (combined images hash changed)
+3. Derives the hostname: `myapp.<machine-name>.<hostname>`
+4. Recomputes all Merkle trees
+5. Writes OID extensions to `/run/manager/extensions/myapp.<machine-name>.<hostname>.json`
+6. Registers a Caddy route: `myapp.<machine-name>.<hostname>` → `localhost:8080`
+7. Updates the platform extensions (combined images hash changed)
 
 When unloading:
 
@@ -428,8 +428,8 @@ ra-tls-caddy is configured as a Caddy TLS issuer:
   tls {
     issuer ra_tls {
       backend        tdx
-      ca_cert        /etc/enclave-os/tls/ca.pem
-      ca_key         /etc/enclave-os/tls/ca-key.pem
+      ca_cert        /data/ca.crt
+      ca_key         /data/ca.key
       extensions_dir /run/manager/extensions
     }
   }
@@ -456,17 +456,18 @@ on every container load/unload.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--caddy-admin` | `localhost:2019` | Caddy admin API address |
 | `--caddy-listen` | `:443` | External HTTPS listen address |
 | `--extensions-dir` | `/run/manager/extensions` | OID extension files directory |
-| `--platform-hostname` | — | Management API hostname for RA-TLS |
-| `--ca-key` | — | Intermediary CA private key for RA-TLS |
+| `--machine-name` | — | Machine name — determines all RA-TLS hostnames |
+| `--hostname` | — | **Required.** Hostname suffix appended to the machine name |
+| `--ca-cert` | — | **Required.** Intermediary CA certificate for RA-TLS |
+| `--ca-key` | — | **Required.** Intermediary CA private key for RA-TLS |
 
 ---
 
-## Comparison with Enclave OS Mini
+## Comparison with Enclave OS (Mini)
 
-| Feature | Enclave OS Mini (SGX) | Enclave OS Virtual (CVM) |
+| Feature | Enclave OS (Mini) (SGX) | Enclave OS (Virtual) (CVM) |
 |---------|----------------------|--------------------------|
 | **TEE** | Intel SGX enclave | Intel TDX / AMD SEV-SNP VM |
 | **TLS termination** | Enclave binary (rustls) | Caddy (ra-tls-caddy module) |

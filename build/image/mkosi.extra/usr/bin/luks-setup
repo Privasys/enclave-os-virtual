@@ -1,5 +1,5 @@
 #!/bin/bash
-# luks-setup — LUKS encryption for the Enclave OS Virtual data partition.
+# luks-setup — LUKS encryption for the Enclave OS (Virtual) data partition.
 #
 # Run by luks-data.service BEFORE data.mount.
 #
