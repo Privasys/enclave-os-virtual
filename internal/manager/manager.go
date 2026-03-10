@@ -27,6 +27,7 @@
 // POST   /api/v1/containers          - load a container (JSON body: LoadRequest)
 // DELETE /api/v1/containers/{name}   - unload a container
 // PUT    /api/v1/tls                 - rotate the intermediary CA cert+key
+// PUT    /api/v1/attestation-servers  - update attestation servers and tokens
 // GET    /metrics                    - Prometheus metrics
 package manager
 
@@ -145,6 +146,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// TLS certificate rotation (require manager role).
 	mux.HandleFunc("PUT /api/v1/tls", s.requireAuth(s.handleUpdateTLS))
+
+	// Attestation server management (require manager role).
+	mux.HandleFunc("PUT /api/v1/attestation-servers", s.requireAuth(s.handleSetAttestationServers))
 
 	s.server = &http.Server{
 		Addr:    s.cfg.Addr,
@@ -496,6 +500,50 @@ func (s *Server) handleUpdateTLS(w http.ResponseWriter, r *http.Request) {
 		"cn":         newCert.Subject.CommonName,
 		"not_before": newCert.NotBefore.Format(time.RFC3339),
 		"not_after":  newCert.NotAfter.Format(time.RFC3339),
+	})
+}
+
+// attestationServersRequest is the request body for PUT /api/v1/attestation-servers.
+type attestationServersRequest struct {
+	Servers []launcher.AttestationServer `json:"servers"`
+}
+
+// handleSetAttestationServers handles PUT /api/v1/attestation-servers.
+// It replaces the attestation server list (URLs and optional bearer tokens)
+// and triggers a recomputation of the Merkle tree and OID extensions so that
+// the change is visible in subsequent RA-TLS certificates.
+func (s *Server) handleSetAttestationServers(w http.ResponseWriter, r *http.Request) {
+	result := r.Context().Value(authResultKey).(*auth.AuthResult)
+
+	if !result.HasManagerAccess() {
+		s.jsonError(w, http.StatusForbidden, "manager role required for attestation server operations")
+		return
+	}
+
+	var req attestationServersRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if len(req.Servers) == 0 {
+		s.jsonError(w, http.StatusBadRequest, "servers array is required and must not be empty")
+		return
+	}
+
+	s.log.Info("set attestation servers request",
+		zap.Int("servers", len(req.Servers)),
+		zap.String("auth_source", result.Source),
+		zap.String("auth_subject", result.Subject),
+	)
+
+	count, hash := s.launcher.SetAttestationServers(req.Servers)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":       "attestation_servers_updated",
+		"server_count": count,
+		"hash":         hash,
 	})
 }
 

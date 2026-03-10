@@ -17,6 +17,7 @@ See [setup.md](setup.md) for configuration and OIDC provider setup.
 | POST | `/api/v1/containers` | Bearer | Manager | Load a container |
 | DELETE | `/api/v1/containers/{name}` | Bearer | Manager | Unload a container |
 | PUT | `/api/v1/tls` | Bearer | Manager | Rotate intermediary CA cert+key |
+| PUT | `/api/v1/attestation-servers` | Bearer | Manager | Update attestation servers (URLs + tokens) |
 
 "Monitoring+" means the `enclave-os-virtual:monitoring` role or the
 `enclave-os-virtual:manager` role (manager implies monitoring).
@@ -244,6 +245,58 @@ After a successful update the manager:
 | 401 | Missing or invalid bearer token |
 | 403 | Insufficient role |
 | 500 | Failed to write files or reload Caddy |
+
+---
+
+### PUT /api/v1/attestation-servers
+
+Replace the attestation server list (URLs and optional bearer tokens).
+Changes take effect immediately: the Merkle tree and OID extensions are
+recomputed so that subsequent RA-TLS certificates reflect the new
+attestation servers hash (OID `1.3.6.1.4.1.65230.2.7`).
+
+Bearer tokens are sent as `Authorization: Bearer <token>` when the
+platform verifies quotes against authenticated attestation servers.
+
+**Request body**
+
+```json
+{
+  "servers": [
+    { "url": "https://as.privasys.org/", "token": "eyJhbGciOiJSUzI1NiIs..." },
+    { "url": "https://as.your-server.com/" }
+  ]
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `servers` | array | yes | Attestation server entries |
+| `servers[].url` | string | yes | Attestation server verification URL |
+| `servers[].token` | string | no | Optional OIDC bearer token |
+
+**Response** `200 OK`
+
+```json
+{
+  "status": "attestation_servers_updated",
+  "server_count": 2,
+  "hash": "a1b2c3d4..."
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `server_count` | int | Number of attestation servers now configured |
+| `hash` | string | Hex-encoded SHA-256 of the canonical URL list |
+
+**Error responses**
+
+| Status | Condition |
+|--------|----------|
+| 400 | Missing or empty servers array |
+| 401 | Missing or invalid bearer token |
+| 403 | Insufficient role |
 
 ---
 

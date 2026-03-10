@@ -229,6 +229,11 @@ type Launcher struct {
 	attestationServersHash [32]byte
 	hasAttestationServers  bool
 
+	// attestationTokens holds optional Bearer tokens for each attestation
+	// server URL.  Tokens are runtime secrets and are NOT hashed into the
+	// Merkle tree — only the server URL list feeds OID 2.7.
+	attestationTokens map[string]string
+
 	// dekOrigin is the data-encryption key origin string ("byok:<fingerprint>"
 	// or "generated").  Empty when the data partition is not encrypted.
 	dekOrigin string
@@ -249,13 +254,14 @@ type Launcher struct {
 // New creates a new Launcher with the given config.
 func New(cfg Config, log *zap.Logger) *Launcher {
 	l := &Launcher{
-		cfg:              cfg,
-		log:              log.Named("launcher"),
-		containerTrees:   make(map[string]*merkle.Tree),
-		imageDigests:     make(map[string][]byte),
-		pulledImages:     make(map[string]client.Image),
-		specs:            make(map[string]manifest.Container),
-		volumeEncryption: make(map[string]string),
+		cfg:               cfg,
+		log:               log.Named("launcher"),
+		containerTrees:    make(map[string]*merkle.Tree),
+		imageDigests:      make(map[string][]byte),
+		pulledImages:      make(map[string]client.Image),
+		specs:             make(map[string]manifest.Container),
+		volumeEncryption:  make(map[string]string),
+		attestationTokens: make(map[string]string),
 	}
 
 	// Compute attestation servers hash (sorted, newline-joined, SHA-256)
@@ -422,6 +428,71 @@ func (l *Launcher) ReloadCA(certPEM, keyPEM []byte) error {
 	}
 
 	return nil
+}
+
+// AttestationServer represents an attestation server with an optional bearer
+// token.  Mirrors the enclave-os-mini common::protocol::AttestationServer type.
+type AttestationServer struct {
+	URL   string `json:"url"`
+	Token string `json:"token,omitempty"`
+}
+
+// SetAttestationServers replaces the attestation server list (URLs and
+// optional bearer tokens) and recomputes the attestation hash + OID
+// extensions so that the change is visible in subsequent RA-TLS certificates.
+//
+// Returns (server_count, hex-encoded hash of canonical URL list).
+func (l *Launcher) SetAttestationServers(servers []AttestationServer) (int, string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// Rebuild URL list and token map.
+	urls := make([]string, 0, len(servers))
+	tokens := make(map[string]string, len(servers))
+	for _, s := range servers {
+		urls = append(urls, s.URL)
+		if s.Token != "" {
+			tokens[s.URL] = s.Token
+		}
+	}
+	l.cfg.AttestationServers = urls
+	l.attestationTokens = tokens
+
+	// Recompute hash.
+	var hashHex string
+	if len(urls) > 0 {
+		sorted := make([]string, len(urls))
+		copy(sorted, urls)
+		sort.Strings(sorted)
+		canonical := strings.Join(sorted, "\n")
+		l.attestationServersHash = sha256.Sum256([]byte(canonical))
+		l.hasAttestationServers = true
+		hashHex = fmt.Sprintf("%x", l.attestationServersHash)
+	} else {
+		l.attestationServersHash = [32]byte{}
+		l.hasAttestationServers = false
+	}
+
+	// Recompute Merkle tree + OID extensions so new certs reflect the change.
+	l.recomputeAttestation()
+	if err := l.writePlatformExtensions(); err != nil {
+		l.log.Warn("failed to write platform extensions after attestation servers update", zap.Error(err))
+	}
+
+	l.log.Info("attestation servers updated",
+		zap.Int("server_count", len(urls)),
+		zap.String("hash", hashHex),
+	)
+
+	return len(urls), hashHex
+}
+
+// AttestationToken returns the bearer token for the given attestation server
+// URL, or empty string if none is set.
+func (l *Launcher) AttestationToken(url string) string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.attestationTokens[url]
 }
 
 // atomicWrite writes data to a file atomically by writing to a temporary
