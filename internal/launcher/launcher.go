@@ -234,6 +234,10 @@ type Launcher struct {
 	// Merkle tree — only the server URL list feeds OID 2.7.
 	attestationTokens map[string]string
 
+	// tokenSource provides dynamically refreshed tokens (OIDC bootstrap).
+	// Takes precedence over attestationTokens when set.
+	tokenSource TokenSource
+
 	// dekOrigin is the data-encryption key origin string ("byok:<fingerprint>"
 	// or "generated").  Empty when the data partition is not encrypted.
 	dekOrigin string
@@ -430,6 +434,20 @@ func (l *Launcher) ReloadCA(certPEM, keyPEM []byte) error {
 	return nil
 }
 
+// TokenSource provides dynamic tokens for attestation servers.
+// Used by the OIDC bootstrap manager to supply auto-refreshed tokens.
+type TokenSource interface {
+	Token(serverURL string) string
+}
+
+// SetTokenSource sets a dynamic token source that takes precedence over
+// static tokens for attestation servers.
+func (l *Launcher) SetTokenSource(ts TokenSource) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.tokenSource = ts
+}
+
 // AttestationServer represents an attestation server with an optional bearer
 // token.  Mirrors the enclave-os-mini common::protocol::AttestationServer type.
 type AttestationServer struct {
@@ -489,9 +507,17 @@ func (l *Launcher) SetAttestationServers(servers []AttestationServer) (int, stri
 
 // AttestationToken returns the bearer token for the given attestation server
 // URL, or empty string if none is set.
+//
+// If a TokenSource is configured (via SetTokenSource), it takes precedence
+// over the static attestationTokens map.
 func (l *Launcher) AttestationToken(url string) string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+	if l.tokenSource != nil {
+		if tok := l.tokenSource.Token(url); tok != "" {
+			return tok
+		}
+	}
 	return l.attestationTokens[url]
 }
 
