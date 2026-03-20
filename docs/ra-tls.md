@@ -128,8 +128,11 @@ The process (performed by ra-tls-caddy):
 1. Generate an **ECDSA P-256 key pair** inside the TEE
 2. Compute `ReportData`:
    ```
-   report_data = SHA-512( SHA-256(leaf_public_key_DER) || binding )
+   report_data = SHA-512( SHA-256(SPKI_DER) || binding )
    ```
+   where `SPKI_DER` is the 91-byte DER-encoded `SubjectPublicKeyInfo` of
+   the leaf public key — the same structure whose SHA-256 appears as
+   "Public Key SHA-256" in standard X.509 certificate viewers.
    - **Challenge mode**: `binding` = nonce from ClientHello extension `0xFFBB`
    - **Deterministic mode**: `binding` = creation timestamp (`"2006-01-02T15:04Z"`)
 3. Request a **TDX quote** (or SGX quote) with the `ReportData`
@@ -299,8 +302,11 @@ The client sends a random nonce in a TLS ClientHello extension (`0xFFBB`).
 ra-tls-caddy binds this nonce into the TDX/SGX quote's `ReportData`:
 
 ```
-report_data = SHA-512( SHA-256(pubkey) || nonce )
+report_data = SHA-512( SHA-256(SPKI_DER) || nonce )
 ```
+
+Here `SPKI_DER` is the full 91-byte `SubjectPublicKeyInfo` — its SHA-256 is
+the standard public key fingerprint shown by any X.509 viewer.
 
 This proves the certificate was generated **in response to this specific
 connection**.  The certificate is valid for 5 minutes and is never cached.
@@ -315,7 +321,7 @@ with the `ratls` build tag.
 When no nonce is present, ra-tls-caddy uses the creation timestamp as binding:
 
 ```
-report_data = SHA-512( SHA-256(pubkey) || "2006-01-02T15:04Z" )
+report_data = SHA-512( SHA-256(SPKI_DER) || "2006-01-02T15:04Z" )
 ```
 
 The certificate is cached by certmagic for up to 24 hours.
