@@ -5,8 +5,8 @@
 //
 // The manager accepts standard OIDC bearer tokens validated via JWKS
 // discovery. Tokens must carry either the manager role
-// (enclave-os-virtual:manager) for mutating operations, or the
-// monitoring role (enclave-os-virtual:monitoring) for read-only access
+// (privasys-platform:manager) for mutating operations, or the
+// monitoring role (privasys-platform:monitoring) for read-only access
 // (healthz, readyz, status, metrics).
 //
 // # Policy: containers claim
@@ -122,11 +122,11 @@ type OIDCConfig struct {
 	Audience string
 
 	// ManagerRole is the role required for mutating operations
-	// (load/unload containers). Default: "enclave-os-virtual:manager".
+	// (load/unload containers). Default: "privasys-platform:manager".
 	ManagerRole string
 
 	// MonitoringRole is the role for read-only operations
-	// (healthz, readyz, status, metrics). Default: "enclave-os-virtual:monitoring".
+	// (healthz, readyz, status, metrics). Default: "privasys-platform:monitoring".
 	MonitoringRole string
 
 	// RoleClaim is the JWT claim key containing roles.
@@ -155,10 +155,10 @@ func NewVerifier(oidcCfg *OIDCConfig, log *zap.Logger) (*Verifier, error) {
 		oidcCfg.RoleClaim = "urn:zitadel:iam:org:project:roles"
 	}
 	if oidcCfg.ManagerRole == "" {
-		oidcCfg.ManagerRole = "enclave-os-virtual:manager"
+		oidcCfg.ManagerRole = "privasys-platform:manager"
 	}
 	if oidcCfg.MonitoringRole == "" {
-		oidcCfg.MonitoringRole = "enclave-os-virtual:monitoring"
+		oidcCfg.MonitoringRole = "privasys-platform:monitoring"
 	}
 
 	v := &Verifier{

@@ -29,10 +29,10 @@ func TestNewVerifier_Defaults(t *testing.T) {
 	if v.oidc.RoleClaim != "urn:zitadel:iam:org:project:roles" {
 		t.Fatalf("expected default role claim, got %s", v.oidc.RoleClaim)
 	}
-	if v.oidc.ManagerRole != "enclave-os-virtual:manager" {
+	if v.oidc.ManagerRole != "privasys-platform:manager" {
 		t.Fatalf("expected default manager role, got %s", v.oidc.ManagerRole)
 	}
-	if v.oidc.MonitoringRole != "enclave-os-virtual:monitoring" {
+	if v.oidc.MonitoringRole != "privasys-platform:monitoring" {
 		t.Fatalf("expected default monitoring role, got %s", v.oidc.MonitoringRole)
 	}
 }
@@ -148,27 +148,27 @@ func TestHasMonitoringAccess(t *testing.T) {
 func TestCheckRole_ZitadelMap(t *testing.T) {
 	claims := map[string]interface{}{
 		"urn:zitadel:iam:org:project:roles": map[string]interface{}{
-			"enclave-os-virtual:manager": map[string]interface{}{
+			"privasys-platform:manager": map[string]interface{}{
 				"orgId": "123",
 			},
 		},
 	}
-	if !checkRole(claims, "enclave-os-virtual:manager", "urn:zitadel:iam:org:project:roles") {
+	if !checkRole(claims, "privasys-platform:manager", "urn:zitadel:iam:org:project:roles") {
 		t.Fatal("expected Zitadel map role to match")
 	}
-	if checkRole(claims, "enclave-os-virtual:monitoring", "urn:zitadel:iam:org:project:roles") {
+	if checkRole(claims, "privasys-platform:monitoring", "urn:zitadel:iam:org:project:roles") {
 		t.Fatal("expected monitoring role not to match")
 	}
 }
 
 func TestCheckRole_StandardArray(t *testing.T) {
 	claims := map[string]interface{}{
-		"roles": []interface{}{"enclave-os-virtual:monitoring", "user"},
+		"roles": []interface{}{"privasys-platform:monitoring", "user"},
 	}
-	if !checkRole(claims, "enclave-os-virtual:monitoring", "urn:zitadel:iam:org:project:roles") {
+	if !checkRole(claims, "privasys-platform:monitoring", "urn:zitadel:iam:org:project:roles") {
 		t.Fatal("expected standard roles array to match")
 	}
-	if checkRole(claims, "enclave-os-virtual:manager", "urn:zitadel:iam:org:project:roles") {
+	if checkRole(claims, "privasys-platform:manager", "urn:zitadel:iam:org:project:roles") {
 		t.Fatal("expected manager role not in standard roles")
 	}
 }
@@ -176,10 +176,10 @@ func TestCheckRole_StandardArray(t *testing.T) {
 func TestCheckRole_KeycloakRealmAccess(t *testing.T) {
 	claims := map[string]interface{}{
 		"realm_access": map[string]interface{}{
-			"roles": []interface{}{"enclave-os-virtual:manager"},
+			"roles": []interface{}{"privasys-platform:manager"},
 		},
 	}
-	if !checkRole(claims, "enclave-os-virtual:manager", "urn:zitadel:iam:org:project:roles") {
+	if !checkRole(claims, "privasys-platform:manager", "urn:zitadel:iam:org:project:roles") {
 		t.Fatal("expected Keycloak realm_access role to match")
 	}
 }

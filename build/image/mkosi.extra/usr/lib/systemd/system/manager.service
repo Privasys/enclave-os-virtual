@@ -20,8 +20,8 @@ ExecStart=/usr/bin/manager serve \
     --dek-origin-file /run/luks/dek-origin \
     --oidc-issuer ${OIDC_ISSUER} \
     --oidc-audience ${OIDC_AUDIENCE:-enclave-os-virtual} \
-    --oidc-manager-role ${OIDC_MANAGER_ROLE:-enclave-os-virtual:manager} \
-    --oidc-monitoring-role ${OIDC_MONITORING_ROLE:-enclave-os-virtual:monitoring} \
+    --oidc-manager-role ${OIDC_MANAGER_ROLE:-privasys-platform:manager} \
+    --oidc-monitoring-role ${OIDC_MONITORING_ROLE:-privasys-platform:monitoring} \
     --log-level info
 Restart=on-failure
 RestartSec=5

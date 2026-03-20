@@ -111,9 +111,9 @@ func runServe(args []string) error {
 		"OIDC issuer URL for bearer token verification (required, e.g. https://auth.example.com)")
 	oidcAudience := fs.String("oidc-audience", "enclave-os-virtual",
 		"Expected OIDC audience claim")
-	oidcManagerRole := fs.String("oidc-manager-role", "enclave-os-virtual:manager",
+	oidcManagerRole := fs.String("oidc-manager-role", "privasys-platform:manager",
 		"OIDC role required for mutating operations (load/unload)")
-	oidcMonitoringRole := fs.String("oidc-monitoring-role", "enclave-os-virtual:monitoring",
+	oidcMonitoringRole := fs.String("oidc-monitoring-role", "privasys-platform:monitoring",
 		"OIDC role for read-only access (healthz, readyz, status, metrics)")
 	oidcRoleClaim := fs.String("oidc-role-claim", "urn:zitadel:iam:org:project:roles",
 		"JWT claim key containing roles (supports map or array formats)")

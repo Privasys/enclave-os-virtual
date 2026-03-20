@@ -27,8 +27,8 @@ Two roles control what the bearer can do:
 
 | Role | Claim value | Access |
 |------|-------------|--------|
-| Manager | `enclave-os-virtual:manager` | Full: load/unload containers, status, metrics |
-| Monitoring | `enclave-os-virtual:monitoring` | Read-only: readyz, status, metrics |
+| Manager | `privasys-platform:manager` | Full: load/unload containers, status, metrics |
+| Monitoring | `privasys-platform:monitoring` | Read-only: readyz, status, metrics |
 
 Manager access implies monitoring access.
 
@@ -75,14 +75,14 @@ problem — the enclave can verify tokens from boot.
 │                                                           │
 │  2. Operator obtains an OIDC token with manager role:     │
 │     { aud: "enclave-os-virtual",                          │
-│       roles: ["enclave-os-virtual:manager"],              │
+│       roles: ["privasys-platform:manager"],               │
 │       containers: [{ name: "myapp", digest: "..." }] }    │
 │                                                           │
 │  3. POST /api/v1/containers with OIDC bearer token        │
 │     → loads application containers                        │
 │                                                           │
 │  4. Subsequent operations use OIDC bearer tokens:         │
-│     - enclave-os-virtual:manager for mutations            │
-│     - enclave-os-virtual:monitoring for read-only         │
+│     - privasys-platform:manager for mutations             │
+│     - privasys-platform:monitoring for read-only          │
 └───────────────────────────────────────────────────────────┘
 ```

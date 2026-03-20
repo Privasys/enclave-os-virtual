@@ -19,8 +19,8 @@ See [setup.md](setup.md) for configuration and OIDC provider setup.
 | PUT | `/api/v1/tls` | Bearer | Manager | Rotate intermediary CA cert+key |
 | PUT | `/api/v1/attestation-servers` | Bearer | Manager | Update attestation servers (URLs + tokens) |
 
-"Monitoring+" means the `enclave-os-virtual:monitoring` role or the
-`enclave-os-virtual:manager` role (manager implies monitoring).
+"Monitoring+" means the `privasys-platform:monitoring` role or the
+`privasys-platform:manager` role (manager implies monitoring).
 
 ---
 

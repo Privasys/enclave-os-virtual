@@ -44,8 +44,8 @@ that publishes a JWKS endpoint.
 
 1. Create a project `enclave-os-virtual` in your OIDC provider.
 2. Add two project roles:
-   - `enclave-os-virtual:manager` — for operators who load/unload containers
-   - `enclave-os-virtual:monitoring` — for systems that read status/metrics
+   - `privasys-platform:manager` — for operators who load/unload containers
+   - `privasys-platform:monitoring` — for systems that read status/metrics
 3. Create an API application with audience `enclave-os-virtual`.
 4. Grant the appropriate role to users or service accounts.
 
@@ -53,8 +53,8 @@ that publishes a JWKS endpoint.
 
 | Role | Claim value | Capabilities |
 |------|-------------|-------------|
-| Manager | `enclave-os-virtual:manager` | Load/unload containers, view status, view metrics |
-| Monitoring | `enclave-os-virtual:monitoring` | View readyz, status, metrics |
+| Manager | `privasys-platform:manager` | Load/unload containers, view status, view metrics |
+| Monitoring | `privasys-platform:monitoring` | View readyz, status, metrics |
 
 Manager access implies monitoring access.
 
@@ -102,8 +102,8 @@ provided — the manager will refuse to start without them.
 | `--extensions-dir` | `/run/manager/extensions` | Per-hostname RA-TLS OID extension files |
 | `--dek-origin-file` | `/run/luks/dek-origin` | DEK origin string (`"external"` or `"enclave-generated"`, written by `luks-setup`) |
 | `--oidc-audience` | `enclave-os-virtual` | Expected `aud` claim |
-| `--oidc-manager-role` | `enclave-os-virtual:manager` | Role for mutating operations |
-| `--oidc-monitoring-role` | `enclave-os-virtual:monitoring` | Role for read-only access |
+| `--oidc-manager-role` | `privasys-platform:manager` | Role for mutating operations |
+| `--oidc-monitoring-role` | `privasys-platform:monitoring` | Role for read-only access |
 | `--oidc-role-claim` | `urn:zitadel:iam:org:project:roles` | JWT claim key containing roles |
 | `--log-level` | `info` | Log level: `debug`, `info`, `warn`, `error` |
 
@@ -149,8 +149,8 @@ ExecStart=/usr/bin/manager serve \
     --dek-origin-file /run/luks/dek-origin \
     --oidc-issuer ${OIDC_ISSUER} \
     --oidc-audience ${OIDC_AUDIENCE:-enclave-os-virtual} \
-    --oidc-manager-role ${OIDC_MANAGER_ROLE:-enclave-os-virtual:manager} \
-    --oidc-monitoring-role ${OIDC_MONITORING_ROLE:-enclave-os-virtual:monitoring} \
+    --oidc-manager-role ${OIDC_MANAGER_ROLE:-privasys-platform:manager} \
+    --oidc-monitoring-role ${OIDC_MONITORING_ROLE:-privasys-platform:monitoring} \
     --log-level info
 ```
 

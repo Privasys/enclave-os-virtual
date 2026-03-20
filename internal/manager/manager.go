@@ -7,8 +7,8 @@
 // # Authentication
 //
 // The API implements OIDC-based authentication. Requests must carry an
-// OIDC bearer token with the enclave-os-virtual:manager role for
-// mutating operations, or enclave-os-virtual:monitoring for read-only.
+// OIDC bearer token with the privasys-platform:manager role for
+// mutating operations, or privasys-platform:monitoring for read-only.
 //
 // Tokens can carry a "containers" claim restricting which
 // images may be loaded/unloaded. If absent, all are permitted.
