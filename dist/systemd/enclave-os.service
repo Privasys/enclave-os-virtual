@@ -7,12 +7,15 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-ExecStart=/usr/bin/enclave-os serve \
-    --manifest /etc/enclave-os/manifest.yaml \
-    --agent-addr :9443 \
-    --agent-tls-cert /etc/enclave-os/tls/server.pem \
-    --agent-tls-key /etc/enclave-os/tls/server-key.pem \
-    --agent-ca-cert /etc/enclave-os/tls/ca.pem \
+EnvironmentFile=-/data/manager.env
+ExecStart=/usr/bin/manager serve \
+    --oidc-issuer ${OIDC_ISSUER} \
+    --oidc-audience ${OIDC_AUDIENCE} \
+    --ca-cert /data/ca.crt \
+    --ca-key /data/ca.key \
+    --hostname ${HOSTNAME} \
+    --machine-name ${MACHINE_NAME} \
+    --attestation-servers ${ATTESTATION_SERVERS} \
     --log-level info
 Restart=on-failure
 RestartSec=5
@@ -21,7 +24,7 @@ RestartSec=5
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/enclave-os /run/containerd
+ReadWritePaths=/var/lib/enclave-os /run/containerd /run/manager /run/containers /data
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
@@ -30,7 +33,7 @@ ProtectControlGroups=yes
 # Logging.
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=enclave-os
+SyslogIdentifier=manager
 
 [Install]
 WantedBy=multi-user.target

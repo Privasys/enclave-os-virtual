@@ -2,7 +2,7 @@ module github.com/Privasys/enclave-os-virtual
 
 go 1.25.0
 
-// This module requires the Privasys/go fork (https://github.com/Privasys/go/tree/ratls)
+// This module requires the Privasys/go fork (https://github.com/Privasys/go/tree/privasys-ratls-extension)
 // which adds tls.ClientHelloInfo.RATLSChallenge for RA-TLS challenge-response attestation.
 // Build with: GOROOT=~/go-ratls go build ./cmd/manager
 
