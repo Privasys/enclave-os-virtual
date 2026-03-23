@@ -241,8 +241,9 @@ jobs:
             | **GCP Image** | `enclave-os-virtual-${{ steps.version.outputs.slug }}` |
 
             The dm-verity root hash is a SHA-256 digest of every byte on the read-only root filesystem.
-            It is embedded in the kernel command line and extended into **RTMR[1]** at boot.
-            Clients can verify this value via RA-TLS by inspecting the TDX quote in the server certificate.
+            It is embedded in the kernel command line and measured into **RTMR[2]** at boot (via CC MR 3).
+            RTMR[1] (CC MR 2) measures the EFI boot path (shim and GRUB binaries).
+            Clients can verify these values via RA-TLS by inspecting the TDX quote in the server certificate.
 
             ---
 

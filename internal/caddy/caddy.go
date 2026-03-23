@@ -210,15 +210,20 @@ func (c *Client) buildConfig() map[string]any {
 		})
 	}
 
-	// Build the RA-TLS issuer config.
-	issuer := map[string]any{
-		"module":       "ra_tls",
+	// Build the RA-TLS cert getter config. The cert getter module handles
+	// both deterministic and challenge-response attestation, with its own
+	// internal cache for non-challenge connections. Using get_certificate
+	// exclusively (without issuers) ensures that challenge-response
+	// connections bypass certmagic's cert cache and always receive a fresh
+	// certificate bound to the client's nonce.
+	certGetter := map[string]any{
+		"via":          "ra_tls",
 		"backend":      c.cfg.Backend,
 		"ca_cert_path": c.cfg.CACertPath,
 		"ca_key_path":  c.cfg.CAKeyPath,
 	}
 	if c.cfg.ExtensionsDir != "" {
-		issuer["extensions_dir"] = c.cfg.ExtensionsDir
+		certGetter["extensions_dir"] = c.cfg.ExtensionsDir
 	}
 
 	return map[string]any{
@@ -235,7 +240,7 @@ func (c *Client) buildConfig() map[string]any {
 				"automation": map[string]any{
 					"policies": []map[string]any{
 						{
-							"issuers": []map[string]any{issuer},
+							"get_certificate": []map[string]any{certGetter},
 						},
 					},
 				},

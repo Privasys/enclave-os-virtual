@@ -167,7 +167,7 @@ Each tagged release publishes:
 | **Disk image** | Bootable TDX Confidential VM image (cloud-specific formats produced by CI) |
 | **Disk tarball** | `enclave-os-virtual-VERSION.tar.gz` (GitHub Release asset) |
 
-The dm-verity root hash is embedded in the kernel command line (`roothash=...`) and extended into **RTMR[1]** at boot. Clients can verify it via RA-TLS by inspecting the TDX quote in the server's certificate.
+The dm-verity root hash is embedded in the kernel command line (`roothash=...`) and measured into **RTMR[2]** at boot (via CC MR 3). RTMR[1] (CC MR 2) measures the EFI boot path (shim and GRUB binaries). Together, a remote verifier can confirm the exact bootloader AND root filesystem by checking RTMR[1] and RTMR[2] in the TDX quote.
 
 See [GitHub Releases](https://github.com/Privasys/enclave-os-virtual/releases) for the full list of measurements.
 
