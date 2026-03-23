@@ -225,7 +225,7 @@ jobs:
         uses: google-github-actions/auth@v3
         continue-on-error: true
         with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          workload_identity_provider: projects/${{ vars.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/${{ vars.GCP_WIF_POOL }}/providers/${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
           project_id: ${{ env.GCP_PROJECT }}
 
@@ -268,6 +268,23 @@ jobs:
           |-------|-------|
           | **Version** | \`${{ steps.version.outputs.raw }}\` |
           | **GCP Image** | \`enclave-os-virtual-${{ steps.version.outputs.slug }}\` |
+          | **GCS URI** | \`gs://${{ env.GCS_BUCKET }}/enclave-os-virtual-${{ steps.version.outputs.raw }}.tar.gz\` |
           | **Image Family** | \`${{ env.IMAGE_FAMILY }}\` |
           | **dm-verity Root Hash** | \`${{ steps.verity.outputs.root_hash }}\` |
+
+          ### Deploy
+
+          \`\`\`bash
+          gcloud compute instances create enclave-os-production \\
+              --zone=europe-west9-a \\
+              --machine-type=c3-standard-4 \\
+              --network-interface=nic-type=GVNIC \\
+              --maintenance-policy=TERMINATE \\
+              --create-disk=auto-delete=yes,boot=yes,image=projects/${{ env.GCP_PROJECT }}/global/images/enclave-os-virtual-${{ steps.version.outputs.slug }},size=12,type=pd-balanced \\
+              --shielded-secure-boot \\
+              --shielded-vtpm \\
+              --shielded-integrity-monitoring \\
+              --confidential-compute-type=TDX \\
+              --metadata=luks-passphrase=YOUR_SECRET_PASSPHRASE
+          \`\`\`
           EOF
