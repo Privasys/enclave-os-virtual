@@ -24,6 +24,7 @@
 // GET    /healthz                    - liveness probe (always 200)
 // GET    /readyz                     - readiness probe (200 when all containers healthy)
 // GET    /api/v1/status              - JSON array of container statuses
+// GET    /api/v1/eventlog            - TCG2 event log for RTMR verification (base64)
 // POST   /api/v1/containers          - load a container (JSON body: LoadRequest)
 // DELETE /api/v1/containers/{name}   - unload a container
 // PUT    /api/v1/tls                 - rotate the intermediary CA cert+key
@@ -34,6 +35,7 @@ package manager
 import (
 	"context"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -138,6 +140,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// Monitoring endpoints (require monitoring or manager role).
 	mux.HandleFunc("GET /readyz", s.requireAuth(s.handleReadyz))
 	mux.HandleFunc("GET /api/v1/status", s.requireAuth(s.handleStatus))
+	mux.HandleFunc("GET /api/v1/eventlog", s.requireAuth(s.handleEventLog))
 	mux.Handle("GET /metrics", s.requireAuth(s.handleMetrics))
 
 	// Mutating endpoints (require manager role).
@@ -295,6 +298,42 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(statuses)
+}
+
+// handleEventLog handles GET /api/v1/eventlog.
+// Returns the TCG2 crypto-agile event log (base64-encoded) for client-side
+// RTMR replay and verification. The event log is measured by TDX firmware
+// and its replay must reproduce the RTMR values in the TDX quote.
+func (s *Server) handleEventLog(w http.ResponseWriter, r *http.Request) {
+	result := r.Context().Value(authResultKey).(*auth.AuthResult)
+	if !result.HasMonitoringAccess() {
+		s.jsonError(w, http.StatusForbidden, "monitoring role required")
+		return
+	}
+
+	// Try vTPM event log first, then CCEL ACPI table.
+	var data []byte
+	var source string
+	var err error
+
+	data, err = os.ReadFile("/sys/kernel/security/tpm0/binary_bios_measurements")
+	if err == nil && len(data) > 0 {
+		source = "tpm0"
+	} else {
+		data, err = os.ReadFile("/sys/firmware/acpi/tables/data/CCEL")
+		if err != nil {
+			s.jsonError(w, http.StatusNotFound, "event log not available")
+			return
+		}
+		source = "ccel"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"raw":    base64.StdEncoding.EncodeToString(data),
+		"source": source,
+	})
 }
 
 // handleLoadContainer handles POST /api/v1/containers.
