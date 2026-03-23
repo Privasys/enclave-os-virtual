@@ -18,9 +18,9 @@ permissions:
   id-token: write   # Required for GCP Workload Identity Federation
 
 env:
-  GCP_PROJECT: tdx-dev-487614
-  GCS_BUCKET: privasys-tdx-images
-  IMAGE_FAMILY: privasys-tdx
+  GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+  GCS_BUCKET: ${{ vars.GCS_BUCKET || 'privasys-tdx-images' }}
+  IMAGE_FAMILY: ${{ vars.IMAGE_FAMILY || 'privasys-tdx' }}
 
 jobs:
   build:
@@ -33,9 +33,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.24'
-          # Note: Using upstream Go 1.24 for CI compilation.
-          # The RA-TLS challenge-response feature requires the Privasys fork,
+          go-version: '1.25'
+          # Note: The RA-TLS challenge-response feature requires the Privasys fork,
           # but the binary compiles fine with upstream Go — the fork only
           # adds a field to tls.ClientHelloInfo at runtime.
 
@@ -269,23 +268,6 @@ jobs:
           |-------|-------|
           | **Version** | \`${{ steps.version.outputs.raw }}\` |
           | **GCP Image** | \`enclave-os-virtual-${{ steps.version.outputs.slug }}\` |
-          | **GCS URI** | \`gs://${{ env.GCS_BUCKET }}/enclave-os-virtual-${{ steps.version.outputs.raw }}.tar.gz\` |
           | **Image Family** | \`${{ env.IMAGE_FAMILY }}\` |
           | **dm-verity Root Hash** | \`${{ steps.verity.outputs.root_hash }}\` |
-
-          ### Deploy
-
-          \`\`\`bash
-          gcloud compute instances create enclave-os-production \\
-              --zone=europe-west9-a \\
-              --machine-type=c3-standard-4 \\
-              --network-interface=nic-type=GVNIC \\
-              --maintenance-policy=TERMINATE \\
-              --create-disk=auto-delete=yes,boot=yes,image=projects/${{ env.GCP_PROJECT }}/global/images/enclave-os-virtual-${{ steps.version.outputs.slug }},size=12,type=pd-balanced \\
-              --shielded-secure-boot \\
-              --shielded-vtpm \\
-              --shielded-integrity-monitoring \\
-              --confidential-compute-type=TDX \\
-              --metadata=luks-passphrase=YOUR_SECRET_PASSPHRASE
-          \`\`\`
           EOF
