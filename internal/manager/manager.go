@@ -330,10 +330,18 @@ func (s *Server) handleEventLog(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]string{
+
+	resp := map[string]any{
 		"raw":    base64.StdEncoding.EncodeToString(data),
 		"source": source,
-	})
+	}
+
+	// Include application-level RTMR[3] events if any exist.
+	if events := s.launcher.TPMEvents(); len(events) > 0 {
+		resp["app_events"] = events
+	}
+
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handleLoadContainer handles POST /api/v1/containers.

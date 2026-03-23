@@ -42,6 +42,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/manifest"
 	"github.com/Privasys/enclave-os-virtual/internal/merkle"
 	"github.com/Privasys/enclave-os-virtual/internal/oids"
+	"github.com/Privasys/enclave-os-virtual/internal/tpm"
 	"github.com/Privasys/enclave-os-virtual/internal/volume"
 
 	"github.com/containerd/containerd/v2/client"
@@ -212,6 +213,11 @@ type Launcher struct {
 	// Caddy integration is disabled (no ExtensionsDir configured).
 	caddyClient *caddy.Client
 
+	// tpmExtender extends vTPM PCR 16 (RTMR[3]) with application-level
+	// measurements on container load/unload. Nil-safe (no-ops when TPM
+	// is unavailable).
+	tpmExtender *tpm.Extender
+
 	// volMgr manages per-container encrypted volumes (LVM + LUKS2).
 	// Nil when the "containers" VG is not available.
 	volMgr *volume.Manager
@@ -287,6 +293,9 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 	} else {
 		l.log.Info("per-container encrypted volumes disabled (no VG 'containers')")
 	}
+
+	// Initialise TPM extender for RTMR[3] application measurements.
+	l.tpmExtender = tpm.NewExtender(log)
 
 	// Auto-detect TEE backend from hardware.
 	backend := detectTEEBackend()
@@ -643,6 +652,12 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// Recompute attestation.
 	l.recomputeAttestation()
 
+	// Extend RTMR[3] with the container identity (name + image digest).
+	if err := l.tpmExtender.ExtendContainerLoad(req.Name, digest); err != nil {
+		l.log.Warn("RTMR[3] extend failed (attestation continues via OID extensions)",
+			zap.String("name", req.Name), zap.Error(err))
+	}
+
 	// Write OID extensions and register Caddy route.
 	if l.caddyClient != nil {
 		// Update the platform extensions (reflects new container set).
@@ -710,6 +725,12 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 
 	// Recompute attestation.
 	l.recomputeAttestation()
+
+	// Extend RTMR[3] with the unload event.
+	if err := l.tpmExtender.ExtendContainerUnload(name); err != nil {
+		l.log.Warn("RTMR[3] extend failed on unload",
+			zap.String("name", name), zap.Error(err))
+	}
 
 	// Update Caddy configuration.
 	if l.caddyClient != nil {
@@ -845,6 +866,11 @@ func (l *Launcher) ContainerExtensions(containerName string) ([]pkix.Extension, 
 	volEnc := l.volumeEncryption[containerName]
 
 	return oids.ContainerExtensions(root, digest, spec.Image, volEnc), nil
+}
+
+// TPMEvents returns the application event log for RTMR[3] replay verification.
+func (l *Launcher) TPMEvents() []tpm.Event {
+	return l.tpmExtender.Events()
 }
 
 // StatusReport returns a summary of all containers and their health.

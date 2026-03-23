@@ -8,6 +8,7 @@ go 1.25.0
 
 require (
 	github.com/containerd/containerd/v2 v2.0.4
+	github.com/google/go-tpm v0.9.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/opencontainers/runtime-spec v1.2.0
 	github.com/prometheus/client_golang v1.21.1
@@ -70,8 +71,9 @@ require (
 	google.golang.org/protobuf v1.36.1 // indirect
 )
 
-// ra-tls-caddy and caddy will be added when the reverse proxy integration
-// is implemented. For now, the launcher manages containers only.
+// Caddy is built as a separate binary via xcaddy in build.sh (not embedded
+// in the manager). ra-tls-caddy and caddy are not Go dependencies of this
+// module — they are only build-time dependencies of the image.
 // github.com/Privasys/ra-tls-caddy
 // github.com/caddyserver/caddy/v2 v2.9.1
 // github.com/google/go-tdx-guest v0.3.1

@@ -2,12 +2,15 @@
 # Build the Enclave OS (Virtual) disk image.
 #
 # This script:
-#   1. Cross-compiles the enclave-os Go binary for linux/amd64
-#   2. Places it in the mkosi.extra overlay
-#   3. Runs mkosi to build the disk image
+#   1. Cross-compiles the manager Go binary for linux/amd64
+#   2. Builds Caddy with the ra-tls-caddy module via xcaddy
+#   3. Optionally bakes a manifest into the image
+#   4. Fixes symlinks (Git may check them out as plain text)
+#   5. Runs mkosi to build the disk image
 #
 # Requirements:
 #   - Go 1.25+ (Privasys fork with RA-TLS)
+#   - xcaddy (go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest)
 #   - mkosi==26 (pip install mkosi==26)
 #   - Must be run as root (for mkosi)
 #   - Must be run on Linux (Ubuntu 24.04 recommended)
@@ -50,21 +53,34 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
     "$REPO_ROOT/cmd/manager/"
 echo "Binary built: $EXTRA_DIR/usr/bin/manager"
 
-# Step 2: Optionally bake in a manifest.
+# Step 2: Build the Caddy binary with ra-tls-caddy module.
+echo ""
+echo "=== Step 2: Building Caddy with ra-tls-caddy ==="
+RA_TLS_CADDY_DIR="$REPO_ROOT/../../libraries/ra-tls-caddy/src"
+if [ ! -d "$RA_TLS_CADDY_DIR" ]; then
+    echo "ERROR: ra-tls-caddy source not found at $RA_TLS_CADDY_DIR"
+    exit 1
+fi
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 xcaddy build \
+    --with "github.com/Privasys/ra-tls-caddy=$RA_TLS_CADDY_DIR" \
+    --output "$EXTRA_DIR/usr/bin/caddy"
+echo "Caddy built: $EXTRA_DIR/usr/bin/caddy"
+
+# Step 3: Optionally bake in a manifest.
 if [ -n "$MANIFEST_PATH" ]; then
     echo ""
-    echo "=== Step 2: Baking manifest into image ==="
+    echo "=== Step 3: Baking manifest into image ==="
     mkdir -p "$EXTRA_DIR/data"
     cp "$MANIFEST_PATH" "$EXTRA_DIR/data/manifest.yaml"
     echo "Manifest copied: $MANIFEST_PATH"
 else
     echo ""
-    echo "=== Step 2: No manifest specified (will need to provide at runtime) ==="
+    echo "=== Step 3: No manifest specified (will need to provide at runtime) ==="
 fi
 
-# Step 3: Fix symlinks (Git may check them out as plain text).
+# Step 4: Fix symlinks (Git may check them out as plain text).
 echo ""
-echo "=== Step 3: Fixing symlinks ==="
+echo "=== Step 4: Fixing symlinks ==="
 cd "$EXTRA_DIR/etc/systemd/system"
 for f in local-fs.target.wants/data.mount \
          local-fs.target.wants/var-log.mount \
@@ -72,6 +88,7 @@ for f in local-fs.target.wants/data.mount \
          multi-user.target.wants/systemd-networkd.service \
          multi-user.target.wants/containerd.service \
          multi-user.target.wants/manager.service \
+         multi-user.target.wants/caddy.service \
          sockets.target.wants/systemd-networkd.socket \
          sysinit.target.wants/systemd-networkd-wait-online.service; do
     if [ -f "$f" ] && [ ! -L "$f" ]; then
@@ -91,9 +108,9 @@ if [ -f "$EXTRA_DIR/etc/resolv.conf" ] && [ ! -L "$EXTRA_DIR/etc/resolv.conf" ];
     echo "  Fixed symlink: resolv.conf -> $target"
 fi
 
-# Step 4: Build the disk image with mkosi.
+# Step 5: Build the disk image with mkosi.
 echo ""
-echo "=== Step 4: Building disk image with mkosi ==="
+echo "=== Step 5: Building disk image with mkosi ==="
 cd "$IMAGE_DIR"
 mkosi build
 

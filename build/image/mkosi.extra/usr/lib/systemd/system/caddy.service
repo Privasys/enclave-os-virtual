@@ -1,0 +1,36 @@
+[Unit]
+Description=Caddy RA-TLS Reverse Proxy
+Documentation=https://caddyserver.com/docs/
+After=network-online.target data.mount luks-data.service
+Wants=network-online.target
+Before=manager.service
+
+[Service]
+Type=simple
+
+# Start Caddy with an empty config and the admin API on localhost:2019.
+# The manager will push the full config (routes, TLS automation) via
+# POST /load once it is ready.
+ExecStart=/usr/bin/caddy run --resume
+
+Restart=on-failure
+RestartSec=5
+
+# Security hardening.
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+
+# Caddy binds to port 443 — needs CAP_NET_BIND_SERVICE.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Logging.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=caddy
+
+[Install]
+WantedBy=multi-user.target
