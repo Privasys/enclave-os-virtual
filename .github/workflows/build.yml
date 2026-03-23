@@ -194,37 +194,8 @@ jobs:
           rm disk.raw
           ls -lh enclave-os-virtual-*.tar.gz
 
-      - name: Authenticate to GCP
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_gcp == 'true'
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-          project_id: ${{ env.GCP_PROJECT }}
-
-      - name: Set up gcloud
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_gcp == 'true'
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Upload image to GCS
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_gcp == 'true'
-        run: |
-          gcloud storage cp \
-            "enclave-os-virtual-${{ steps.version.outputs.raw }}.tar.gz" \
-            "gs://${{ env.GCS_BUCKET }}/"
-
-      - name: Create GCP Compute image
-        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_gcp == 'true'
-        run: |
-          gcloud compute images create \
-            "enclave-os-virtual-${{ steps.version.outputs.slug }}" \
-            --project="${{ env.GCP_PROJECT }}" \
-            --source-uri="gs://${{ env.GCS_BUCKET }}/enclave-os-virtual-${{ steps.version.outputs.raw }}.tar.gz" \
-            --guest-os-features=TDX_CAPABLE,UEFI_COMPATIBLE,GVNIC,VIRTIO_SCSI_MULTIQUEUE \
-            --family="${{ env.IMAGE_FAMILY }}"
-          echo "✓ GCP image created: enclave-os-virtual-${{ steps.version.outputs.slug }}"
-
-      # ── GitHub Release (tag push only) ──
+      # ── GitHub Release (tag push only — runs before GCP upload so a WIF
+      #    misconfiguration doesn't block the release) ──
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -246,6 +217,45 @@ jobs:
             Clients can verify these values via RA-TLS by inspecting the TDX quote in the server certificate.
 
             ---
+
+      # ── GCP image publish (tag push or manual trigger) ──
+
+      - name: Authenticate to GCP
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_gcp == 'true'
+        id: gcp_auth
+        uses: google-github-actions/auth@v2
+        continue-on-error: true
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          project_id: ${{ env.GCP_PROJECT }}
+
+      - name: Set up gcloud
+        if: steps.gcp_auth.outcome == 'success'
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Upload image to GCS
+        if: steps.gcp_auth.outcome == 'success'
+        run: |
+          gcloud storage cp \
+            "enclave-os-virtual-${{ steps.version.outputs.raw }}.tar.gz" \
+            "gs://${{ env.GCS_BUCKET }}/"
+
+      - name: Create GCP Compute image
+        if: steps.gcp_auth.outcome == 'success'
+        run: |
+          gcloud compute images create \
+            "enclave-os-virtual-${{ steps.version.outputs.slug }}" \
+            --project="${{ env.GCP_PROJECT }}" \
+            --source-uri="gs://${{ env.GCS_BUCKET }}/enclave-os-virtual-${{ steps.version.outputs.raw }}.tar.gz" \
+            --guest-os-features=TDX_CAPABLE,UEFI_COMPATIBLE,GVNIC,VIRTIO_SCSI_MULTIQUEUE \
+            --family="${{ env.IMAGE_FAMILY }}"
+          echo "✓ GCP image created: enclave-os-virtual-${{ steps.version.outputs.slug }}"
+
+      - name: Warn if GCP upload was skipped
+        if: steps.gcp_auth.outcome != 'success' && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.publish_gcp == 'true')
+        run: |
+          echo "::warning::GCP image upload was skipped because Workload Identity Federation authentication failed. Configure the GCP_WIF_PROVIDER and GCP_SERVICE_ACCOUNT secrets, or set up the WIF pool in project ${{ env.GCP_PROJECT }}."
 
       # ── Summary ──
 
