@@ -11,6 +11,10 @@ Type=simple
 # Start Caddy with an empty config and the admin API on localhost:2019.
 # The manager will push the full config (routes, TLS automation) via
 # POST /load once it is ready.
+# Writable state directories — rootfs is read-only (erofs).
+Environment=XDG_DATA_HOME=/data/caddy
+Environment=XDG_CONFIG_HOME=/run/caddy
+
 ExecStart=/usr/bin/caddy run --resume
 
 Restart=on-failure
