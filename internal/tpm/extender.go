@@ -1,6 +1,11 @@
-// Package tpm provides vTPM PCR extend operations for application-level
-// measurements. In a TDX VM, extending PCR 16 automatically feeds RTMR[3]
-// (the application-defined measurement register).
+// Package tpm provides application-level measurement operations for TDX
+// runtime attestation.
+//
+// Measurements are recorded in two places:
+//   - TDX RTMR[3] via the kernel sysfs interface (primary — appears in
+//     the TDX quote and is verified by remote attesters).
+//   - vTPM PCR 16 via TPM2_PCR_Extend (secondary — appears in the vTPM
+//     event log for cross-verification).
 //
 // The extend operation is cumulative and irreversible:
 //
@@ -24,8 +29,13 @@ import (
 )
 
 const (
-	// pcr16 is the application-defined PCR that maps to RTMR[3] in TDX.
+	// pcr16 is the application-defined PCR used for vTPM event logging.
 	pcr16 = 16
+
+	// rtmr3Sysfs is the kernel sysfs path for extending TDX RTMR[3].
+	// Writing a 48-byte SHA-384 digest triggers TDG.MR.RTMR.EXTEND via
+	// the tdx_guest kernel module.
+	rtmr3Sysfs = "/sys/devices/virtual/misc/tdx_guest/measurements/rtmr3:sha384"
 )
 
 // Event represents a single application measurement event for RTMR[3]
@@ -39,36 +49,49 @@ type Event struct {
 	Description  string `json:"description"`
 }
 
-// Extender manages TPM PCR extend operations and maintains an application
-// event log for RTMR[3] replay verification.
+// Extender manages RTMR and PCR extend operations and maintains an
+// application event log for RTMR[3] replay verification.
 type Extender struct {
 	log       *zap.Logger
-	device    string
+	device    string // vTPM device path
+	rtmrPath  string // sysfs path for direct RTMR[3] extend
 	events    []Event
 	available bool
 	mu        sync.Mutex
 }
 
-// NewExtender creates a new TPM extender. Returns a no-op extender if the
-// TPM device is not available (graceful degradation for non-TDX environments).
+// NewExtender creates a new TPM extender. Returns a no-op extender if
+// neither the TDX sysfs interface nor a vTPM device is available.
 func NewExtender(log *zap.Logger) *Extender {
 	e := &Extender{
 		log:    log.Named("tpm"),
 		events: make([]Event, 0),
 	}
 
-	// Prefer the resource manager device.
+	// Check for the TDX RTMR sysfs interface (primary).
+	if info, err := os.Stat(rtmr3Sysfs); err == nil && info.Mode().Perm()&0200 != 0 {
+		e.rtmrPath = rtmr3Sysfs
+		log.Info("TDX RTMR[3] sysfs interface available",
+			zap.String("path", rtmr3Sysfs))
+	}
+
+	// Check for a vTPM device (secondary — event log).
 	for _, dev := range []string{"/dev/tpmrm0", "/dev/tpm0"} {
 		if _, err := os.Stat(dev); err == nil {
 			e.device = dev
-			e.available = true
-			log.Info("TPM device found — RTMR[3] extend enabled",
-				zap.String("device", dev))
-			return e
+			break
 		}
 	}
 
-	log.Warn("no TPM device found — RTMR[3] extend disabled")
+	if e.rtmrPath != "" || e.device != "" {
+		e.available = true
+		log.Info("TPM device found — RTMR[3] extend enabled",
+			zap.String("device", e.device),
+			zap.Bool("direct_rtmr", e.rtmrPath != ""))
+	} else {
+		log.Warn("no TPM device found — RTMR[3] extend disabled")
+	}
+
 	return e
 }
 
@@ -100,7 +123,7 @@ func (e *Extender) Events() []Event {
 	return out
 }
 
-// extend hashes the data and performs the PCR extend.
+// extend hashes the data and performs the RTMR + PCR extend.
 func (e *Extender) extend(eventType, description string, data []byte) error {
 	hash384 := sha512.Sum384(data)
 	hash256 := sha256.Sum256(data)
@@ -109,11 +132,23 @@ func (e *Extender) extend(eventType, description string, data []byte) error {
 	defer e.mu.Unlock()
 
 	if e.available {
-		if err := e.pcrExtend(hash384[:], hash256[:]); err != nil {
-			e.log.Error("PCR 16 extend failed",
-				zap.Error(err),
-				zap.String("event", description))
-			return fmt.Errorf("tpm: PCR extend failed: %w", err)
+		// Primary: extend TDX RTMR[3] directly via the kernel sysfs interface.
+		if e.rtmrPath != "" {
+			if err := e.rtmrExtend(hash384[:]); err != nil {
+				e.log.Error("RTMR[3] sysfs extend failed",
+					zap.Error(err),
+					zap.String("event", description))
+				return fmt.Errorf("tpm: RTMR[3] extend failed: %w", err)
+			}
+		}
+
+		// Secondary: extend vTPM PCR 16 for event log cross-verification.
+		if e.device != "" {
+			if err := e.pcrExtend(hash384[:], hash256[:]); err != nil {
+				e.log.Warn("PCR 16 extend failed (non-fatal)",
+					zap.Error(err),
+					zap.String("event", description))
+			}
 		}
 	}
 
@@ -126,14 +161,15 @@ func (e *Extender) extend(eventType, description string, data []byte) error {
 		Description:  description,
 	})
 
-	e.log.Info("RTMR[3] extended (PCR 16)",
+	e.log.Info("RTMR[3] extended",
 		zap.String("event", description),
-		zap.String("sha384", fmt.Sprintf("%x", hash384[:8])))
+		zap.String("sha384", fmt.Sprintf("%x", hash384[:8])),
+		zap.Bool("direct_rtmr", e.rtmrPath != ""))
 	return nil
 }
 
 // pcrExtend sends a TPM2_PCR_Extend command to extend PCR 16 with both
-// SHA-384 (maps to RTMR[3]) and SHA-256 banks.
+// SHA-384 and SHA-256 banks for event log cross-verification.
 func (e *Extender) pcrExtend(sha384Digest, sha256Digest []byte) error {
 	t, err := transport.OpenTPM(e.device)
 	if err != nil {
@@ -162,6 +198,15 @@ func (e *Extender) pcrExtend(sha384Digest, sha256Digest []byte) error {
 
 	if _, err := cmd.Execute(t); err != nil {
 		return fmt.Errorf("TPM2_PCR_Extend: %w", err)
+	}
+	return nil
+}
+
+// rtmrExtend writes a 48-byte SHA-384 digest to the kernel sysfs interface,
+// triggering TDG.MR.RTMR.EXTEND via the tdx_guest kernel module.
+func (e *Extender) rtmrExtend(sha384Digest []byte) error {
+	if err := os.WriteFile(e.rtmrPath, sha384Digest, 0); err != nil {
+		return fmt.Errorf("write %s: %w", e.rtmrPath, err)
 	}
 	return nil
 }
