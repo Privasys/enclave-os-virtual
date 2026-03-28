@@ -58,7 +58,7 @@ jobs:
           # and use a local replace — same as build.sh.
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
           export PATH="$(go env GOPATH)/bin:$PATH"
-          git clone --depth 1 --branch v0.2.0 https://github.com/Privasys/ra-tls-caddy.git /tmp/ra-tls-caddy
+          git clone --depth 1 --branch v0.3.0 https://github.com/Privasys/ra-tls-caddy.git /tmp/ra-tls-caddy
           xcaddy build \
             --with github.com/Privasys/ra-tls-caddy=/tmp/ra-tls-caddy/src \
             --output build/image/mkosi.extra/usr/bin/caddy
