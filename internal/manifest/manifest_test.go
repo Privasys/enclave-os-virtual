@@ -9,7 +9,7 @@ func sampleManifest() *Manifest {
 	return &Manifest{
 		Version: "1",
 		Platform: Platform{
-			Hostname:           "manager.prod1.example.com",
+			Hostname:           "v-fr-1.example.com",
 			CACertPath:         "/data/ca.crt",
 			CAKeyPath:          "/data/ca.key",
 			AttestationServers: []string{"https://as.privasys.org/verify"},
@@ -40,7 +40,7 @@ func TestParse(t *testing.T) {
 	yaml := `
 version: "1"
 platform:
-  hostname: manager.prod1.example.com
+  hostname: v-fr-1.example.com
   ca_cert: /data/ca.crt
   ca_key: /data/ca.key
   attestation_servers:

@@ -21,6 +21,9 @@ env:
   GCP_PROJECT: ${{ vars.GCP_PROJECT }}
   GCS_BUCKET: ${{ vars.GCS_BUCKET || 'privasys-tdx-images' }}
   IMAGE_FAMILY: ${{ vars.IMAGE_FAMILY || 'privasys-tdx' }}
+  GOPROXY: https://proxy.golang.org,direct
+  GONOSUMCHECK: '*'
+  GONOSUMDB: '*'
 
 jobs:
   build:
@@ -30,13 +33,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: '1.25'
-          # Note: The RA-TLS challenge-response feature requires the Privasys fork,
-          # but the binary compiles fine with upstream Go — the fork only
-          # adds a field to tls.ClientHelloInfo at runtime.
+      - name: Install Privasys Go fork
+        run: |
+          # The RA-TLS challenge-response feature requires the Privasys Go fork
+          # which adds tls.ClientHelloInfo.RATLSChallenge.
+          # The manager binary compiles with upstream Go (fork needed at runtime),
+          # but Caddy + ra-tls-caddy requires the fork at COMPILE time.
+          curl -sL https://github.com/Privasys/go/releases/download/privasys-v0.2.0-go1.25.8/go-ratls-privasys-v0.2.0-go1.25.8-linux-amd64.tar.gz -o /tmp/go-ratls.tar.gz
+          sudo tar -C /usr/local -xzf /tmp/go-ratls.tar.gz
+          echo "/usr/local/go-ratls/bin" >> "$GITHUB_PATH"
+          /usr/local/go-ratls/bin/go version
 
       - name: Build manager binary
         run: |
@@ -44,6 +50,20 @@ jobs:
             -ldflags="-s -w" \
             -o build/image/mkosi.extra/usr/bin/manager \
             ./cmd/manager/
+
+      - name: Build Caddy with ra-tls-caddy
+        run: |
+          # Install xcaddy, then build Caddy with the RA-TLS module.
+          # ra-tls-caddy's go.mod is in src/ (not repo root), so we clone
+          # and use a local replace — same as build.sh.
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          git clone --depth 1 --branch v0.2.0 https://github.com/Privasys/ra-tls-caddy.git /tmp/ra-tls-caddy
+          xcaddy build \
+            --with github.com/Privasys/ra-tls-caddy=/tmp/ra-tls-caddy/src \
+            --output build/image/mkosi.extra/usr/bin/caddy
+          chmod +x build/image/mkosi.extra/usr/bin/caddy
+          ls -lh build/image/mkosi.extra/usr/bin/caddy
 
       - name: Install mkosi and build dependencies
         run: |
@@ -68,6 +88,7 @@ jobs:
             multi-user.target.wants/systemd-networkd.service \
             multi-user.target.wants/containerd.service \
             multi-user.target.wants/manager.service \
+            multi-user.target.wants/caddy.service \
             sockets.target.wants/systemd-networkd.socket \
             sysinit.target.wants/systemd-networkd-wait-online.service; do
             if [ -f "$f" ] && [ ! -L "$f" ]; then

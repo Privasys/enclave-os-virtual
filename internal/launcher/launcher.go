@@ -67,8 +67,7 @@ type Config struct {
 	ExtensionsDir string
 
 	// MachineName is the instance machine name (e.g. "prod1").  Together
-	// with Hostname it determines all RA-TLS hostnames:
-	//   Manager:   manager.<MachineName>.<Hostname>
+	// with Hostname it determines container RA-TLS hostnames:
 	//   Container: <name>.<MachineName>.<Hostname>
 	MachineName string
 
@@ -76,8 +75,8 @@ type Config struct {
 	// (e.g. "example.com").
 	Hostname string
 
-	// PlatformHostname is the computed FQDN for the management API route
-	// in Caddy (manager.<MachineName>.<Hostname>).  Set by the caller.
+	// PlatformHostname is the FQDN for the management API route in Caddy
+	// (e.g. "v-fr-1.example.com").  Set by the caller via --platform-hostname.
 	PlatformHostname string
 
 	// ManagementPort is the local port for the management API
@@ -157,6 +156,12 @@ type LoadRequest struct {
 	// IMPORTANT: This is a runtime secret and is deliberately excluded
 	// from the per-container Config Merkle Tree.
 	StorageKey string `json:"storage_key,omitempty"`
+
+	// Hostname is the external FQDN for this container's Caddy route
+	// and extension files. If set, it overrides the auto-derived
+	// <name>.<machine_name>.<hostname> scheme. This should match the
+	// gateway hostname (e.g. "myapp.apps.privasys.org").
+	Hostname string `json:"hostname,omitempty"`
 }
 
 // Validate checks the load request for required fields.
@@ -557,10 +562,10 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 
 	spec := req.toContainerSpec()
 
-	// Auto-derive the external hostname from the machine name scheme:
-	//   <name>.<machine_name>.<hostname>
-	if !req.Internal && l.cfg.MachineName != "" {
-		spec.Hostname = req.Name + "." + l.cfg.MachineName + "." + l.cfg.Hostname
+	// Use the hostname from the deploy request for the Caddy route
+	// and extension files (e.g. "myapp.apps.privasys.org").
+	if req.Hostname != "" {
+		spec.Hostname = req.Hostname
 	}
 
 	// Check for duplicate hostname (should not happen with deterministic
@@ -652,12 +657,6 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// Recompute attestation.
 	l.recomputeAttestation()
 
-	// Extend RTMR[3] with the container identity (name + image digest).
-	if err := l.tpmExtender.ExtendContainerLoad(req.Name, digest); err != nil {
-		l.log.Warn("RTMR[3] extend failed (attestation continues via OID extensions)",
-			zap.String("name", req.Name), zap.Error(err))
-	}
-
 	// Write OID extensions and register Caddy route.
 	if l.caddyClient != nil {
 		// Update the platform extensions (reflects new container set).
@@ -725,12 +724,6 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 
 	// Recompute attestation.
 	l.recomputeAttestation()
-
-	// Extend RTMR[3] with the unload event.
-	if err := l.tpmExtender.ExtendContainerUnload(name); err != nil {
-		l.log.Warn("RTMR[3] extend failed on unload",
-			zap.String("name", name), zap.Error(err))
-	}
 
 	// Update Caddy configuration.
 	if l.caddyClient != nil {

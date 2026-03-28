@@ -124,9 +124,11 @@ func runServe(args []string) error {
 	extensionsDir := fs.String("extensions-dir", "/run/manager/extensions",
 		"Directory for per-hostname RA-TLS OID extension files")
 	machineName := fs.String("machine-name", "",
-		"Machine name for this instance (e.g. prod1); determines all RA-TLS hostnames")
+		"Machine name for this instance (e.g. prod1); determines container RA-TLS hostnames: <name>.<machine-name>.<hostname>")
 	hostname := fs.String("hostname", "",
 		"Domain suffix for RA-TLS hostnames (required, e.g. example.com)")
+	platformHostnameFlag := fs.String("platform-hostname", "",
+		"Explicit FQDN for the platform management API Caddy route and extension file (e.g. v-fr-1.example.com). If empty and machine-name is set, derived as <machine-name>.<hostname>")
 
 	// LUKS / data encryption.
 	dekOriginFile := fs.String("dek-origin-file", "/run/luks/dek-origin",
@@ -202,10 +204,12 @@ func runServe(args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Derive the management API hostname: manager.<machine-name>.<hostname>
+	// Derive the management API hostname.
 	var platformHostname string
-	if *machineName != "" {
-		platformHostname = "manager." + *machineName + "." + *hostname
+	if *platformHostnameFlag != "" {
+		platformHostname = *platformHostnameFlag
+	} else if *machineName != "" {
+		platformHostname = *machineName + "." + *hostname
 	}
 
 	// Configure launcher.

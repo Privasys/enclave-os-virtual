@@ -44,8 +44,8 @@ type Manifest struct {
 
 // Platform contains platform-level configuration.
 type Platform struct {
-	// Hostname is the VM's primary FQDN, derived from the machine name:
-	// manager.<machine_name>.<hostname> (e.g. "manager.prod1.example.com").
+	// Hostname is the VM's primary FQDN for the management API
+	// (e.g. "v-fr-1.example.com").
 	Hostname string `yaml:"hostname"`
 
 	// CACertPath is the path to the PEM-encoded intermediary CA certificate.
