@@ -2,6 +2,7 @@
 # Build the Enclave OS (Virtual) disk image.
 #
 # This script:
+#   0. Builds a patched kernel with CVM guard (BadAML mitigation) if needed
 #   1. Cross-compiles the manager Go binary for linux/amd64
 #   2. Builds Caddy with the ra-tls-caddy module via xcaddy
 #   3. Optionally bakes a manifest into the image
@@ -43,6 +44,18 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Step 0: Build patched kernel if .debs are not present.
+KERNEL_DEBS_DIR="$SCRIPT_DIR/kernel/debs"
+if ! ls "$KERNEL_DEBS_DIR"/linux-image-*.deb 1>/dev/null 2>&1; then
+    echo ""
+    echo "=== Step 0: Building patched kernel (CVM guard) ==="
+    "$SCRIPT_DIR/kernel/build-kernel.sh"
+else
+    echo ""
+    echo "=== Step 0: Patched kernel .debs already present, skipping ==="
+    ls "$KERNEL_DEBS_DIR"/*.deb
+fi
 
 # Step 1: Build the Go binary.
 echo ""

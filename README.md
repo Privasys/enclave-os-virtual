@@ -135,6 +135,30 @@ Each container receives an independent **LVM logical volume** with its own LUKS2
 
 The container volumes partition fills all remaining disk space. Choose your disk size at instance creation time (e.g. `--create-disk=size=50` for ~46 GB of container storage). Online resize is not supported because `--integrity aead` (dm-integrity) cannot be grown in place.
 
+## Kernel hardening (BadAML mitigation)
+
+The disk image ships a patched Ubuntu HWE kernel with the **CVM guard** - a
+downstream patch that blocks ACPI AML bytecode from accessing memory pages
+marked as encrypted/private on TDX and SEV-SNP VMs.
+
+**Background:** On confidential VMs the host VMM controls the ACPI tables
+supplied to the guest. A malicious host can inject SSDT tables containing AML
+bytecode that reads or writes arbitrary guest physical addresses, including
+private (encrypted) pages. This was publicly documented as "BadAML" (Takekoshi
+et al., ACM CCS 2025, BlackHat EU 2024). No mainline kernel fix exists as of
+6.19.
+
+**Mitigation:** The CVM guard hooks `acpi_ex_system_memory_space_handler()` and
+walks the page tables for the target address before every AML memory access. If
+the page's encryption bit is set (private), the access is denied with
+`AE_AML_ILLEGAL_ADDRESS`. On non-CVM systems the guard is a no-op. The kernel
+command line also includes `acpi_no_initrd_table_override` to prevent ACPI table
+injection via the initrd.
+
+The patched kernel is built automatically by `build/kernel/build-kernel.sh` and
+installed into the image via mkosi's `PackageDirectories`. See
+`build/kernel/patches/` for the patch source.
+
 ## Building
 
 ```bash

@@ -1,0 +1,186 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Privasys <engineering@privasys.org>
+Date: Thu, 03 Apr 2026 12:00:00 +0200
+Subject: [PATCH] acpi: deny AML access to CVM private memory
+
+On confidential VMs (TDX, SEV-SNP), the host VMM controls ACPI tables
+supplied to the guest.  A malicious host can inject SSDT tables containing
+AML bytecode that uses SystemMemory OpRegions to read or write arbitrary
+guest physical addresses, including pages that are private (encrypted) to
+the VM.  Because the ACPICA interpreter executes in kernel context with
+full access to all guest memory, AML can overwrite security-critical
+structures such as the initrd, kernel text, or page tables.
+
+This attack was publicly documented as "BadAML" (Takekoshi et al., ACM
+CCS 2025, BlackHat EU 2024).
+
+Mitigate by adding a guard to acpi_ex_system_memory_space_handler() that
+checks whether the target virtual address maps to a page marked as
+encrypted (private) in the page tables.  On CVM platforms where
+CC_ATTR_MEM_ENCRYPT is set, private pages must not be reachable from AML.
+If the page is private, the read or write is blocked and returns
+AE_AML_ILLEGAL_ADDRESS.
+
+This does not affect non-CVM systems: without CC_ATTR_MEM_ENCRYPT the
+guard is a no-op.
+
+Signed-off-by: Privasys <engineering@privasys.org>
+---
+ drivers/acpi/acpica/exregion.c   |   3 +
+ drivers/acpi/acpica/cvm_guard.h  | 120 ++++++++++++++++++++++++++++++
+ 2 files changed, 123 insertions(+)
+ create mode 100644 drivers/acpi/acpica/cvm_guard.h
+
+diff --git a/drivers/acpi/acpica/exregion.c b/drivers/acpi/acpica/exregion.c
+index a390a1c2b0ab..XXXXXXX 100644
+--- a/drivers/acpi/acpica/exregion.c
++++ b/drivers/acpi/acpica/exregion.c
+@@ -14,6 +14,7 @@
+ #define _COMPONENT          ACPI_EXECUTER
+ ACPI_MODULE_NAME("exregion")
+ 
++#include "cvm_guard.h"
+ /*******************************************************************************
+  *
+  * FUNCTION:    acpi_ex_system_memory_space_handler
+@@ -186,6 +187,8 @@ acpi_ex_system_memory_space_handler(u32 function,
+ 	logical_addr_ptr = mm->logical_address +
+ 		((u64) address - (u64) mm->physical_address);
+ 
++	if (cvm_guard_deny_aml_access((unsigned long)logical_addr_ptr))
++		return_ACPI_STATUS(AE_AML_ILLEGAL_ADDRESS);
+ 	ACPI_DEBUG_PRINT((ACPI_DB_INFO,
+ 			  "System-Memory (width %u) R/W %u Address=%8.8X%8.8X\n",
+ 			  bit_width, function, ACPI_FORMAT_UINT64(address)));
+diff --git a/drivers/acpi/acpica/cvm_guard.h b/drivers/acpi/acpica/cvm_guard.h
+new file mode 100644
+index 000000000000..XXXXXXX
+--- /dev/null
++++ b/drivers/acpi/acpica/cvm_guard.h
+@@ -0,0 +1,120 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * CVM Guard - Block AML access to confidential VM private memory
++ *
++ * Copyright (C) 2026 Privasys
++ *
++ * On TDX/SEV-SNP guests the host controls the ACPI tables, so
++ * AML bytecode executing SystemMemory reads/writes can target
++ * arbitrary guest physical addresses.  This header provides a
++ * single guard function that checks whether a virtual address
++ * maps to a page whose encryption bit is set (= CVM-private),
++ * and denies the access if so.
++ *
++ * The check runs only when CC_ATTR_MEM_ENCRYPT is active;
++ * on non-CVM systems the function always returns false (allow).
++ */
++
++#ifndef _ACPICA_CVM_GUARD_H
++#define _ACPICA_CVM_GUARD_H
++
++#include <linux/cc_platform.h>
++#include <linux/mm.h>
++#include <linux/once.h>
++#include <asm/coco.h>
++
++/*
++ * Walk the four-level page table for a kernel virtual address and
++ * return the raw PTE/PMD/PUD value, or 0 if the walk fails at any
++ * level.  Handles 1 GB and 2 MB large pages.
++ */
++static unsigned long __cvm_guard_pte_val(unsigned long addr)
++{
++	pgd_t *pgd;
++	p4d_t *p4d;
++	pud_t *pud;
++	pmd_t *pmd;
++	pte_t *pte;
++
++	pgd = pgd_offset_k(addr);
++	if (pgd_none(*pgd))
++		return 0;
++
++	p4d = p4d_offset(pgd, addr);
++	if (p4d_none(*p4d))
++		return 0;
++
++	pud = pud_offset(p4d, addr);
++	if (pud_none(*pud))
++		return 0;
++	if (pud_leaf(*pud))
++		return pud_val(*pud);
++
++	pmd = pmd_offset(pud, addr);
++	if (pmd_none(*pmd))
++		return 0;
++	if (pmd_leaf(*pmd))
++		return pmd_val(*pmd);
++
++	pte = pte_offset_kernel(pmd, addr);
++	if (pte_none(*pte))
++		return 0;
++
++	return pte_val(*pte);
++}
++
++/*
++ * Returns true if @addr maps to a page whose encryption bit is set.
++ *
++ * On AMD SEV/SEV-SNP the C-bit marks encrypted (private) pages.
++ * On Intel TDX the "shared" bit is inverted: cc_mkenc() clears it,
++ * so if val == cc_mkenc(val) the page is encrypted/private.
++ *
++ * If the page table walk fails (returns 0), we assume the page is
++ * private and deny the access - fail-closed is the safe default.
++ */
++static bool __cvm_guard_page_is_private(unsigned long addr)
++{
++	unsigned long val;
++
++	val = __cvm_guard_pte_val(addr);
++	if (!val) {
++		ACPI_WARNING((AE_INFO,
++			"CVM guard: page table walk failed for %lx, "
++			"assuming private", addr));
++		return true;
++	}
++
++	/*
++	 * cc_mkenc(val) applies the platform encryption mask.
++	 * If val already equals its encrypted form, the page is private.
++	 */
++	return val == cc_mkenc(val);
++}
++
++/*
++ * Main guard: returns true if the access must be denied.
++ *
++ * Called from acpi_ex_system_memory_space_handler() after the
++ * virtual address has been resolved but before any read/write.
++ *
++ * On non-CVM systems (CC_ATTR_MEM_ENCRYPT not set) this is a
++ * fast no-op returning false.
++ */
++static bool cvm_guard_deny_aml_access(unsigned long virt_addr)
++{
++	if (!cc_platform_has(CC_ATTR_MEM_ENCRYPT))
++		return false;
++
++	DO_ONCE(pr_info,
++		"CVM guard: active, blocking AML access to private pages\n");
++
++	virt_addr &= PAGE_MASK;
++
++	if (__cvm_guard_page_is_private(virt_addr)) {
++		pr_warn_ratelimited(
++			"CVM guard: denied AML access to private page at %lx\n",
++			virt_addr);
++		return true;
++	}
++
++	return false;
++}
++
++#endif /* _ACPICA_CVM_GUARD_H */
+-- 
+2.43.0
