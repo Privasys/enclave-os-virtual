@@ -70,13 +70,12 @@ cd "$BUILD_DIR"
 SRC_PKG="linux-hwe-${KMAJMIN}"
 
 # Ensure deb-src repos are available.
-for f in /etc/apt/sources.list.d/*.sources; do
-    [ -f "$f" ] || continue
-    if ! grep -q 'deb-src' "$f" 2>/dev/null; then
-        sed -i 's/^Types: deb$/Types: deb deb-src/' "$f" 2>/dev/null || true
-    fi
-done
-apt-get update -qq
+if ! apt-get source --download-only "$SRC_PKG" 2>/dev/null; then
+    echo "Enabling deb-src repositories..."
+    sed -i 's/^# deb-src/deb-src/' /etc/apt/sources.list.d/*.list 2>/dev/null || true
+    sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/*.sources 2>/dev/null || true
+    apt-get update -qq
+fi
 
 apt-get source "$SRC_PKG"
 apt-get build-dep -y "$SRC_PKG"
