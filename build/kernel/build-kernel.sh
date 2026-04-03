@@ -47,10 +47,10 @@ echo ""
 echo "=== Resolving kernel version ==="
 KERNEL_META="linux-image-generic-hwe-24.04"
 KERNEL_PKG=$(apt-cache depends "$KERNEL_META" 2>/dev/null \
-    | grep -oP 'linux-image-unsigned-\d[\d.]+\d-\d+-generic' | head -1)
+    | grep -oP 'linux-image-unsigned-\d[\d.]+\d-\d+-generic' | head -1 || true)
 if [ -z "$KERNEL_PKG" ]; then
     KERNEL_PKG=$(apt-cache depends "$KERNEL_META" 2>/dev/null \
-        | grep -oP 'linux-image-\d[\d.]+\d-\d+-generic' | head -1)
+        | grep -oP 'linux-image-\d[\d.]+\d-\d+-generic' | head -1 || true)
 fi
 if [ -z "$KERNEL_PKG" ]; then
     echo "ERROR: cannot resolve $KERNEL_META"
