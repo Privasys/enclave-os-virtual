@@ -141,15 +141,24 @@ fi
 # ── Step 5: Build ──
 echo ""
 echo "=== Building kernel .deb packages ==="
+KBUILD_LOG="$BUILD_DIR/build.log"
 if [ -f "debian/rules" ]; then
     chmod a+x debian/rules
-    fakeroot debian/rules clean 2>&1 | tail -5
-    fakeroot debian/rules binary-headers binary-generic binary-perarch \
-        2>&1 | tail -30 || \
-    dpkg-buildpackage -b -uc -us -j"$JOBS" 2>&1 | tail -30
+    echo "Running: fakeroot debian/rules clean ..."
+    fakeroot debian/rules clean > "$KBUILD_LOG" 2>&1 || true
+    tail -5 "$KBUILD_LOG"
+    echo "Running: fakeroot debian/rules binary-headers binary-generic binary-perarch ..."
+    if ! fakeroot debian/rules binary-headers binary-generic binary-perarch \
+        >> "$KBUILD_LOG" 2>&1; then
+        echo "binary-* targets failed, trying dpkg-buildpackage..."
+        tail -20 "$KBUILD_LOG"
+        dpkg-buildpackage -b -uc -us -j"$JOBS" >> "$KBUILD_LOG" 2>&1
+    fi
+    tail -10 "$KBUILD_LOG"
 else
-    make olddefconfig
-    make -j"$JOBS" bindeb-pkg LOCALVERSION=+privasys 2>&1 | tail -30
+    make olddefconfig > "$KBUILD_LOG" 2>&1
+    make -j"$JOBS" bindeb-pkg LOCALVERSION=+privasys >> "$KBUILD_LOG" 2>&1
+    tail -10 "$KBUILD_LOG"
 fi
 
 # ── Step 6: Collect .debs ──
