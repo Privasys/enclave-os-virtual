@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+# mkosi looks for kernels at /usr/lib/modules/<kver>/vmlinuz*
+# Ubuntu puts vmlinuz at /boot/vmlinuz-<kver>. Symlink it.
+for vmlinuz in /boot/vmlinuz-*; do
+    [ -f "$vmlinuz" ] || continue
+    kver=${vmlinuz#/boot/vmlinuz-}
+    moddir=/usr/lib/modules/$kver
+    if [ -d "$moddir" ] && [ ! -e "$moddir/vmlinuz" ]; then
+        ln -sv "$vmlinuz" "$moddir/vmlinuz"
+    fi
+done
+
+# mkosi with Bootloader=grub expects signed grub at /efi/EFI/BOOT/
+# Ubuntu grub-efi-amd64-signed puts it at /usr/lib/grub/x86_64-efi-signed/
+mkdir -p /efi/EFI/BOOT /efi/EFI/ubuntu
+if [ -f /usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed ]; then
+    cp /usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed /efi/EFI/BOOT/grubx64.efi
+    cp /usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed /efi/EFI/ubuntu/grubx64.efi
+    echo "Installed signed grub to /efi/EFI/BOOT/"
+fi
