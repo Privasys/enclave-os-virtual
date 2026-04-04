@@ -152,13 +152,27 @@ fi
 echo ""
 echo "=== Building kernel .deb packages ==="
 KBUILD_LOG="$BUILD_DIR/build.log"
+
+# Skip debug packages and ABI checks to save ~50 GB disk.
+export skipdbg=true
+export skipabi=true
+export skipmodule=true
+export skipretpoline=true
+
 if [ -f "debian/rules" ]; then
     chmod a+x debian/rules
+
+    # Disable CONFIG_DEBUG_INFO to avoid the enormous vmlinux.unstripped.
+    GENERIC_CFG=$(find . -path '*/config/amd64/config.common.amd64' -o -path '*/config/annotations' | head -1)
+    for cfg in debian.hwe-*/config/amd64/config.flavour.generic debian/config/amd64/config.flavour.generic; do
+        [ -f "$cfg" ] && echo 'CONFIG_DEBUG_INFO_NONE=y' >> "$cfg" && echo "Disabled debug info in $cfg"
+    done
+
     echo "Running: fakeroot debian/rules clean ..."
     fakeroot debian/rules clean > "$KBUILD_LOG" 2>&1 || true
     tail -5 "$KBUILD_LOG"
-    echo "Running: fakeroot debian/rules binary-headers binary-generic binary-perarch ..."
-    fakeroot debian/rules binary-headers binary-generic binary-perarch \
+    echo "Running: fakeroot debian/rules binary-generic ..."
+    fakeroot debian/rules binary-generic \
         >> "$KBUILD_LOG" 2>&1
     tail -10 "$KBUILD_LOG"
 else
