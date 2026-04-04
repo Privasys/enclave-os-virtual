@@ -27,8 +27,8 @@ guard is a no-op.
 Signed-off-by: Privasys <engineering@privasys.org>
 ---
  drivers/acpi/acpica/exregion.c   |   3 +
- drivers/acpi/acpica/cvm_guard.h  | 120 ++++++++++++++++++++++++++++++
- 2 files changed, 123 insertions(+)
+ drivers/acpi/acpica/cvm_guard.h  | 124 ++++++++++++++++++++++++++++++
+ 2 files changed, 127 insertions(+)
  create mode 100644 drivers/acpi/acpica/cvm_guard.h
 
 diff --git a/drivers/acpi/acpica/exregion.c b/drivers/acpi/acpica/exregion.c
@@ -57,7 +57,7 @@ new file mode 100644
 index 000000000000..XXXXXXX
 --- /dev/null
 +++ b/drivers/acpi/acpica/cvm_guard.h
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,124 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
 + * CVM Guard - Block AML access to confidential VM private memory
