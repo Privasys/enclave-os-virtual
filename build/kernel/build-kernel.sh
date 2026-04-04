@@ -28,7 +28,17 @@ echo "Output:     $OUTPUT_DIR"
 echo "Scratch:    $BUILD_DIR"
 echo "Parallel:   $JOBS"
 
-cleanup() { rm -rf "$BUILD_DIR"; }
+cleanup() {
+    local rc=$?
+    if [ $rc -ne 0 ] && [ -f "$BUILD_DIR/build.log" ]; then
+        echo ""
+        echo "=== BUILD FAILED (exit $rc) - last 50 lines of build.log ==="
+        tail -50 "$BUILD_DIR/build.log"
+        cp "$BUILD_DIR/build.log" /tmp/privasys-kernel-build-FAILED.log 2>/dev/null || true
+        echo "Full log saved to /tmp/privasys-kernel-build-FAILED.log"
+    fi
+    rm -rf "$BUILD_DIR"
+}
 trap cleanup EXIT
 
 # ── Step 0: Build dependencies ──
@@ -148,12 +158,8 @@ if [ -f "debian/rules" ]; then
     fakeroot debian/rules clean > "$KBUILD_LOG" 2>&1 || true
     tail -5 "$KBUILD_LOG"
     echo "Running: fakeroot debian/rules binary-headers binary-generic binary-perarch ..."
-    if ! fakeroot debian/rules binary-headers binary-generic binary-perarch \
-        >> "$KBUILD_LOG" 2>&1; then
-        echo "binary-* targets failed, trying dpkg-buildpackage..."
-        tail -20 "$KBUILD_LOG"
-        dpkg-buildpackage -b -uc -us -j"$JOBS" >> "$KBUILD_LOG" 2>&1
-    fi
+    fakeroot debian/rules binary-headers binary-generic binary-perarch \
+        >> "$KBUILD_LOG" 2>&1
     tail -10 "$KBUILD_LOG"
 else
     make olddefconfig > "$KBUILD_LOG" 2>&1
