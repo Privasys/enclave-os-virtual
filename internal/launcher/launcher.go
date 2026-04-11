@@ -162,6 +162,10 @@ type LoadRequest struct {
 	// <name>.<machine_name>.<hostname> scheme. This should match the
 	// gateway hostname (e.g. "myapp.apps.privasys.org").
 	Hostname string `json:"hostname,omitempty"`
+
+	// Devices is a list of host device paths to pass into the container
+	// (e.g. "/dev/nvidia0"). Each path must exist on the host.
+	Devices []string `json:"devices,omitempty"`
 }
 
 // Validate checks the load request for required fields.
@@ -195,6 +199,7 @@ func (r *LoadRequest) toContainerSpec() manifest.Container {
 		Internal:    r.Internal,
 		HealthCheck: r.HealthCheck,
 		Storage:     r.Storage,
+		Devices:     r.Devices,
 	}
 }
 

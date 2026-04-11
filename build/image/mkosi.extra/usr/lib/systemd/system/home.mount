@@ -1,14 +1,13 @@
 [Unit]
-Description=Volatile /tmp (tmpfs)
+Description=Home directories (tmpfs)
 DefaultDependencies=no
 Before=local-fs.target
-ConditionPathIsReadWrite=!/tmp
 
 [Mount]
 What=tmpfs
-Where=/tmp
+Where=/home
 Type=tmpfs
-Options=mode=1777,size=256M
+Options=mode=0755,size=64M,nosuid,nodev
 
 [Install]
 WantedBy=local-fs.target

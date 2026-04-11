@@ -179,6 +179,11 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		opts = append(opts, oci.WithProcessArgs(spec.Command...))
 	}
 
+	// Host device passthrough (e.g. /dev/nvidia0).
+	for _, devPath := range spec.Devices {
+		opts = append(opts, oci.WithDevices(devPath, "", "rwm"))
+	}
+
 	// Volume bind mounts (format: "host:container").
 	if len(spec.Volumes) > 0 {
 		mounts := make([]specs.Mount, 0, len(spec.Volumes))

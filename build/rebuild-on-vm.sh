@@ -41,6 +41,15 @@ fi
 echo "=== Ensuring signed boot packages on build host ==="
 sudo apt-get install -y --no-install-recommends grub-efi-amd64-signed shim-signed
 
+echo "=== Building patched kernel if needed ==="
+if ! ls /tmp/enclave-os-virtual/build/kernel/debs/linux-image-*.deb 1>/dev/null 2>&1; then
+  echo "No pre-built kernel .debs found, building..."
+  sudo /tmp/enclave-os-virtual/build/kernel/build-kernel.sh
+else
+  echo "Patched kernel .debs already present"
+  ls /tmp/enclave-os-virtual/build/kernel/debs/*.deb
+fi
+
 echo "=== Cleaning old build ==="
 sudo rm -rf /tmp/enclave-os-virtual/build/image/mkosi.builddir
 sudo rm -f /tmp/enclave-os-virtual/build/image/enclave-os-virtual_*

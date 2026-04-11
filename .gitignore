@@ -21,6 +21,11 @@ Thumbs.db
 build/image/mkosi.builddir/
 build/image/*.raw
 build/image/*.tar.gz
+build/image-gpu/mkosi.builddir/
+build/image-gpu/*.raw
+build/image-gpu/*.tar.gz
+build/cvm-images
+build/kernel/debs/*.deb
 tmp/
 
 # Temporary debug/inspect scripts

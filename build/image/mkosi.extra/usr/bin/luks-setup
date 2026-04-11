@@ -32,13 +32,32 @@ PASSPHRASE=""
 KEY_SOURCE=""
 
 # Try instance metadata (BYOK).
-# Currently supports GCP metadata server. Extend the block below for other
-# cloud providers (AWS IMDS, Azure IMDS, etc.).
+# Auto-detects cloud provider by probing metadata endpoints.
 if command -v curl >/dev/null 2>&1; then
     # GCP
-    PASSPHRASE=$(curl -sf -H "Metadata-Flavor: Google" \
+    PASSPHRASE=$(curl -sf --connect-timeout 2 -H "Metadata-Flavor: Google" \
         "http://metadata.google.internal/computeMetadata/v1/instance/attributes/luks-passphrase" \
         2>/dev/null || true)
+
+    # AWS (IMDSv2)
+    if [ -z "$PASSPHRASE" ]; then
+        TOKEN=$(curl -sf --connect-timeout 2 -X PUT \
+            -H "X-aws-ec2-metadata-token-ttl-seconds: 30" \
+            "http://169.254.169.254/latest/api/token" 2>/dev/null || true)
+        if [ -n "$TOKEN" ]; then
+            PASSPHRASE=$(curl -sf --connect-timeout 2 \
+                -H "X-aws-ec2-metadata-token: $TOKEN" \
+                "http://169.254.169.254/latest/meta-data/tags/instance/luks-passphrase" \
+                2>/dev/null || true)
+        fi
+    fi
+
+    # Azure
+    if [ -z "$PASSPHRASE" ]; then
+        PASSPHRASE=$(curl -sf --connect-timeout 2 -H "Metadata: true" \
+            "http://169.254.169.254/metadata/instance/compute/tagsList?api-version=2021-02-01" \
+            2>/dev/null | jq -r '.[] | select(.name=="luks-passphrase") | .value' 2>/dev/null || true)
+    fi
 fi
 
 if [ -n "$PASSPHRASE" ]; then
@@ -82,6 +101,12 @@ if cryptsetup isLuks "$PART" 2>/dev/null; then
 else
     # First boot — format, open, create filesystem.
     echo "luks-setup: formatting new LUKS2 volume"
+
+    # dm-integrity + authenc are needed for LUKS2 AEAD integrity but not
+    # auto-loaded by the kernel. Load them explicitly before formatting.
+    modprobe dm-integrity 2>/dev/null || true
+    modprobe authenc     2>/dev/null || true
+
     printf '%s' "$PASSPHRASE" | cryptsetup luksFormat \
         --type luks2 \
         --cipher aes-xts-plain64 \

@@ -1,0 +1,23 @@
+# Containerd configuration for Enclave OS (Virtual) - GPU variant.
+#
+# Root partition is read-only erofs with dm-verity.  Persistent state
+# lives on the ext4 data partition mounted at /data.
+#
+# The NVIDIA container runtime is configured as the default runtime
+# so containers get automatic GPU device access and library injection.
+version = 2
+
+root = "/data/containerd"
+state = "/run/containerd"
+
+[grpc]
+  address = "/run/containerd/containerd.sock"
+
+[plugins."io.containerd.grpc.v1.cri".containerd]
+  default_runtime_name = "nvidia"
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]
+  runtime_type = "io.containerd.runc.v2"
+
+  [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]
+    BinaryName = "/usr/bin/nvidia-container-runtime"

@@ -101,6 +101,12 @@ type Container struct {
 	// LUKS2+AEAD LV and bind-mounts it into the container at /data.
 	// This field IS measured into the per-container Config Merkle Tree.
 	Storage string `yaml:"storage,omitempty"`
+
+	// Devices is a list of host device paths to pass into the container
+	// (e.g. "/dev/nvidia0", "/dev/nvidiactl"). Each path must exist on
+	// the host. This field IS measured into the per-container Config
+	// Merkle Tree.
+	Devices []string `yaml:"devices,omitempty"`
 }
 
 // HealthCheck defines a container health check.
