@@ -158,7 +158,16 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		// Host networking — all containers share the host network namespace.
 		// In a TEE the VM itself is the security boundary, so this is safe.
 		oci.WithHostNamespace(specs.NetworkNamespace),
-		oci.WithHostResolvconf,
+		// Bind-mount the host's resolv.conf so DNS works inside the container.
+		// Using WithMounts directly rather than WithHostResolvconf, because the
+		// nvidia-container-runtime rewrites the spec and may drop higher-level
+		// OCI options.
+		oci.WithMounts([]specs.Mount{{
+			Destination: "/etc/resolv.conf",
+			Source:      "/etc/resolv.conf",
+			Type:        "bind",
+			Options:     []string{"rbind", "ro"},
+		}}),
 	}
 
 	// Hostname override.
