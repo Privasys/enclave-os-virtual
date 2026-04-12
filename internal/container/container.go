@@ -158,6 +158,7 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		// Host networking — all containers share the host network namespace.
 		// In a TEE the VM itself is the security boundary, so this is safe.
 		oci.WithHostNamespace(specs.NetworkNamespace),
+		oci.WithHostResolvconf,
 	}
 
 	// Hostname override.
@@ -182,6 +183,12 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	// Host device passthrough (e.g. /dev/nvidia0).
 	for _, devPath := range spec.Devices {
 		opts = append(opts, oci.WithDevices(devPath, "", "rwm"))
+	}
+
+	// When GPU devices are requested, ensure NVIDIA_VISIBLE_DEVICES=all
+	// so that the nvidia-container-runtime injects driver libraries.
+	if len(spec.Devices) > 0 {
+		opts = append(opts, oci.WithEnv([]string{"NVIDIA_VISIBLE_DEVICES=all"}))
 	}
 
 	// Volume bind mounts (format: "host:container").
