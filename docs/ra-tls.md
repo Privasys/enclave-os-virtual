@@ -35,7 +35,7 @@ or an untrusted runtime — without trusting the server operator.
 │  Intel TDX / AMD SEV-SNP  Confidential VM              │
 │                                                        │
 │  ┌──────────────────────────────────────────────────┐  │
-│  │  Caddy  (RA-TLS module)                           │  │
+│  │  Caddy  (RA-TLS module)                          │  │
 │  │                                                  │  │
 │  │  • Terminates TLS with RA-TLS certificates       │  │
 │  │  • Embeds TDX/SEV-SNP quote in every certificate │  │

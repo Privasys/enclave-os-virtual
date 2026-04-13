@@ -200,6 +200,36 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		opts = append(opts, oci.WithEnv([]string{"NVIDIA_VISIBLE_DEVICES=all"}))
 	}
 
+	// Image-declared volumes via the "ai.privasys.volume" label.
+	// This lets each container image declare its own disk mount
+	// (e.g. LABEL ai.privasys.volume="/mnt/model-gemma4-31b:/models:ro").
+	imgSpec, err := img.Spec(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("container: failed to read image spec for %s: %w", spec.Name, err)
+	}
+	if v, ok := imgSpec.Config.Labels["ai.privasys.volume"]; ok {
+		parts := strings.SplitN(v, ":", 3)
+		if len(parts) < 2 {
+			return nil, fmt.Errorf("container: invalid ai.privasys.volume label %q (expected host:container[:ro|rw])", v)
+		}
+		mountOpts := "ro"
+		if len(parts) == 3 {
+			mountOpts = parts[2]
+		}
+		opts = append(opts, oci.WithMounts([]specs.Mount{{
+			Destination: parts[1],
+			Source:      parts[0],
+			Type:        "bind",
+			Options:     []string{"rbind", mountOpts},
+		}}))
+		m.log.Info("image-declared volume mount",
+			zap.String("name", spec.Name),
+			zap.String("source", parts[0]),
+			zap.String("destination", parts[1]),
+			zap.String("options", mountOpts),
+		)
+	}
+
 	// Volume bind mounts (format: "host:container[:ro|rw]").
 	if len(spec.Volumes) > 0 {
 		mounts := make([]specs.Mount, 0, len(spec.Volumes))
