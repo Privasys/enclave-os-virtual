@@ -30,6 +30,10 @@
 // PUT    /api/v1/tls                 - rotate the intermediary CA cert+key
 // PUT    /api/v1/attestation-servers  - update attestation servers and tokens
 // GET    /metrics                    - Prometheus metrics
+//
+// # Internal API (localhost:9444, unauthenticated)
+//
+// PUT    /api/v1/containers/{name}/extensions - register attestation extensions
 package manager
 
 import (
@@ -40,7 +44,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -160,13 +164,32 @@ func (s *Server) Start(ctx context.Context) error {
 		Handler: s.metricsMiddleware(mux),
 	}
 
+	// Internal API — localhost-only, unauthenticated. Used by
+	// containers to self-register attestation extensions (e.g. model
+	// digest for OID 3.5). Safe because the VM is the trust boundary.
+	internalMux := http.NewServeMux()
+	internalMux.HandleFunc("PUT /api/v1/containers/{name}/extensions", s.handleSetExtensions)
+	internalServer := &http.Server{
+		Handler: internalMux,
+	}
+	internalLn, err := net.Listen("tcp", "127.0.0.1:9444")
+	if err != nil {
+		return fmt.Errorf("manager: failed to listen on internal API: %w", err)
+	}
+
 	// Start serving in a goroutine.
-	errCh := make(chan error, 1)
+	errCh := make(chan error, 2)
 	go func() {
 		s.log.Info("management API listening (plain HTTP, Caddy handles TLS)",
 			zap.String("addr", s.cfg.Addr),
 		)
 		errCh <- s.server.ListenAndServe()
+	}()
+	go func() {
+		s.log.Info("internal API listening (containers self-registration)",
+			zap.String("addr", internalLn.Addr().String()),
+		)
+		errCh <- internalServer.Serve(internalLn)
 	}()
 
 	// Wait for context cancellation or server error.
@@ -175,6 +198,7 @@ func (s *Server) Start(ctx context.Context) error {
 		s.log.Info("shutting down management API")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
+		_ = internalServer.Shutdown(shutdownCtx)
 		return s.server.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		return err
@@ -431,24 +455,6 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 			s.log.Info("container is ready",
 				zap.String("name", req.Name),
 			)
-
-			// Fetch the model digest from the container's /health
-			// endpoint and record it so RA-TLS certs include OID 3.5.
-			if resp, err := hcClient.Get(req.HealthCheck.HTTP); err == nil {
-				defer resp.Body.Close()
-				body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-				var hr struct {
-					ModelDigest string `json:"model_digest"`
-				}
-				if json.Unmarshal(body, &hr) == nil && hr.ModelDigest != "" {
-					if digestBytes, err := hex.DecodeString(hr.ModelDigest); err == nil {
-						if err := s.launcher.SetModelDigest(req.Name, digestBytes); err != nil {
-							s.log.Warn("failed to set model digest",
-								zap.String("name", req.Name), zap.Error(err))
-						}
-					}
-				}
-			}
 		} else {
 			status = "running" // model may still be loading
 			s.log.Warn("container readiness timeout, returning anyway",
@@ -516,6 +522,54 @@ func (s *Server) handleUnloadContainer(w http.ResponseWriter, r *http.Request) {
 		"name":   name,
 		"status": "unloaded",
 	})
+}
+
+// extensionsRequest is the request body for PUT /api/v1/containers/{name}/extensions.
+type extensionsRequest struct {
+	ModelDigest string `json:"model_digest,omitempty"` // hex-encoded SHA-256
+}
+
+// handleSetExtensions handles PUT /api/v1/containers/{name}/extensions
+// on the internal API (localhost only, unauthenticated).
+//
+// Containers call this endpoint to register attestation extensions that
+// will be included in subsequent RA-TLS certificates. For example, the
+// confidential-ai container registers its model digest (OID 3.5) after
+// computing it from the loaded model weights.
+func (s *Server) handleSetExtensions(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.jsonError(w, http.StatusBadRequest, "container name is required")
+		return
+	}
+
+	var req extensionsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	if req.ModelDigest != "" {
+		digestBytes, err := hex.DecodeString(req.ModelDigest)
+		if err != nil {
+			s.jsonError(w, http.StatusBadRequest, "model_digest must be hex-encoded")
+			return
+		}
+		if err := s.launcher.SetModelDigest(name, digestBytes); err != nil {
+			s.log.Error("failed to set model digest via internal API",
+				zap.String("name", name), zap.Error(err))
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.log.Info("model digest registered via internal API",
+			zap.String("name", name),
+			zap.String("digest", req.ModelDigest),
+		)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // tlsUpdateRequest is the request body for PUT /api/v1/tls.

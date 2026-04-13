@@ -14,7 +14,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -201,39 +200,27 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		opts = append(opts, oci.WithEnv([]string{"NVIDIA_VISIBLE_DEVICES=all"}))
 	}
 
-	// Auto-mount pre-loaded models directory (read-only) when GPU devices
-	// are present and the host directory exists. This allows containers
-	// to load models from the GCP persistent disk at /mnt/models without
-	// needing an HF_TOKEN for online downloads.
-	if len(spec.Devices) > 0 {
-		if fi, err := os.Stat("/mnt/models"); err == nil && fi.IsDir() {
-			opts = append(opts, oci.WithMounts([]specs.Mount{{
-				Destination: "/models",
-				Source:      "/mnt/models",
-				Type:        "bind",
-				Options:     []string{"rbind", "ro"},
-			}}))
-			m.log.Info("auto-mounting models directory",
-				zap.String("name", spec.Name),
-				zap.String("host", "/mnt/models"),
-				zap.String("container", "/models"),
-			)
-		}
-	}
+	// Inject the container name so workloads can identify themselves
+	// when calling the internal extension registration API.
+	opts = append(opts, oci.WithEnv([]string{"ENCLAVE_OS_CONTAINER_NAME=" + spec.Name}))
 
-	// Volume bind mounts (format: "host:container").
+	// Volume bind mounts (format: "host:container[:ro|rw]").
 	if len(spec.Volumes) > 0 {
 		mounts := make([]specs.Mount, 0, len(spec.Volumes))
 		for _, v := range spec.Volumes {
-			parts := strings.SplitN(v, ":", 2)
-			if len(parts) != 2 {
-				return nil, fmt.Errorf("container: invalid volume format %q (expected host:container)", v)
+			parts := strings.SplitN(v, ":", 3)
+			if len(parts) < 2 {
+				return nil, fmt.Errorf("container: invalid volume format %q (expected host:container[:ro|rw])", v)
+			}
+			mountOpts := "rw"
+			if len(parts) == 3 {
+				mountOpts = parts[2]
 			}
 			mounts = append(mounts, specs.Mount{
 				Destination: parts[1],
 				Source:      parts[0],
 				Type:        "bind",
-				Options:     []string{"rbind", "rw"},
+				Options:     []string{"rbind", mountOpts},
 			})
 		}
 		opts = append(opts, oci.WithMounts(mounts))
