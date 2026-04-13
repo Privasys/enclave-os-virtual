@@ -55,6 +55,31 @@ Part of the [Privasys](https://privasys.org) Confidential Computing platform, al
 
 7. **Health & Metrics** — The management API exposes `/healthz`, `/readyz`, `/api/v1/status`, and Prometheus `/metrics` over RA-TLS at `manager.<machine-name>.<hostname>`.
 
+## Image-Declared Volumes
+
+Container images can declare persistent disk mounts via the `ai.privasys.volume`
+OCI label. The manager reads the label at container start and bind-mounts the
+host path into the container. This lets each image be self-describing - no
+hardcoded volume configuration in the management service.
+
+```dockerfile
+LABEL ai.privasys.volume="/mnt/model-gemma4-31b:/models:ro"
+```
+
+Format: `<host-path>:<container-path>[:<options>]`
+
+### Pre-built Confidential AI Images
+
+The following images are built from [confidential-ai](https://github.com/Privasys/confidential-ai)
+and run LLM inference on NVIDIA H100 GPUs inside TDX Confidential VMs:
+
+| Image | Model | Parameters | GPU VRAM | GCP Disk |
+|-------|-------|-----------|----------|----------|
+| `confidential-ai-gemma4` | google/gemma-4-31b-it | 30.7B (dense) | ~62 GB (BF16) | model-gemma4-31b (70 GB) |
+| `confidential-ai-qwen25` | Qwen/Qwen2.5-32B-Instruct | 32.5B (dense) | ~65 GB (BF16) | model-qwen25-32b (75 GB) |
+| `confidential-ai-mistral-small` | mistralai/Mistral-Small-24B-Instruct-2501 | 24B (dense) | ~48 GB (BF16) | model-mistral-small-24b (55 GB) |
+| `confidential-ai-llama4-scout` | meta-llama/Llama-4-Scout-17B-16E-Instruct | 109B MoE (17B active) | ~58 GB (INT4) | model-llama4-scout (240 GB) |
+
 ## OID Extensions
 
 All Privasys OIDs live under the arc `1.3.6.1.4.1.65230`:
