@@ -1,0 +1,27 @@
+#!/bin/bash
+# Fetch SSH keys from GCE instance/project metadata for the given user.
+# Used by sshd AuthorizedKeysCommand when OS Login is not available.
+set -euo pipefail
+USER="$1"
+META="http://metadata.google.internal/computeMetadata/v1"
+HDR="Metadata-Flavor: Google"
+
+# Try OS Login first (if enabled)
+if /usr/bin/google_authorized_keys "$USER" 2>/dev/null; then
+    exit 0
+fi
+
+# Fall back to instance/project metadata SSH keys
+for scope in instance project; do
+    KEYS=$(curl -sf -H "$HDR" "$META/$scope/attributes/ssh-keys" 2>/dev/null || true)
+    if [ -n "$KEYS" ]; then
+        echo "$KEYS" | while IFS= read -r line; do
+            # Format: user:ssh-type key comment
+            KEY_USER="${line%%:*}"
+            KEY_DATA="${line#*:}"
+            if [ "$KEY_USER" = "$USER" ]; then
+                echo "$KEY_DATA"
+            fi
+        done
+    fi
+done

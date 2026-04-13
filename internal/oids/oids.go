@@ -16,6 +16,7 @@
 //	  3.2 Container Image Digest (SHA-256 of OCI manifest)
 //	  3.3 Container Image Reference (e.g. ghcr.io/example/myapp)
 //	  3.4 Container Volume Encryption
+//	  3.5 Container Model Digest (SHA-256 of AI/ML model weights)
 //
 // The TDX and SGX quote OIDs are defined by Intel:
 //
@@ -102,14 +103,24 @@ var ContainerImageRef = append(append(asn1.ObjectIdentifier{}, privasysArc...), 
 // volume is provisioned and how the volume key was obtained.  The value
 // is a UTF-8 string:
 //
-//   - "byok:<fingerprint>" — volume key supplied via the API;
+//   - "byok:<fingerprint>" -- volume key supplied via the API;
 //     <fingerprint> is the hex SHA-256 of the raw key bytes
-//   - "generated"          — volume key randomly generated inside the enclave
+//   - "generated"          -- volume key randomly generated inside the enclave
 //
 // The OID is omitted entirely when no encrypted volume is attached.
 // Its presence proves the container's persistent data is individually
 // encrypted with its own LUKS2+AEAD key.
 var ContainerVolumeEncryption = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 4)
+
+// ContainerModelDigest is the SHA-256 digest of the AI/ML model weights
+// loaded inside the container.  The value is the raw 32-byte hash.
+// This OID is only present when the container reports a model digest
+// (e.g. via the /health endpoint's model_digest field).
+//
+// It allows verifiers to confirm exactly which model weights are being
+// used for inference, complementing the container image digest (OID 3.2)
+// which covers the code but not the dynamically-loaded model.
+var ContainerModelDigest = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 5)
 
 // --- Extension builders --------------------------------------------------
 
@@ -145,7 +156,8 @@ func PlatformExtensions(quote []byte, quoteOID asn1.ObjectIdentifier, merkleRoot
 
 // ContainerExtensions returns the set of X.509 extensions for a per-container
 // RA-TLS leaf certificate.  volumeEncryption may be empty to omit the OID.
-func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef string, volumeEncryption string) []pkix.Extension {
+// modelDigest may be nil to omit the model digest OID (3.5).
+func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef string, volumeEncryption string, modelDigest []byte) []pkix.Extension {
 	// Strip @sha256:... from the image ref; the digest is captured in OID 3.2.
 	if i := strings.Index(imageRef, "@"); i >= 0 {
 		imageRef = imageRef[:i]
@@ -157,6 +169,9 @@ func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef
 	}
 	if volumeEncryption != "" {
 		exts = append(exts, Extension(ContainerVolumeEncryption, []byte(volumeEncryption)))
+	}
+	if len(modelDigest) > 0 {
+		exts = append(exts, Extension(ContainerModelDigest, modelDigest))
 	}
 	return exts
 }
