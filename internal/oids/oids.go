@@ -14,8 +14,9 @@
 //	3.*   Per-container OIDs (via SNI routing)
 //	  3.1 Container Config Merkle Root
 //	  3.2 Container Image Digest (SHA-256 of OCI manifest)
-//	  3.3 Container Image Reference (e.g. ghcr.io/example/myapp@sha256:...)
+//	  3.3 Container Image Reference (e.g. ghcr.io/example/myapp)
 //	  3.4 Container Volume Encryption
+//	  3.5 Container Model Digest (SHA-256 of AI/ML model weights)
 //
 // The TDX and SGX quote OIDs are defined by Intel:
 //
@@ -26,6 +27,7 @@ package oids
 import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"strings"
 )
 
 // --- Intel hardware quote OIDs -------------------------------------------
@@ -92,22 +94,33 @@ var ContainerConfigMerkleRoot = append(append(asn1.ObjectIdentifier{}, privasysA
 // for a specific container.
 var ContainerImageDigest = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 2)
 
-// ContainerImageRef is the full image reference string (e.g.
-// "ghcr.io/example/myapp@sha256:abc123...") for a specific container.
+// ContainerImageRef is the image name and registry path (e.g.
+// "ghcr.io/example/myapp") for a specific container. The digest is
+// stored separately in ContainerImageDigest (OID 3.2).
 var ContainerImageRef = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 3)
 
 // ContainerVolumeEncryption indicates whether a per-container encrypted
 // volume is provisioned and how the volume key was obtained.  The value
 // is a UTF-8 string:
 //
-//   - "byok:<fingerprint>" — volume key supplied via the API;
+//   - "byok:<fingerprint>" -- volume key supplied via the API;
 //     <fingerprint> is the hex SHA-256 of the raw key bytes
-//   - "generated"          — volume key randomly generated inside the enclave
+//   - "generated"          -- volume key randomly generated inside the enclave
 //
 // The OID is omitted entirely when no encrypted volume is attached.
 // Its presence proves the container's persistent data is individually
 // encrypted with its own LUKS2+AEAD key.
 var ContainerVolumeEncryption = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 4)
+
+// ContainerModelDigest is the SHA-256 digest of the AI/ML model weights
+// loaded inside the container.  The value is the raw 32-byte hash.
+// This OID is only present when the container reports a model digest
+// (e.g. via the /health endpoint's model_digest field).
+//
+// It allows verifiers to confirm exactly which model weights are being
+// used for inference, complementing the container image digest (OID 3.2)
+// which covers the code but not the dynamically-loaded model.
+var ContainerModelDigest = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 5)
 
 // --- Extension builders --------------------------------------------------
 
@@ -143,7 +156,16 @@ func PlatformExtensions(quote []byte, quoteOID asn1.ObjectIdentifier, merkleRoot
 
 // ContainerExtensions returns the set of X.509 extensions for a per-container
 // RA-TLS leaf certificate.  volumeEncryption may be empty to omit the OID.
+//
+// Note: application-specific OIDs (e.g. OID 3.5 model digest) are not included
+// here. Those are served by the container itself via the
+// /.well-known/attestation-extensions endpoint and pulled by ra-tls-caddy at
+// certificate issuance time, the same way enclave-os-mini's custom_oids() works.
 func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef string, volumeEncryption string) []pkix.Extension {
+	// Strip @sha256:... from the image ref; the digest is captured in OID 3.2.
+	if i := strings.Index(imageRef, "@"); i >= 0 {
+		imageRef = imageRef[:i]
+	}
 	exts := []pkix.Extension{
 		Extension(ContainerConfigMerkleRoot, configMerkleRoot[:]),
 		Extension(ContainerImageDigest, imageDigest),

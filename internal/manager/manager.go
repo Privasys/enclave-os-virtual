@@ -394,13 +394,56 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 
 	containersLoaded.Set(float64(s.launcher.ContainerCount()))
 
+	// If WaitReady is set and a health check is configured, poll the
+	// container's health endpoint until it returns 200.  This makes
+	// the HTTP response block until the workload (e.g. LLM model) is
+	// fully loaded, so the management service can set deployment status
+	// to "active" only when traffic can actually be served.
+	status := "running"
+	if req.WaitReady && req.HealthCheck != nil && req.HealthCheck.HTTP != "" {
+		s.log.Info("waiting for container readiness",
+			zap.String("name", req.Name),
+			zap.String("health_url", req.HealthCheck.HTTP),
+		)
+		interval := 5 * time.Second
+		if req.HealthCheck.IntervalSeconds > 0 {
+			interval = time.Duration(req.HealthCheck.IntervalSeconds) * time.Second
+		}
+		timeout := 10 * time.Minute // generous default for LLM model loading
+		deadline := time.Now().Add(timeout)
+		hcClient := &http.Client{Timeout: 5 * time.Second}
+		ready := false
+		for time.Now().Before(deadline) {
+			resp, err := hcClient.Get(req.HealthCheck.HTTP)
+			if err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					ready = true
+					break
+				}
+			}
+			time.Sleep(interval)
+		}
+		if ready {
+			status = "ready"
+			s.log.Info("container is ready",
+				zap.String("name", req.Name),
+			)
+		} else {
+			status = "running" // model may still be loading
+			s.log.Warn("container readiness timeout, returning anyway",
+				zap.String("name", req.Name),
+			)
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"name":   req.Name,
 		"image":  req.Image,
 		"digest": fmt.Sprintf("%x", digest),
-		"status": "running",
+		"status": status,
 	})
 }
 

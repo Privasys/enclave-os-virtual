@@ -166,6 +166,14 @@ type LoadRequest struct {
 	// Devices is a list of host device paths to pass into the container
 	// (e.g. "/dev/nvidia0"). Each path must exist on the host.
 	Devices []string `json:"devices,omitempty"`
+
+	// WaitReady, when true, causes Load() to block until the container's
+	// health check endpoint returns 200.  This is intended for GPU/LLM
+	// containers where the model takes several minutes to load and the
+	// caller wants deployment to complete only when the service is ready.
+	//
+	// If HealthCheck is nil, this field is ignored.
+	WaitReady bool `json:"wait_ready,omitempty"`
 }
 
 // Validate checks the load request for required fields.
@@ -671,7 +679,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 
 		// Write per-container extensions and add Caddy route if hostname is set.
 		if spec.Hostname != "" && !req.Internal {
-			if err := l.writeContainerExtensions(req.Name, spec.Hostname); err != nil {
+			if err := l.writeContainerExtensions(req.Name, spec.Hostname, req.Port); err != nil {
 				l.log.Warn("failed to write container extensions",
 					zap.String("name", req.Name), zap.Error(err))
 			}
@@ -928,15 +936,17 @@ func (l *Launcher) writePlatformExtensions() error {
 		exts = append(exts, oids.Extension(oids.AttestationServersHash, h[:]))
 	}
 
-	return extensions.Write(l.cfg.ExtensionsDir, l.cfg.PlatformHostname, exts)
+	return extensions.Write(l.cfg.ExtensionsDir, l.cfg.PlatformHostname, exts, "")
 }
 
 // writeContainerExtensions writes the per-container OID extensions to the
 // extensions directory.  These are read by ra-tls-caddy when issuing a
-// per-container RA-TLS certificate.
+// per-container RA-TLS certificate.  The upstream URL is included so
+// ra-tls-caddy can pull dynamic OIDs from the container at cert time
+// (the Virtual equivalent of enclave-os-mini's custom_oids() trait).
 //
 // Must be called with l.mu held.
-func (l *Launcher) writeContainerExtensions(containerName, hostname string) error {
+func (l *Launcher) writeContainerExtensions(containerName, hostname string, port int) error {
 	if l.cfg.ExtensionsDir == "" {
 		return nil
 	}
@@ -955,10 +965,11 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string) erro
 	digest := l.imageDigests[containerName]
 	volEnc := l.volumeEncryption[containerName]
 
-	// Build the extensions list (without the quote — ra-tls-caddy adds that).
+	// Build the extensions list (without the quote - ra-tls-caddy adds that).
 	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc)
 
-	return extensions.Write(l.cfg.ExtensionsDir, hostname, exts)
+	upstream := fmt.Sprintf("http://127.0.0.1:%d", port)
+	return extensions.Write(l.cfg.ExtensionsDir, hostname, exts, upstream)
 }
 
 func (l *Launcher) waitForShutdown(ctx context.Context) error {

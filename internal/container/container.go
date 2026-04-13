@@ -158,6 +158,16 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		// Host networking — all containers share the host network namespace.
 		// In a TEE the VM itself is the security boundary, so this is safe.
 		oci.WithHostNamespace(specs.NetworkNamespace),
+		// Bind-mount the host's resolv.conf so DNS works inside the container.
+		// Using WithMounts directly rather than WithHostResolvconf, because the
+		// nvidia-container-runtime rewrites the spec and may drop higher-level
+		// OCI options.
+		oci.WithMounts([]specs.Mount{{
+			Destination: "/etc/resolv.conf",
+			Source:      "/etc/resolv.conf",
+			Type:        "bind",
+			Options:     []string{"rbind", "ro"},
+		}}),
 	}
 
 	// Hostname override.
@@ -184,19 +194,29 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		opts = append(opts, oci.WithDevices(devPath, "", "rwm"))
 	}
 
-	// Volume bind mounts (format: "host:container").
+	// When GPU devices are requested, ensure NVIDIA_VISIBLE_DEVICES=all
+	// so that the nvidia-container-runtime injects driver libraries.
+	if len(spec.Devices) > 0 {
+		opts = append(opts, oci.WithEnv([]string{"NVIDIA_VISIBLE_DEVICES=all"}))
+	}
+
+	// Volume bind mounts (format: "host:container[:ro|rw]").
 	if len(spec.Volumes) > 0 {
 		mounts := make([]specs.Mount, 0, len(spec.Volumes))
 		for _, v := range spec.Volumes {
-			parts := strings.SplitN(v, ":", 2)
-			if len(parts) != 2 {
-				return nil, fmt.Errorf("container: invalid volume format %q (expected host:container)", v)
+			parts := strings.SplitN(v, ":", 3)
+			if len(parts) < 2 {
+				return nil, fmt.Errorf("container: invalid volume format %q (expected host:container[:ro|rw])", v)
+			}
+			mountOpts := "rw"
+			if len(parts) == 3 {
+				mountOpts = parts[2]
 			}
 			mounts = append(mounts, specs.Mount{
 				Destination: parts[1],
 				Source:      parts[0],
 				Type:        "bind",
-				Options:     []string{"rbind", "rw"},
+				Options:     []string{"rbind", mountOpts},
 			})
 		}
 		opts = append(opts, oci.WithMounts(mounts))
