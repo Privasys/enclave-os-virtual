@@ -68,17 +68,45 @@ LABEL ai.privasys.volume="/mnt/model-gemma4-31b:/models:ro"
 
 Format: `<host-path>:<container-path>[:<options>]`
 
-### Pre-built Confidential AI Images
+## OS Images
 
-The following images are built from [confidential-ai](https://github.com/Privasys/confidential-ai)
-and run LLM inference on NVIDIA H100 GPUs inside TDX Confidential VMs:
+The VM disk images are built by [cvm-images](https://github.com/Privasys/cvm-images)
+and published as GitHub Releases. Two variants are available for Intel TDX:
 
-| Image | Model | Parameters | GPU VRAM | GCP Disk |
-|-------|-------|-----------|----------|----------|
-| `confidential-ai-gemma4` | google/gemma-4-31b-it | 30.7B (dense) | ~62 GB (BF16) | model-gemma4-31b (70 GB) |
-| `confidential-ai-qwen25` | Qwen/Qwen2.5-32B-Instruct | 32.5B (dense) | ~65 GB (BF16) | model-qwen25-32b (75 GB) |
-| `confidential-ai-mistral-small` | mistralai/Mistral-Small-24B-Instruct-2501 | 24B (dense) | ~48 GB (BF16) | model-mistral-small-24b (55 GB) |
-| `confidential-ai-llama4-scout` | meta-llama/Llama-4-Scout-17B-16E-Instruct | 109B MoE (17B active) | ~58 GB (INT4) | model-llama4-scout (240 GB) |
+| Variant | GCP Image Family | CI Workflow | Tag Pattern | Description |
+|---------|-----------------|-------------|-------------|-------------|
+| **Base** | `privasys-tdx` | `build-tdx-base.yml` | `tdx-base-v*` | CPU-only workloads |
+| **GPU** | `privasys-tdx-gpu` | `build-tdx-gpu.yml` | `tdx-gpu-v*` | NVIDIA GPU workloads (H100, etc.) |
+
+Both variants share the same partition layout, boot chain, and security
+properties:
+
+- **Root filesystem**: erofs (read-only) with dm-verity integrity
+- **Boot**: UEFI Secure Boot via shim-signed + grub-efi-amd64-signed
+- **Partitions**: ESP (512 MB), root + verity hash, data (2 GB LUKS2+AEAD), containers (LVM, remaining disk)
+- **Kernel**: Ubuntu HWE 6.19 with CVM guard patch (BadAML mitigation)
+
+The GPU variant adds:
+
+- `nvidia-driver-590-server-open`, `cuda-toolkit-13-0`, `nvidia-container-toolkit`
+- containerd configured with `nvidia-container-runtime` as default runtime
+- Kernel parameters: `iommu=pt intel_iommu=on nvidia.NVreg_ConfidentialComputing=1`
+
+### Building locally
+
+```bash
+# Base image (generic)
+cd images/tdx-base && sudo mkosi build
+
+# Base image (GCP profile)
+cd images/tdx-base && sudo mkosi --profile gcp build
+
+# GPU image (GCP profile)
+cd images/tdx-gpu && sudo mkosi --profile gcp build
+```
+
+See the [cvm-images README](https://github.com/Privasys/cvm-images) for full
+build instructions and cloud deployment guides.
 
 ## OID Extensions
 
