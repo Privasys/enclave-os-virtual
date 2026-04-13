@@ -112,19 +112,19 @@ type Container struct {
 // HealthCheck defines a container health check.
 type HealthCheck struct {
 	// HTTP is an HTTP GET health check endpoint.
-	HTTP string `yaml:"http,omitempty"`
+	HTTP string `yaml:"http,omitempty" json:"http,omitempty"`
 
 	// TCP is a TCP port to connect to.
-	TCP string `yaml:"tcp,omitempty"`
+	TCP string `yaml:"tcp,omitempty" json:"tcp,omitempty"`
 
 	// IntervalSeconds is the time between checks.
-	IntervalSeconds int `yaml:"interval_seconds,omitempty"`
+	IntervalSeconds int `yaml:"interval_seconds,omitempty" json:"interval_seconds,omitempty"`
 
 	// TimeoutSeconds is the maximum time to wait for a response.
-	TimeoutSeconds int `yaml:"timeout_seconds,omitempty"`
+	TimeoutSeconds int `yaml:"timeout_seconds,omitempty" json:"timeout_seconds,omitempty"`
 
 	// Retries is the number of consecutive failures before unhealthy.
-	Retries int `yaml:"retries,omitempty"`
+	Retries int `yaml:"retries,omitempty" json:"retries,omitempty"`
 }
 
 // Load reads and parses a manifest from the given YAML file path.
