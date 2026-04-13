@@ -36,9 +36,11 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -429,6 +431,24 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 			s.log.Info("container is ready",
 				zap.String("name", req.Name),
 			)
+
+			// Fetch the model digest from the container's /health
+			// endpoint and record it so RA-TLS certs include OID 3.5.
+			if resp, err := hcClient.Get(req.HealthCheck.HTTP); err == nil {
+				defer resp.Body.Close()
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+				var hr struct {
+					ModelDigest string `json:"model_digest"`
+				}
+				if json.Unmarshal(body, &hr) == nil && hr.ModelDigest != "" {
+					if digestBytes, err := hex.DecodeString(hr.ModelDigest); err == nil {
+						if err := s.launcher.SetModelDigest(req.Name, digestBytes); err != nil {
+							s.log.Warn("failed to set model digest",
+								zap.String("name", req.Name), zap.Error(err))
+						}
+					}
+				}
+			}
 		} else {
 			status = "running" // model may still be loading
 			s.log.Warn("container readiness timeout, returning anyway",

@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -198,6 +199,26 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	// so that the nvidia-container-runtime injects driver libraries.
 	if len(spec.Devices) > 0 {
 		opts = append(opts, oci.WithEnv([]string{"NVIDIA_VISIBLE_DEVICES=all"}))
+	}
+
+	// Auto-mount pre-loaded models directory (read-only) when GPU devices
+	// are present and the host directory exists. This allows containers
+	// to load models from the GCP persistent disk at /mnt/models without
+	// needing an HF_TOKEN for online downloads.
+	if len(spec.Devices) > 0 {
+		if fi, err := os.Stat("/mnt/models"); err == nil && fi.IsDir() {
+			opts = append(opts, oci.WithMounts([]specs.Mount{{
+				Destination: "/models",
+				Source:      "/mnt/models",
+				Type:        "bind",
+				Options:     []string{"rbind", "ro"},
+			}}))
+			m.log.Info("auto-mounting models directory",
+				zap.String("name", spec.Name),
+				zap.String("host", "/mnt/models"),
+				zap.String("container", "/models"),
+			)
+		}
 	}
 
 	// Volume bind mounts (format: "host:container").
