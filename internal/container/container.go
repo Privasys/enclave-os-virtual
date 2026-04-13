@@ -200,10 +200,6 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		opts = append(opts, oci.WithEnv([]string{"NVIDIA_VISIBLE_DEVICES=all"}))
 	}
 
-	// Inject the container name so workloads can identify themselves
-	// when calling the internal extension registration API.
-	opts = append(opts, oci.WithEnv([]string{"ENCLAVE_OS_CONTAINER_NAME=" + spec.Name}))
-
 	// Volume bind mounts (format: "host:container[:ro|rw]").
 	if len(spec.Volumes) > 0 {
 		mounts := make([]specs.Mount, 0, len(spec.Volumes))

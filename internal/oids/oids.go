@@ -156,8 +156,12 @@ func PlatformExtensions(quote []byte, quoteOID asn1.ObjectIdentifier, merkleRoot
 
 // ContainerExtensions returns the set of X.509 extensions for a per-container
 // RA-TLS leaf certificate.  volumeEncryption may be empty to omit the OID.
-// modelDigest may be nil to omit the model digest OID (3.5).
-func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef string, volumeEncryption string, modelDigest []byte) []pkix.Extension {
+//
+// Note: application-specific OIDs (e.g. OID 3.5 model digest) are not included
+// here. Those are served by the container itself via the
+// /.well-known/attestation-extensions endpoint and pulled by ra-tls-caddy at
+// certificate issuance time, the same way enclave-os-mini's custom_oids() works.
+func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef string, volumeEncryption string) []pkix.Extension {
 	// Strip @sha256:... from the image ref; the digest is captured in OID 3.2.
 	if i := strings.Index(imageRef, "@"); i >= 0 {
 		imageRef = imageRef[:i]
@@ -169,9 +173,6 @@ func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef
 	}
 	if volumeEncryption != "" {
 		exts = append(exts, Extension(ContainerVolumeEncryption, []byte(volumeEncryption)))
-	}
-	if len(modelDigest) > 0 {
-		exts = append(exts, Extension(ContainerModelDigest, modelDigest))
 	}
 	return exts
 }

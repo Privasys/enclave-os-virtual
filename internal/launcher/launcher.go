@@ -270,11 +270,6 @@ type Launcher struct {
 	// Values: "byok:<fingerprint>" or "generated".  Absent when no volume.
 	volumeEncryption map[string]string
 
-	// modelDigests tracks per-container AI/ML model weight digests.
-	// The value is the raw SHA-256 hash bytes.  When present, the digest
-	// is included in the per-container RA-TLS certificate (OID 3.5).
-	modelDigests map[string][]byte
-
 	// Loaded container specs (mirrors what is running).
 	specs map[string]manifest.Container
 
@@ -294,7 +289,6 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		pulledImages:      make(map[string]client.Image),
 		specs:             make(map[string]manifest.Container),
 		volumeEncryption:  make(map[string]string),
-		modelDigests:      make(map[string][]byte),
 		attestationTokens: make(map[string]string),
 	}
 
@@ -685,7 +679,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 
 		// Write per-container extensions and add Caddy route if hostname is set.
 		if spec.Hostname != "" && !req.Internal {
-			if err := l.writeContainerExtensions(req.Name, spec.Hostname); err != nil {
+			if err := l.writeContainerExtensions(req.Name, spec.Hostname, req.Port); err != nil {
 				l.log.Warn("failed to write container extensions",
 					zap.String("name", req.Name), zap.Error(err))
 			}
@@ -876,39 +870,8 @@ func (l *Launcher) ContainerExtensions(containerName string) ([]pkix.Extension, 
 	root := tree.Root()
 	digest := l.imageDigests[containerName]
 	volEnc := l.volumeEncryption[containerName]
-	modelDigest := l.modelDigests[containerName]
 
-	return oids.ContainerExtensions(root, digest, spec.Image, volEnc, modelDigest), nil
-}
-
-// SetModelDigest stores the SHA-256 digest of the AI/ML model loaded in
-// a container and refreshes the per-container OID extensions so subsequent
-// RA-TLS certificates include OID 3.5.
-func (l *Launcher) SetModelDigest(containerName string, digest []byte) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	if _, ok := l.specs[containerName]; !ok {
-		return fmt.Errorf("launcher: container %q not found", containerName)
-	}
-	l.modelDigests[containerName] = digest
-
-	// Refresh the per-container extensions file if Caddy integration is active.
-	if l.caddyClient != nil {
-		spec := l.specs[containerName]
-		if spec.Hostname != "" {
-			if err := l.writeContainerExtensions(containerName, spec.Hostname); err != nil {
-				l.log.Warn("failed to refresh container extensions after model digest update",
-					zap.String("name", containerName), zap.Error(err))
-			}
-		}
-	}
-
-	l.log.Info("model digest recorded (OID 3.5)",
-		zap.String("container", containerName),
-		zap.String("digest", hex.EncodeToString(digest)),
-	)
-	return nil
+	return oids.ContainerExtensions(root, digest, spec.Image, volEnc), nil
 }
 
 // TPMEvents returns the application event log for RTMR[3] replay verification.
@@ -973,15 +936,17 @@ func (l *Launcher) writePlatformExtensions() error {
 		exts = append(exts, oids.Extension(oids.AttestationServersHash, h[:]))
 	}
 
-	return extensions.Write(l.cfg.ExtensionsDir, l.cfg.PlatformHostname, exts)
+	return extensions.Write(l.cfg.ExtensionsDir, l.cfg.PlatformHostname, exts, "")
 }
 
 // writeContainerExtensions writes the per-container OID extensions to the
 // extensions directory.  These are read by ra-tls-caddy when issuing a
-// per-container RA-TLS certificate.
+// per-container RA-TLS certificate.  The upstream URL is included so
+// ra-tls-caddy can pull dynamic OIDs from the container at cert time
+// (the Virtual equivalent of enclave-os-mini's custom_oids() trait).
 //
 // Must be called with l.mu held.
-func (l *Launcher) writeContainerExtensions(containerName, hostname string) error {
+func (l *Launcher) writeContainerExtensions(containerName, hostname string, port int) error {
 	if l.cfg.ExtensionsDir == "" {
 		return nil
 	}
@@ -1000,11 +965,11 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string) erro
 	digest := l.imageDigests[containerName]
 	volEnc := l.volumeEncryption[containerName]
 
-	// Build the extensions list (without the quote — ra-tls-caddy adds that).
-	modelDigest := l.modelDigests[containerName]
-	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc, modelDigest)
+	// Build the extensions list (without the quote - ra-tls-caddy adds that).
+	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc)
 
-	return extensions.Write(l.cfg.ExtensionsDir, hostname, exts)
+	upstream := fmt.Sprintf("http://127.0.0.1:%d", port)
+	return extensions.Write(l.cfg.ExtensionsDir, hostname, exts, upstream)
 }
 
 func (l *Launcher) waitForShutdown(ctx context.Context) error {

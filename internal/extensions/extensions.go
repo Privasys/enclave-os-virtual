@@ -1,17 +1,25 @@
 // Package extensions writes per-hostname OID extension files that the
 // ra-tls-caddy module reads during certificate issuance.
 //
-// Each file is a JSON array of {oid, value} objects:
+// Each file is a JSON object with static extensions and an optional
+// upstream URL for dynamic (container-provided) extensions:
 //
-//	[
-//	   {"oid": "1.3.6.1.4.1.65230.1.1", "value": "<base64>"},
-//	   ...
-//	]
+//	{
+//	   "extensions": [
+//	     {"oid": "1.3.6.1.4.1.65230.1.1", "value": "<base64>"},
+//	     ...
+//	   ],
+//	   "upstream": "http://127.0.0.1:8080"
+//	}
 //
 // The manager writes these files to the extensions directory (e.g.
 // /run/manager/extensions/) before adding the corresponding Caddy route.
 // ra-tls-caddy reads <extensions_dir>/<hostname>.json on every cert issuance,
-// appending the extensions alongside the hardware attestation quote.
+// appending the static extensions alongside the hardware attestation quote.
+// If upstream is set, ra-tls-caddy also calls
+// GET <upstream>/.well-known/attestation-extensions to pull any custom OIDs
+// the container wants to include (the Virtual equivalent of enclave-os-mini's
+// custom_oids() trait method).
 package extensions
 
 import (
@@ -30,12 +38,20 @@ type jsonExtension struct {
 	Value string `json:"value"`
 }
 
+// extensionsFile is the top-level JSON structure for extension files.
+type extensionsFile struct {
+	Extensions []jsonExtension `json:"extensions"`
+	Upstream   string          `json:"upstream,omitempty"`
+}
+
 // Write serialises the given pkix.Extension slice to
 // <dir>/<hostname>.json.  The directory is created if it does not exist.
+// If upstream is non-empty it is included so ra-tls-caddy can pull
+// dynamic OID extensions from the container at cert issuance time.
 //
 // The file is written atomically (write to temp + rename) to avoid
 // ra-tls-caddy reading a partial file.
-func Write(dir, hostname string, exts []pkix.Extension) error {
+func Write(dir, hostname string, exts []pkix.Extension, upstream string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("extensions: mkdir %q: %w", dir, err)
 	}
@@ -48,7 +64,12 @@ func Write(dir, hostname string, exts []pkix.Extension) error {
 		})
 	}
 
-	data, err := json.MarshalIndent(entries, "", "  ")
+	file := extensionsFile{
+		Extensions: entries,
+		Upstream:   upstream,
+	}
+
+	data, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
 		return fmt.Errorf("extensions: marshal: %w", err)
 	}
