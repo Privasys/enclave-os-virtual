@@ -205,6 +205,12 @@ func (c *Client) buildConfig() map[string]any {
 				{
 					"handler":   "reverse_proxy",
 					"upstreams": []map[string]any{{"dial": r.Upstream}},
+					"transport": map[string]any{
+						"protocol":                "http",
+						"response_header_timeout": "15m",
+						"read_timeout":            "15m",
+						"write_timeout":           "15m",
+					},
 				},
 			},
 		})
