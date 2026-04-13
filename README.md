@@ -2,7 +2,7 @@
 
 **Container workloads inside Confidential VMs, attested end-to-end.**
 
-Enclave OS (Virtual) runs OCI containers inside [Intel TDX](https://www.intel.com/content/www/us/en/developer/tools/trust-domain-extensions/overview.html) (or AMD SEV-SNP) Confidential VMs. Every container image digest, environment variable, volume mount, and platform configuration is measured into a deterministic Merkle tree and embedded in X.509 certificate extensions via [RA-TLS](https://github.com/Privasys/ra-tls-caddy). Clients can verify the full workload stack in a single TLS handshake — no out-of-band attestation protocol required.
+Enclave OS (Virtual) runs OCI containers inside [Intel TDX](https://www.intel.com/content/www/us/en/developer/tools/trust-domain-extensions/overview.html) (or AMD SEV-SNP) Confidential VMs. Every container image digest, environment variable, volume mount, and platform configuration is measured into a deterministic Merkle tree and embedded in X.509 certificate extensions via RA-TLS. Clients can verify the full workload stack in a single TLS handshake - no out-of-band attestation protocol required.
 
 Part of the [Privasys](https://privasys.org) Confidential Computing platform, alongside [Enclave OS (Mini)](https://github.com/Privasys/enclave-os-mini) (SGX/WASM).
 

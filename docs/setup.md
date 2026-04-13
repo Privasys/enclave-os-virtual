@@ -8,7 +8,7 @@ flags needed to deploy an Enclave OS (Virtual) instance.
 ### Intermediary CA (RA-TLS)
 
 The intermediary CA certificate and private key are baked into the image
-and used by Caddy (via ra-tls-caddy) to issue per-hostname RA-TLS leaf
+and used by Caddy (via its RA-TLS module) to issue per-hostname RA-TLS leaf
 certificates.
 
 | File | Purpose | Location |
@@ -19,7 +19,7 @@ certificates.
 - **Algorithm**: ECDSA P-256
 - **Trust model**: The CA key never leaves the VM — it exists only in
   TEE-encrypted memory and on the LUKS-encrypted data partition.
-- **Leaf certificates**: Generated dynamically by ra-tls-caddy for each
+- **Leaf certificates**: Generated dynamically by the RA-TLS module for each
   TLS connection (challenge-response mode) or cached up to 24h
   (deterministic mode). Each leaf embeds the TDX/SEV-SNP quote and
   Privasys OID extensions.
@@ -169,10 +169,10 @@ and `--hostname` are required.
 /run/containers/<name>/         ← per-container encrypted volume (LVM + LUKS2+AEAD)
 
 /run/manager/extensions/        ← RuntimeDirectory, created by launcher
-    <hostname>.json             ← per-hostname OID extensions for ra-tls-caddy
+    <hostname>.json             ← per-hostname OID extensions for the RA-TLS module
 
 /usr/bin/manager                ← static binary
-/usr/bin/caddy                  ← Caddy with ra-tls-caddy module
+/usr/bin/caddy                  ← Caddy with RA-TLS module
 /usr/bin/luks-setup             ← LUKS data partition setup script
 ```
 

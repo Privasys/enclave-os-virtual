@@ -62,7 +62,7 @@ type Config struct {
 	CaddyListenAddr string
 
 	// ExtensionsDir is the directory where the launcher writes per-hostname
-	// OID extension JSON files for ra-tls-caddy.  If empty, OID extensions
+	// OID extension JSON files for Caddy's RA-TLS module. If empty, OID extensions
 	// are not written and Caddy integration is disabled.
 	ExtensionsDir string
 
@@ -426,7 +426,7 @@ func (l *Launcher) CACertPath() string {
 }
 
 // ReloadCA writes the new CA certificate and key to the configured paths,
-// reloads the Caddy configuration so ra-tls-caddy picks up the new CA, and
+// reloads the Caddy configuration so the RA-TLS module picks up the new CA, and
 // recomputes all attestation data (the platform Merkle tree includes the CA
 // cert as a leaf, so changing it changes the attestation root).
 func (l *Launcher) ReloadCA(certPEM, keyPEM []byte) error {
@@ -910,7 +910,7 @@ type ContainerStatus struct {
 
 // writePlatformExtensions writes the platform-wide OID extensions to the
 // extensions directory for the management API hostname.  These are read by
-// ra-tls-caddy when issuing the platform RA-TLS certificate.
+// Caddy's RA-TLS module when issuing the platform RA-TLS certificate.
 //
 // Must be called with l.mu held (or at startup before concurrency).
 func (l *Launcher) writePlatformExtensions() error {
@@ -922,7 +922,7 @@ func (l *Launcher) writePlatformExtensions() error {
 	var cdHash [32]byte
 	copy(cdHash[:], l.containerdHash)
 
-	// Build the extensions list (without the quote — ra-tls-caddy adds that).
+	// Build the extensions list (without the quote - the RA-TLS module adds that).
 	exts := []pkix.Extension{
 		oids.Extension(oids.PlatformConfigMerkleRoot, root[:]),
 		oids.Extension(oids.RuntimeVersionHash, cdHash[:]),
@@ -940,9 +940,9 @@ func (l *Launcher) writePlatformExtensions() error {
 }
 
 // writeContainerExtensions writes the per-container OID extensions to the
-// extensions directory.  These are read by ra-tls-caddy when issuing a
-// per-container RA-TLS certificate.  The upstream URL is included so
-// ra-tls-caddy can pull dynamic OIDs from the container at cert time
+// extensions directory. These are read by Caddy's RA-TLS module when
+// issuing a per-container RA-TLS certificate. The upstream URL is included
+// so it can pull dynamic OIDs from the container at cert time
 // (the Virtual equivalent of enclave-os-mini's custom_oids() trait).
 //
 // Must be called with l.mu held.
@@ -965,7 +965,7 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string, port
 	digest := l.imageDigests[containerName]
 	volEnc := l.volumeEncryption[containerName]
 
-	// Build the extensions list (without the quote - ra-tls-caddy adds that).
+	// Build the extensions list (without the quote - the RA-TLS module adds that).
 	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc)
 
 	upstream := fmt.Sprintf("http://127.0.0.1:%d", port)

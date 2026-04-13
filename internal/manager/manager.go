@@ -16,7 +16,7 @@
 // # Transport
 //
 // The server listens on plain HTTP on localhost only. External TLS
-// termination is handled by Caddy with the ra-tls-caddy module,
+// termination is handled by Caddy with its RA-TLS module,
 // which reverse-proxies to this listener.
 //
 // # Endpoints

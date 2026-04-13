@@ -4,7 +4,7 @@
 # This script:
 #   0. Builds a patched kernel with CVM guard (BadAML mitigation) if needed
 #   1. Cross-compiles the manager Go binary for linux/amd64
-#   2. Builds Caddy with the ra-tls-caddy module via xcaddy
+#   2. Builds Caddy with the RA-TLS module via xcaddy
 #   3. Optionally bakes a manifest into the image
 #   4. Fixes symlinks (Git may check them out as plain text)
 #   5. Runs mkosi to build the disk image
@@ -130,16 +130,16 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
     "$REPO_ROOT/cmd/manager/"
 echo "Binary built: $EXTRA_DIR/usr/bin/manager"
 
-# Step 2: Build the Caddy binary with ra-tls-caddy module.
+# Step 2: Build the Caddy binary with RA-TLS module.
 echo ""
-echo "=== Step 2: Building Caddy with ra-tls-caddy ==="
-RA_TLS_CADDY_DIR="$REPO_ROOT/../../libraries/ra-tls-caddy/src"
-if [ ! -d "$RA_TLS_CADDY_DIR" ]; then
-    echo "ERROR: ra-tls-caddy source not found at $RA_TLS_CADDY_DIR"
+echo "=== Step 2: Building Caddy with RA-TLS module ==="
+RA_TLS_DIR="$REPO_ROOT/caddy/ratls"
+if [ ! -d "$RA_TLS_DIR" ]; then
+    echo "ERROR: RA-TLS module source not found at $RA_TLS_DIR"
     exit 1
 fi
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 xcaddy build \
-    --with "github.com/Privasys/ra-tls-caddy=$RA_TLS_CADDY_DIR" \
+    --with "github.com/Privasys/enclave-os-virtual/caddy/ratls=$RA_TLS_DIR" \
     --output "$EXTRA_DIR/usr/bin/caddy"
 echo "Caddy built: $EXTRA_DIR/usr/bin/caddy"
 

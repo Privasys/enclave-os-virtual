@@ -159,8 +159,9 @@ func PlatformExtensions(quote []byte, quoteOID asn1.ObjectIdentifier, merkleRoot
 //
 // Note: application-specific OIDs (e.g. OID 3.5 model digest) are not included
 // here. Those are served by the container itself via the
-// /.well-known/attestation-extensions endpoint and pulled by ra-tls-caddy at
-// certificate issuance time, the same way enclave-os-mini's custom_oids() works.
+// /.well-known/attestation-extensions endpoint and pulled by Caddy's RA-TLS
+// module at certificate issuance time, the same way enclave-os-mini's
+// custom_oids() works.
 func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef string, volumeEncryption string) []pkix.Extension {
 	// Strip @sha256:... from the image ref; the digest is captured in OID 3.2.
 	if i := strings.Index(imageRef, "@"); i >= 0 {

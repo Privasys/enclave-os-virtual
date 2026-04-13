@@ -58,13 +58,12 @@ jobs:
             -o build/image/mkosi.extra/usr/bin/manager \
             ./cmd/manager/
 
-      - name: Build Caddy with ra-tls-caddy
+      - name: Build Caddy with RA-TLS module
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
           export PATH="$(go env GOPATH)/bin:$PATH"
-          git clone --depth 1 --branch v0.4.0 https://github.com/Privasys/ra-tls-caddy.git /tmp/ra-tls-caddy
           xcaddy build \
-            --with github.com/Privasys/ra-tls-caddy=/tmp/ra-tls-caddy/src \
+            --with github.com/Privasys/enclave-os-virtual/caddy/ratls=./caddy/ratls \
             --output build/image/mkosi.extra/usr/bin/caddy
           chmod +x build/image/mkosi.extra/usr/bin/caddy
           ls -lh build/image/mkosi.extra/usr/bin/caddy

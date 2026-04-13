@@ -8,7 +8,7 @@ Internal packages implementing the Enclave OS (Virtual) runtime.
 | `auth` | OIDC-only bearer token verification, JWKS discovery, role checking |
 | `caddy` | Caddy admin API client for dynamic RA-TLS route management |
 | `container` | OCI container lifecycle via containerd (pull, create, health checks) |
-| `extensions` | Per-hostname OID extension file writer for ra-tls-caddy |
+| `extensions` | Per-hostname OID extension file writer for Caddy's RA-TLS module |
 | `launcher` | Workload orchestrator — dynamic load/unload with attestation + Caddy wiring |
 | `manifest` | Workload manifest format, validation, and per-container Merkle trees |
 | `merkle` | Deterministic SHA-256 Merkle tree for configuration attestation |

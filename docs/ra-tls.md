@@ -35,7 +35,7 @@ or an untrusted runtime — without trusting the server operator.
 │  Intel TDX / AMD SEV-SNP  Confidential VM              │
 │                                                        │
 │  ┌──────────────────────────────────────────────────┐  │
-│  │  Caddy  (ra-tls-caddy module)                    │  │
+│  │  Caddy  (RA-TLS module)                           │  │
 │  │                                                  │  │
 │  │  • Terminates TLS with RA-TLS certificates       │  │
 │  │  • Embeds TDX/SEV-SNP quote in every certificate │  │
@@ -65,8 +65,7 @@ or an untrusted runtime — without trusting the server operator.
 The architectural difference from [enclave-os-mini](https://github.com/Privasys/enclave-os-mini)
 (SGX) is **who performs TLS termination**: in enclave-os-mini the enclave
 binary itself handles TLS via rustls, while in enclave-os-virtual a
-dedicated **Caddy process** (with the
-[ra-tls-caddy](https://github.com/Privasys/ra-tls-caddy) module) does.
+dedicated **Caddy process** (with the RA-TLS issuance module) does.
 Both run inside a hardware enclave — SGX for mini, TDX/SEV-SNP for virtual —
 so the TLS private key and plaintext traffic are always protected by
 hardware memory encryption.  The trade-off is TCB size: SGX enclaves have a
@@ -76,7 +75,7 @@ every certificate embeds a hardware quote binding the TLS key to the
 platform measurement.
 
 The manager provides the Privasys OID extensions (Merkle roots, image
-digests, etc.) via a shared filesystem directory that ra-tls-caddy reads
+digests, etc.) via a shared filesystem directory that the RA-TLS module reads
 during certificate issuance.
 
 ---
@@ -123,7 +122,7 @@ LUKS-encrypted data partition.
 
 A fresh leaf certificate is generated for each TLS connection in
 challenge-response mode, or cached for up to 24 hours in deterministic mode.
-The process (performed by ra-tls-caddy):
+The process (performed by Caddy's RA-TLS module):
 
 1. Generate an **ECDSA P-256 key pair** inside the TEE
 2. Compute `ReportData`:
@@ -299,7 +298,7 @@ Clients can choose their verification depth:
 ### Challenge Mode (Client → Server)
 
 The client sends a random nonce in a TLS ClientHello extension (`0xFFBB`).
-ra-tls-caddy binds this nonce into the TDX/SGX quote's `ReportData`:
+The RA-TLS module binds this nonce into the TDX/SGX quote's `ReportData`:
 
 ```
 report_data = SHA-512( SHA-256(SPKI_DER) || nonce )
@@ -318,7 +317,7 @@ with the `ratls` build tag.
 
 ### Deterministic Mode
 
-When no nonce is present, ra-tls-caddy uses the creation timestamp as binding:
+When no nonce is present, the RA-TLS module uses the creation timestamp as binding:
 
 ```
 report_data = SHA-512( SHA-256(SPKI_DER) || "2006-01-02T15:04Z" )
@@ -356,7 +355,7 @@ The Caddy reverse proxy uses **SNI-based routing**:
 
 1. Client connects to `myapp.prod1.example.com:443`
 2. Caddy matches the SNI hostname to a registered route
-3. ra-tls-caddy reads `/run/manager/extensions/myapp.prod1.example.com.json`
+3. The RA-TLS module reads `/run/manager/extensions/myapp.prod1.example.com.json`
 4. If in challenge-response mode: generate fresh key + TDX quote + extensions
 5. If in deterministic mode: serve cached cert (auto-renewed every 24h)
 6. TLS established — traffic is reverse-proxied to `localhost:8080`
@@ -422,17 +421,17 @@ Each file is an array of OID extension objects:
 ]
 ```
 
-Files are written atomically (write to `.tmp` → rename) to avoid ra-tls-caddy
-reading partial data.
+Files are written atomically (write to `.tmp` → rename) to avoid the RA-TLS
+module reading partial data.
 
-ra-tls-caddy reads `<extensions_dir>/<hostname>.json` on every cert issuance
-and appends the extensions alongside the hardware attestation quote.
+The RA-TLS module reads `<extensions_dir>/<hostname>.json` on every cert
+issuance and appends the extensions alongside the hardware attestation quote.
 
 ---
 
 ## Caddy Configuration
 
-ra-tls-caddy is configured as a Caddy TLS issuer:
+The RA-TLS module is configured as a Caddy TLS issuer:
 
 ```
 {
@@ -481,7 +480,7 @@ on every container load/unload.
 | Feature | Enclave OS (Mini) (SGX) | Enclave OS (Virtual) (CVM) |
 |---------|----------------------|--------------------------|
 | **TEE** | Intel SGX enclave | Intel TDX / AMD SEV-SNP VM |
-| **TLS termination** | Enclave binary (rustls) | Caddy (ra-tls-caddy module) |
+| **TLS termination** | Enclave binary (rustls) | Caddy (RA-TLS module) |
 | **Key generation** | Inside enclave, sealed to MRENCLAVE | Inside TEE, managed by certmagic |
 | **CA storage** | Sealed to disk via `sgx_tseal` | LUKS2 + AEAD integrity on data partition (`/data/`) |
 | **Quote per-cert** | Yes (per-connection in challenge mode) | Yes (per-connection in challenge mode) |

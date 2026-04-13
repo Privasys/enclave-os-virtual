@@ -202,14 +202,14 @@ Unload a running container by name. If the bearer token carries a
 
 ### PUT /api/v1/tls
 
-Rotate the intermediary CA certificate and private key used by ra-tls-caddy
-for RA-TLS certificate issuance. The new certificate must have the **same
+Rotate the intermediary CA certificate and private key used by Caddy's RA-TLS
+module for certificate issuance. The new certificate must have the **same
 CN** as the current one — changing the CN is rejected because RA-TLS
 hostnames are derived from it.
 
 After a successful update the manager:
 1. Writes the new cert and key to disk (atomically)
-2. Reloads the Caddy configuration so ra-tls-caddy uses the new CA
+2. Reloads the Caddy configuration so the RA-TLS module uses the new CA
 3. Recomputes the platform Merkle tree (the CA cert is a leaf)
 
 **Request body**

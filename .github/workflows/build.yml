@@ -38,7 +38,7 @@ jobs:
           # The RA-TLS challenge-response feature requires the Privasys Go fork
           # which adds tls.ClientHelloInfo.RATLSChallenge.
           # The manager binary compiles with upstream Go (fork needed at runtime),
-          # but Caddy + ra-tls-caddy requires the fork at COMPILE time.
+          # but Caddy's RA-TLS module requires the fork at COMPILE time.
           curl -sL https://github.com/Privasys/go/releases/download/privasys-v0.2.0-go1.25.8/go-ratls-privasys-v0.2.0-go1.25.8-linux-amd64.tar.gz -o /tmp/go-ratls.tar.gz
           sudo tar -C /usr/local -xzf /tmp/go-ratls.tar.gz
           echo "/usr/local/go-ratls/bin" >> "$GITHUB_PATH"
@@ -51,16 +51,12 @@ jobs:
             -o build/image/mkosi.extra/usr/bin/manager \
             ./cmd/manager/
 
-      - name: Build Caddy with ra-tls-caddy
+      - name: Build Caddy with RA-TLS module
         run: |
-          # Install xcaddy, then build Caddy with the RA-TLS module.
-          # ra-tls-caddy's go.mod is in src/ (not repo root), so we clone
-          # and use a local replace — same as build.sh.
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
           export PATH="$(go env GOPATH)/bin:$PATH"
-          git clone --depth 1 --branch v0.4.0 https://github.com/Privasys/ra-tls-caddy.git /tmp/ra-tls-caddy
           xcaddy build \
-            --with github.com/Privasys/ra-tls-caddy=/tmp/ra-tls-caddy/src \
+            --with github.com/Privasys/enclave-os-virtual/caddy/ratls=./caddy/ratls \
             --output build/image/mkosi.extra/usr/bin/caddy
           chmod +x build/image/mkosi.extra/usr/bin/caddy
           ls -lh build/image/mkosi.extra/usr/bin/caddy

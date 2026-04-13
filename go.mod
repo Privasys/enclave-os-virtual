@@ -72,8 +72,9 @@ require (
 )
 
 // Caddy is built as a separate binary via xcaddy in build.sh (not embedded
-// in the manager). ra-tls-caddy and caddy are not Go dependencies of this
-// module — they are only build-time dependencies of the image.
-// github.com/Privasys/ra-tls-caddy
+// in the manager). The RA-TLS module (caddy/ratls/) and caddy are not Go
+// dependencies of this module - they are only build-time dependencies of
+// the image.
+// github.com/Privasys/enclave-os-virtual/caddy/ratls
 // github.com/caddyserver/caddy/v2 v2.9.1
 // github.com/google/go-tdx-guest v0.3.1
