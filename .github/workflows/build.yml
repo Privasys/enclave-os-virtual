@@ -87,7 +87,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          CVM_IMAGES_TAG="tdx-gpu-v0.3.0"
+          # Resolve the latest cvm-images release tag for our TEE variant.
+          # The enclave-os-virtual mkosi.conf includes boot.conf and common/
+          # from the cvm-images repo. We pick the latest matching tag to stay
+          # in sync without hardcoding versions.
+          CVM_TAG_PREFIX="tdx-gpu-v"
+          CVM_IMAGES_TAG=$(gh release list --repo Privasys/cvm-images \
+            --json tagName -q '.[].tagName' | grep "^${CVM_TAG_PREFIX}" | head -1)
+          if [ -z "$CVM_IMAGES_TAG" ]; then
+            echo "::error::No cvm-images release found matching ${CVM_TAG_PREFIX}*"
+            exit 1
+          fi
           gh repo clone Privasys/cvm-images build/cvm-images -- --depth 1 --branch "$CVM_IMAGES_TAG"
           echo "Cloned cvm-images at $CVM_IMAGES_TAG"
 
