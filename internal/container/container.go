@@ -19,9 +19,11 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
+	godigest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"go.uber.org/zap"
@@ -59,6 +61,12 @@ const (
 	StatusFailed    Status = "failed"
 )
 
+// PullProgress tracks the progress of an image pull.
+type PullProgress struct {
+	TotalBytes      int64 `json:"total_bytes"`
+	DownloadedBytes int64 `json:"downloaded_bytes"`
+}
+
 // ManagedContainer tracks a running container and its metadata.
 type ManagedContainer struct {
 	Name        string
@@ -68,7 +76,8 @@ type ManagedContainer struct {
 	Container   client.Container
 	Task        client.Task
 
-	mu sync.RWMutex
+	pullProgress PullProgress
+	mu           sync.RWMutex
 }
 
 // SetStatus updates the container status safely.
@@ -83,6 +92,20 @@ func (mc *ManagedContainer) GetStatus() Status {
 	mc.mu.RLock()
 	defer mc.mu.RUnlock()
 	return mc.Status
+}
+
+// SetPullProgress updates pull progress safely.
+func (mc *ManagedContainer) SetPullProgress(downloaded, total int64) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	mc.pullProgress = PullProgress{TotalBytes: total, DownloadedBytes: downloaded}
+}
+
+// GetPullProgress returns pull progress safely.
+func (mc *ManagedContainer) GetPullProgress() PullProgress {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+	return mc.pullProgress
 }
 
 // Manager manages the lifecycle of OCI containers through containerd.
@@ -121,16 +144,73 @@ func (m *Manager) ctx(parent context.Context) context.Context {
 
 // Pull downloads an OCI image and verifies its digest matches the manifest.
 // Returns the resolved image descriptor and the raw digest bytes.
+// Registers a pulling container in the manager so pull progress is visible
+// via List()/StatusReport().
 func (m *Manager) Pull(ctx context.Context, spec manifest.Container) (client.Image, []byte, error) {
 	ctx = m.ctx(ctx)
 	m.log.Info("pulling image", zap.String("name", spec.Name), zap.String("image", spec.Image))
 
+	// Register a "pulling" container so it shows up in status queries.
+	mc := &ManagedContainer{
+		Name:   spec.Name,
+		Spec:   spec,
+		Status: StatusPulling,
+	}
+	m.mu.Lock()
+	m.containers[spec.Name] = mc
+	m.mu.Unlock()
+
+	// Track pull progress per-descriptor using the image handler wrapper.
+	var (
+		progressMu sync.Mutex
+		totalSize  int64
+		fetchedSize int64
+		seen       = make(map[godigest.Digest]bool) // true = fetched
+	)
+
 	img, err := m.client.Pull(ctx, spec.Image,
 		client.WithPullUnpack,
+		client.WithImageHandlerWrapper(func(inner images.Handler) images.Handler {
+			return images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+				children, err := inner.Handle(ctx, desc)
+				if err != nil {
+					return children, err
+				}
+
+				progressMu.Lock()
+				// Mark this descriptor as fetched (avoid double-counting).
+				if _, known := seen[desc.Digest]; !known {
+					totalSize += desc.Size
+				}
+				if !seen[desc.Digest] {
+					fetchedSize += desc.Size
+					seen[desc.Digest] = true
+				}
+				// Discover children (will be fetched in subsequent calls).
+				for _, c := range children {
+					if _, known := seen[c.Digest]; !known {
+						totalSize += c.Size
+						seen[c.Digest] = false
+					}
+				}
+				progressMu.Unlock()
+
+				mc.SetPullProgress(fetchedSize, totalSize)
+				return children, nil
+			})
+		}),
 	)
 	if err != nil {
+		// Remove the pulling stub on failure.
+		mc.SetStatus(StatusFailed)
+		m.mu.Lock()
+		delete(m.containers, spec.Name)
+		m.mu.Unlock()
 		return nil, nil, fmt.Errorf("container: failed to pull %s: %w", spec.Image, err)
 	}
+
+	// Mark pull as complete.
+	mc.SetPullProgress(totalSize, totalSize)
 
 	// Verify digest if the image ref contains @sha256:
 	resolvedDigest := img.Target().Digest.String()
@@ -141,6 +221,9 @@ func (m *Manager) Pull(ctx context.Context, spec manifest.Container) (client.Ima
 
 	digestBytes, err := digestToBytes(resolvedDigest)
 	if err != nil {
+		m.mu.Lock()
+		delete(m.containers, spec.Name)
+		m.mu.Unlock()
 		return nil, nil, fmt.Errorf("container: failed to parse digest for %s: %w", spec.Name, err)
 	}
 
@@ -284,7 +367,18 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	}
 
 	m.mu.Lock()
-	m.containers[spec.Name] = mc
+	// Reuse the existing entry (from Pull) if present, updating its fields.
+	if existing, ok := m.containers[spec.Name]; ok {
+		existing.mu.Lock()
+		existing.Spec = spec
+		existing.Status = StatusRunning
+		existing.Container = container
+		existing.Task = task
+		existing.mu.Unlock()
+		mc = existing
+	} else {
+		m.containers[spec.Name] = mc
+	}
 	m.mu.Unlock()
 
 	m.log.Info("container started", zap.String("name", spec.Name))

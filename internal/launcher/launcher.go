@@ -888,20 +888,29 @@ func (l *Launcher) StatusReport() []ContainerStatus {
 	containers := mgr.List()
 	result := make([]ContainerStatus, 0, len(containers))
 	for _, mc := range containers {
-		result = append(result, ContainerStatus{
+		cs := ContainerStatus{
 			Name:   mc.Name,
 			Image:  mc.Spec.Image,
 			Status: string(mc.GetStatus()),
-		})
+		}
+		progress := mc.GetPullProgress()
+		if progress.TotalBytes > 0 {
+			cs.PullProgress = &container.PullProgress{
+				TotalBytes:      progress.TotalBytes,
+				DownloadedBytes: progress.DownloadedBytes,
+			}
+		}
+		result = append(result, cs)
 	}
 	return result
 }
 
 // ContainerStatus is a JSON-serializable container status summary.
 type ContainerStatus struct {
-	Name   string `json:"name"`
-	Image  string `json:"image"`
-	Status string `json:"status"`
+	Name         string                 `json:"name"`
+	Image        string                 `json:"image"`
+	Status       string                 `json:"status"`
+	PullProgress *container.PullProgress `json:"pull_progress,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
