@@ -93,7 +93,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          CVM_IMAGES_TAG="tdx-gpu-v0.2.0"
+          CVM_IMAGES_TAG="tdx-gpu-v0.3.0"
           gh repo clone Privasys/cvm-images build/cvm-images -- --depth 1 --branch "$CVM_IMAGES_TAG"
           echo "Cloned cvm-images at $CVM_IMAGES_TAG"
 
