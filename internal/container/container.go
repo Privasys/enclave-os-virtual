@@ -164,6 +164,30 @@ func (m *Manager) Pull(ctx context.Context, spec manifest.Container) (client.Ima
 	m.containers[spec.Name] = mc
 	m.mu.Unlock()
 
+	// disk:// scheme: image is already on a locally mounted persistent
+	// disk, no network pull needed. See internal/container/disk.go.
+	if IsDiskRef(spec.Image) {
+		dir, err := diskRefDir(spec.Image)
+		if err != nil {
+			mc.SetStatus(StatusFailed)
+			m.mu.Lock()
+			delete(m.containers, spec.Name)
+			m.mu.Unlock()
+			return nil, nil, err
+		}
+		img, dgst, err := m.importFromDisk(ctx, spec.Image, dir)
+		if err != nil {
+			mc.SetStatus(StatusFailed)
+			m.mu.Lock()
+			delete(m.containers, spec.Name)
+			m.mu.Unlock()
+			return nil, nil, err
+		}
+		// Import is effectively a no-progress operation; mark complete.
+		mc.SetPullProgress(1, 1)
+		return img, dgst, nil
+	}
+
 	// Track pull progress per-descriptor using the image handler wrapper.
 	var (
 		progressMu sync.Mutex
