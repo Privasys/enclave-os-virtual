@@ -1,0 +1,18 @@
+[Unit]
+Description=Tmpfs at /var/lib/images for read-only image disk mountpoints
+DefaultDependencies=no
+# /var/lib lives on the read-only erofs root, so disk-mounter cannot
+# mkdir /var/lib/images/<image-name>. Provide a tiny tmpfs overlay
+# whose only job is to host one empty directory per attached image
+# disk; the actual disk content is bind/loop-mounted on top.
+Before=disk-mounter.service local-fs.target
+After=systemd-tmpfiles-setup.service
+
+[Mount]
+What=tmpfs
+Where=/var/lib/images
+Type=tmpfs
+Options=mode=0755,nosuid,nodev,size=1m,nr_inodes=1024
+
+[Install]
+WantedBy=local-fs.target
