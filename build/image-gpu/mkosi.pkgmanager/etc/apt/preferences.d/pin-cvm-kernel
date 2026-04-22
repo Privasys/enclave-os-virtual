@@ -1,0 +1,28 @@
+# Pin the patched cvm-images kernel ABI (6.17.0-20-generic) and block any
+# newer Ubuntu HWE kernel from being installed alongside it.
+#
+# Why: nvidia-driver-590-server-open and various other Recommends pull in
+# the latest linux-image-generic-hwe-24.04 metapackage, which ends up
+# installing linux-image-6.17.0-22-generic (or newer) into the image.
+# mkosi's grub then picks the *newest* kernel as the boot entry, but the
+# core Ubuntu kernel does NOT include our cvm-guard / BadAML patch and
+# (more visibly) ships a different module set whose `gve` driver mismatches
+# the running kernel ABI - so on first boot there's no NIC, no metadata
+# server, no SSH, no startup script, nothing.
+#
+# This pin keeps the boot kernel deterministic at the exact ABI shipped in
+# build/kernel/debs/ from the cvm-images kernel-v* GitHub release.
+#
+# When cvm-images bumps the kernel ABI, update both:
+#   1. The version numbers below.
+#   2. The explicit linux-modules-nvidia-590-server-open-<abi> package in
+#      build/image-gpu/mkosi.conf.
+
+Package: linux-image-6.17.0-22-generic linux-image-unsigned-6.17.0-22-generic linux-modules-6.17.0-22-generic linux-modules-extra-6.17.0-22-generic linux-headers-6.17.0-22-generic linux-modules-nvidia-590-server-open-6.17.0-22-generic
+Pin: release *
+Pin-Priority: -1
+
+# Block the floating meta-packages that always resolve to the latest ABI.
+Package: linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 linux-modules-nvidia-590-server-open-generic-6.17 linux-modules-nvidia-590-server-open-generic-hwe-24.04
+Pin: release *
+Pin-Priority: -1
