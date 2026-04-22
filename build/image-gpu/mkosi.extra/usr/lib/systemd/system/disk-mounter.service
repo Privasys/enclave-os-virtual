@@ -1,0 +1,21 @@
+[Unit]
+Description=Mount image-* and model-* GCE disks read-only
+Documentation=file:///home/dev/privasys/.operations/plans/image-and-model-disks.md
+DefaultDependencies=no
+# Run after CVM runtime init (PAM fix, NVIDIA CC) and after /data is up.
+# Run before any platform service that consumes the disks (containerd
+# uses /var/lib/images, manager bind-mounts /mnt/* into containers).
+After=local-fs.target data.mount cvm-runtime-init.service
+Before=containerd.service manager.service multi-user.target
+Wants=cvm-runtime-init.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/enclave-os/disk-mounter
+RemainAfterExit=yes
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
