@@ -657,7 +657,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	mc.ImageDigest = digest
 
 	// Start health checks.
-	l.mgr.StartHealthChecks(ctx, mc)
+	// Use a background context: the request ctx is cancelled when the
+	// HTTP handler returns, which would terminate the goroutine before
+	// the first interval tick and leave the container stuck in "running"
+	// state forever.
+	l.mgr.StartHealthChecks(context.Background(), mc)
 
 	// Record state.
 	l.specs[req.Name] = spec

@@ -382,17 +382,25 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 		zap.String("auth_subject", result.Subject),
 	)
 
-	digest, err := s.launcher.Load(r.Context(), req)
-	if err != nil {
-		s.log.Error("failed to load container",
-			zap.String("name", req.Name),
-			zap.Error(err),
-		)
-		s.jsonError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	containersLoaded.Set(float64(s.launcher.ContainerCount()))
+	// Run Load asynchronously: image pull + container start can take
+	// minutes (large images, cold containerd cache). The management
+	// service polls GET /api/v1/status to track progress and health,
+	// so the HTTP handler returns 202 immediately after kicking off
+	// the load goroutine. container.Pull registers a "pulling" stub
+	// before the network call so the container is visible in status
+	// queries right away.
+	go func() {
+		// Use Background ctx: r.Context() is cancelled when this
+		// handler returns, which would abort the pull mid-flight.
+		if _, err := s.launcher.Load(context.Background(), req); err != nil {
+			s.log.Error("async load failed",
+				zap.String("name", req.Name),
+				zap.Error(err),
+			)
+			return
+		}
+		containersLoaded.Set(float64(s.launcher.ContainerCount()))
+	}()
 
 	// WaitReady is deprecated. Container health transitions are tracked
 	// asynchronously by the background health check goroutine and exposed
@@ -405,12 +413,11 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
+	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{
 		"name":   req.Name,
 		"image":  req.Image,
-		"digest": fmt.Sprintf("%x", digest),
-		"status": "running",
+		"status": "loading",
 	})
 }
 
