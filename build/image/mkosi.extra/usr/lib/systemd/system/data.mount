@@ -1,7 +1,16 @@
 [Unit]
 Description=Data partition (/data)
+# luks-data.service needs networkd up to fetch the passphrase, so /data
+# cannot be a normal local-fs mount (which runs before sysinit.target).
+# DefaultDependencies=no breaks the implicit Before=local-fs.target /
+# Conflicts=umount.target chain that creates a cycle with local-fs.target.
+# We instead anchor it to remote-fs.target which orders after networkd.
+DefaultDependencies=no
 After=luks-data.service
 Requires=luks-data.service
+Before=remote-fs.target
+Conflicts=umount.target
+Before=umount.target
 
 [Mount]
 What=/dev/mapper/data-crypt
@@ -10,4 +19,4 @@ Type=ext4
 Options=defaults,noatime
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=remote-fs.target
