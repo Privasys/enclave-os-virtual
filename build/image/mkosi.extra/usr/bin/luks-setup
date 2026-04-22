@@ -13,8 +13,16 @@
 # ships we will add a Vaults-backed flow that generates a key, seals it
 # to the VM's attestation evidence, and retrieves it on restart.
 #
-# On first boot the partition is formatted with LUKS2 + ext4 (AEAD).
-# On subsequent boots the existing LUKS volume is unlocked.
+# On first boot the partition is formatted with LUKS2 + ext4 with
+# per-sector dm-integrity tags (AES-XTS + HMAC-SHA256). On subsequent
+# boots the existing LUKS volume is unlocked.
+#
+# Note on integrity choice: cryptsetup's --integrity aead requires an
+# AEAD-native cipher (e.g. aes-gcm-random) and is incompatible with
+# aes-xts-plain64. We use --integrity hmac-sha256 which gives the same
+# security property (per-4K-sector authenticated encryption via
+# dm-integrity) while keeping AES-NI/VAES-accelerated XTS for
+# throughput. Do not switch to aes-gcm-random without a benchmark.
 #
 # Outputs:
 #   /run/luks/dek-origin   key origin string for OID 2.6: "byok:<fingerprint>"
@@ -103,8 +111,10 @@ if cryptsetup isLuks "$PART" 2>/dev/null; then
 else
     echo "luks-setup: formatting new LUKS2 volume"
 
-    # dm-integrity + authenc are needed for LUKS2 AEAD integrity but are
-    # not auto-loaded by the kernel. Load them explicitly before format.
+    # dm-integrity + hmac are needed for LUKS2 per-sector integrity but
+    # are not auto-loaded by the kernel. Load them explicitly before
+    # format. Also covered by /etc/modules-load.d/crypto.conf for early
+    # boot, but a defensive modprobe here is cheap.
     modprobe dm-integrity 2>/dev/null || true
     modprobe authenc     2>/dev/null || true
 
@@ -113,8 +123,9 @@ else
         --cipher aes-xts-plain64 \
         --key-size 512 \
         --hash sha256 \
-        --integrity aead \
+        --integrity hmac-sha256 \
         --iter-time 2000 \
+        --batch-mode \
         --key-file=- \
         "$PART"
 
