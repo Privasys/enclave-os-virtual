@@ -62,7 +62,7 @@ type Config struct {
 	CaddyListenAddr string
 
 	// ExtensionsDir is the directory where the launcher writes per-hostname
-	// OID extension JSON files for ra-tls-caddy.  If empty, OID extensions
+	// OID extension JSON files for Caddy's RA-TLS module. If empty, OID extensions
 	// are not written and Caddy integration is disabled.
 	ExtensionsDir string
 
@@ -262,8 +262,9 @@ type Launcher struct {
 	// Takes precedence over attestationTokens when set.
 	tokenSource TokenSource
 
-	// dekOrigin is the data-encryption key origin string ("byok:<fingerprint>"
-	// or "generated").  Empty when the data partition is not encrypted.
+	// dekOrigin is the data-encryption key origin string
+	// ("byok:<fingerprint>").  Empty when the data partition is not
+	// encrypted.
 	dekOrigin string
 
 	// volumeEncryption tracks per-container volume encryption status.
@@ -361,7 +362,7 @@ func (l *Launcher) Run(ctx context.Context) error {
 		if raw, err := os.ReadFile(l.cfg.DEKOriginFile); err == nil {
 			origin := strings.TrimSpace(string(raw))
 			switch {
-			case origin == "generated", strings.HasPrefix(origin, "byok:"):
+			case strings.HasPrefix(origin, "byok:"):
 				l.dekOrigin = origin
 				l.log.Info("LUKS DEK origin loaded (OID 2.6)",
 					zap.String("dek_origin", origin))
@@ -426,7 +427,7 @@ func (l *Launcher) CACertPath() string {
 }
 
 // ReloadCA writes the new CA certificate and key to the configured paths,
-// reloads the Caddy configuration so ra-tls-caddy picks up the new CA, and
+// reloads the Caddy configuration so the RA-TLS module picks up the new CA, and
 // recomputes all attestation data (the platform Merkle tree includes the CA
 // cert as a leaf, so changing it changes the attestation root).
 func (l *Launcher) ReloadCA(certPEM, keyPEM []byte) error {
@@ -657,7 +658,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	mc.ImageDigest = digest
 
 	// Start health checks.
-	l.mgr.StartHealthChecks(ctx, mc)
+	// Use a background context: the request ctx is cancelled when the
+	// HTTP handler returns, which would terminate the goroutine before
+	// the first interval tick and leave the container stuck in "running"
+	// state forever.
+	l.mgr.StartHealthChecks(context.Background(), mc)
 
 	// Record state.
 	l.specs[req.Name] = spec
@@ -888,20 +893,29 @@ func (l *Launcher) StatusReport() []ContainerStatus {
 	containers := mgr.List()
 	result := make([]ContainerStatus, 0, len(containers))
 	for _, mc := range containers {
-		result = append(result, ContainerStatus{
+		cs := ContainerStatus{
 			Name:   mc.Name,
 			Image:  mc.Spec.Image,
 			Status: string(mc.GetStatus()),
-		})
+		}
+		progress := mc.GetPullProgress()
+		if progress.TotalBytes > 0 {
+			cs.PullProgress = &container.PullProgress{
+				TotalBytes:      progress.TotalBytes,
+				DownloadedBytes: progress.DownloadedBytes,
+			}
+		}
+		result = append(result, cs)
 	}
 	return result
 }
 
 // ContainerStatus is a JSON-serializable container status summary.
 type ContainerStatus struct {
-	Name   string `json:"name"`
-	Image  string `json:"image"`
-	Status string `json:"status"`
+	Name         string                 `json:"name"`
+	Image        string                 `json:"image"`
+	Status       string                 `json:"status"`
+	PullProgress *container.PullProgress `json:"pull_progress,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -910,7 +924,7 @@ type ContainerStatus struct {
 
 // writePlatformExtensions writes the platform-wide OID extensions to the
 // extensions directory for the management API hostname.  These are read by
-// ra-tls-caddy when issuing the platform RA-TLS certificate.
+// Caddy's RA-TLS module when issuing the platform RA-TLS certificate.
 //
 // Must be called with l.mu held (or at startup before concurrency).
 func (l *Launcher) writePlatformExtensions() error {
@@ -922,7 +936,7 @@ func (l *Launcher) writePlatformExtensions() error {
 	var cdHash [32]byte
 	copy(cdHash[:], l.containerdHash)
 
-	// Build the extensions list (without the quote — ra-tls-caddy adds that).
+	// Build the extensions list (without the quote - the RA-TLS module adds that).
 	exts := []pkix.Extension{
 		oids.Extension(oids.PlatformConfigMerkleRoot, root[:]),
 		oids.Extension(oids.RuntimeVersionHash, cdHash[:]),
@@ -940,9 +954,9 @@ func (l *Launcher) writePlatformExtensions() error {
 }
 
 // writeContainerExtensions writes the per-container OID extensions to the
-// extensions directory.  These are read by ra-tls-caddy when issuing a
-// per-container RA-TLS certificate.  The upstream URL is included so
-// ra-tls-caddy can pull dynamic OIDs from the container at cert time
+// extensions directory. These are read by Caddy's RA-TLS module when
+// issuing a per-container RA-TLS certificate. The upstream URL is included
+// so it can pull dynamic OIDs from the container at cert time
 // (the Virtual equivalent of enclave-os-mini's custom_oids() trait).
 //
 // Must be called with l.mu held.
@@ -965,7 +979,7 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string, port
 	digest := l.imageDigests[containerName]
 	volEnc := l.volumeEncryption[containerName]
 
-	// Build the extensions list (without the quote - ra-tls-caddy adds that).
+	// Build the extensions list (without the quote - the RA-TLS module adds that).
 	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc)
 
 	upstream := fmt.Sprintf("http://127.0.0.1:%d", port)

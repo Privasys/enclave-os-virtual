@@ -1,9 +1,7 @@
 [Unit]
 Description=Data partition (/data)
-DefaultDependencies=no
-After=local-fs-pre.target luks-data.service
+After=luks-data.service
 Requires=luks-data.service
-Before=local-fs.target
 
 [Mount]
 What=/dev/mapper/data-crypt
@@ -12,4 +10,4 @@ Type=ext4
 Options=defaults,noatime
 
 [Install]
-WantedBy=local-fs.target
+WantedBy=multi-user.target

@@ -18,10 +18,16 @@ import (
 	"sync"
 	"time"
 
+	"crypto/tls"
+
 	"github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/remotes/docker"
+	containerdcdi "github.com/containerd/containerd/v2/pkg/cdi"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
+	godigest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"go.uber.org/zap"
@@ -59,6 +65,12 @@ const (
 	StatusFailed    Status = "failed"
 )
 
+// PullProgress tracks the progress of an image pull.
+type PullProgress struct {
+	TotalBytes      int64 `json:"total_bytes"`
+	DownloadedBytes int64 `json:"downloaded_bytes"`
+}
+
 // ManagedContainer tracks a running container and its metadata.
 type ManagedContainer struct {
 	Name        string
@@ -68,7 +80,8 @@ type ManagedContainer struct {
 	Container   client.Container
 	Task        client.Task
 
-	mu sync.RWMutex
+	pullProgress PullProgress
+	mu           sync.RWMutex
 }
 
 // SetStatus updates the container status safely.
@@ -83,6 +96,20 @@ func (mc *ManagedContainer) GetStatus() Status {
 	mc.mu.RLock()
 	defer mc.mu.RUnlock()
 	return mc.Status
+}
+
+// SetPullProgress updates pull progress safely.
+func (mc *ManagedContainer) SetPullProgress(downloaded, total int64) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	mc.pullProgress = PullProgress{TotalBytes: total, DownloadedBytes: downloaded}
+}
+
+// GetPullProgress returns pull progress safely.
+func (mc *ManagedContainer) GetPullProgress() PullProgress {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+	return mc.pullProgress
 }
 
 // Manager manages the lifecycle of OCI containers through containerd.
@@ -121,16 +148,169 @@ func (m *Manager) ctx(parent context.Context) context.Context {
 
 // Pull downloads an OCI image and verifies its digest matches the manifest.
 // Returns the resolved image descriptor and the raw digest bytes.
+// Registers a pulling container in the manager so pull progress is visible
+// via List()/StatusReport().
 func (m *Manager) Pull(ctx context.Context, spec manifest.Container) (client.Image, []byte, error) {
 	ctx = m.ctx(ctx)
 	m.log.Info("pulling image", zap.String("name", spec.Name), zap.String("image", spec.Image))
 
-	img, err := m.client.Pull(ctx, spec.Image,
-		client.WithPullUnpack,
+	// Register a "pulling" container so it shows up in status queries.
+	mc := &ManagedContainer{
+		Name:   spec.Name,
+		Spec:   spec,
+		Status: StatusPulling,
+	}
+	m.mu.Lock()
+	m.containers[spec.Name] = mc
+	m.mu.Unlock()
+
+	// disk:// scheme: image is already on a locally mounted persistent
+	// disk, no network pull needed. See internal/container/disk.go.
+	if IsDiskRef(spec.Image) {
+		dir, err := diskRefDir(spec.Image)
+		if err != nil {
+			mc.SetStatus(StatusFailed)
+			m.mu.Lock()
+			delete(m.containers, spec.Name)
+			m.mu.Unlock()
+			return nil, nil, err
+		}
+		img, dgst, err := m.importFromDisk(ctx, spec.Image, dir)
+		if err != nil {
+			mc.SetStatus(StatusFailed)
+			m.mu.Lock()
+			delete(m.containers, spec.Name)
+			m.mu.Unlock()
+			return nil, nil, err
+		}
+		// Import is effectively a no-progress operation; mark complete.
+		mc.SetPullProgress(1, 1)
+		return img, dgst, nil
+	}
+
+	// Track pull progress per-descriptor using the image handler wrapper.
+	var (
+		progressMu sync.Mutex
+		totalSize  int64
+		fetchedSize int64
+		seen       = make(map[godigest.Digest]bool) // true = fetched
 	)
+
+	// Use an HTTP/1.1-only resolver. ghcr.io's HTTP/2 endpoint intermittently
+	// returns PROTOCOL_ERROR / RST_STREAM mid-stream for large multi-layer
+	// image pulls (observed reliably with a 6.3GB image), which containerd
+	// cannot recover from. Forcing HTTP/1.1 sidesteps the issue entirely.
+	httpTransport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		MaxIdleConns:        10,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 30 * time.Second,
+		ForceAttemptHTTP2:   false,
+		TLSClientConfig:     &tls.Config{NextProtos: []string{"http/1.1"}},
+	}
+	httpClient := &http.Client{Transport: httpTransport}
+	resolver := docker.NewResolver(docker.ResolverOptions{Client: httpClient})
+
+	pullOnce := func() (client.Image, error) {
+		// Reset progress trackers per attempt so that retries don't
+		// double-count bytes from a previous failed attempt.
+		progressMu.Lock()
+		totalSize = 0
+		fetchedSize = 0
+		seen = make(map[godigest.Digest]bool)
+		progressMu.Unlock()
+
+		return m.client.Pull(ctx, spec.Image,
+			client.WithPullUnpack,
+			client.WithResolver(resolver),
+			client.WithImageHandlerWrapper(func(inner images.Handler) images.Handler {
+				return images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+					children, err := inner.Handle(ctx, desc)
+					if err != nil {
+						return children, err
+					}
+
+					progressMu.Lock()
+					if _, known := seen[desc.Digest]; !known {
+						totalSize += desc.Size
+					}
+					if !seen[desc.Digest] {
+						fetchedSize += desc.Size
+						seen[desc.Digest] = true
+					}
+					for _, c := range children {
+						if _, known := seen[c.Digest]; !known {
+							totalSize += c.Size
+							seen[c.Digest] = false
+						}
+					}
+					progressMu.Unlock()
+
+					mc.SetPullProgress(fetchedSize, totalSize)
+					return children, nil
+				})
+			}),
+		)
+	}
+
+	// Retry transient pull errors. ghcr.io occasionally returns
+	// HTTP/2 PROTOCOL_ERROR or RST_STREAM mid-stream for large images;
+	// containerd surfaces these as one-shot failures. Retry up to 4
+	// times with exponential backoff before giving up.
+	var (
+		img        client.Image
+		err        error
+		maxRetries = 4
+	)
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		img, err = pullOnce()
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			break // context cancelled, no point retrying
+		}
+		// Only retry on errors that look transient.
+		es := err.Error()
+		retryable := strings.Contains(es, "PROTOCOL_ERROR") ||
+			strings.Contains(es, "stream error") ||
+			strings.Contains(es, "RST_STREAM") ||
+			strings.Contains(es, "connection reset") ||
+			strings.Contains(es, "EOF") ||
+			strings.Contains(es, "unexpected EOF") ||
+			strings.Contains(es, "i/o timeout") ||
+			strings.Contains(es, "TLS handshake timeout")
+		if !retryable {
+			break
+		}
+		backoff := time.Duration(1<<attempt) * time.Second // 1s, 2s, 4s, 8s
+		m.log.Warn("transient pull error, retrying",
+			zap.String("name", spec.Name),
+			zap.Int("attempt", attempt+1),
+			zap.Duration("backoff", backoff),
+			zap.Error(err),
+		)
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+		case <-time.After(backoff):
+		}
+	}
 	if err != nil {
+		// Remove the pulling stub on failure.
+		mc.SetStatus(StatusFailed)
+		m.mu.Lock()
+		delete(m.containers, spec.Name)
+		m.mu.Unlock()
 		return nil, nil, fmt.Errorf("container: failed to pull %s: %w", spec.Image, err)
 	}
+
+	// Mark pull as complete.
+	mc.SetPullProgress(totalSize, totalSize)
 
 	// Verify digest if the image ref contains @sha256:
 	resolvedDigest := img.Target().Digest.String()
@@ -141,6 +321,9 @@ func (m *Manager) Pull(ctx context.Context, spec manifest.Container) (client.Ima
 
 	digestBytes, err := digestToBytes(resolvedDigest)
 	if err != nil {
+		m.mu.Lock()
+		delete(m.containers, spec.Name)
+		m.mu.Unlock()
 		return nil, nil, fmt.Errorf("container: failed to parse digest for %s: %w", spec.Name, err)
 	}
 
@@ -198,6 +381,42 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	// so that the nvidia-container-runtime injects driver libraries.
 	if len(spec.Devices) > 0 {
 		opts = append(opts, oci.WithEnv([]string{"NVIDIA_VISIBLE_DEVICES=all"}))
+		// Inject NVIDIA driver libraries via CDI. The CDI spec is
+		// generated at boot by `nvidia-ctk cdi generate` into
+		// /var/run/cdi/nvidia.yaml. CDI is the modern replacement for
+		// the legacy nvidia-container-runtime hook and works cleanly
+		// with raw containerd (no CRI required).
+		opts = append(opts, containerdcdi.WithCDIDevices("nvidia.com/gpu=all"))
+	}
+
+	// Image-declared volumes via the "ai.privasys.volume" label.
+	// This lets each container image declare its own disk mount
+	// (e.g. LABEL ai.privasys.volume="/mnt/model-gemma4-31b:/models:ro").
+	imgSpec, err := img.Spec(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("container: failed to read image spec for %s: %w", spec.Name, err)
+	}
+	if v, ok := imgSpec.Config.Labels["ai.privasys.volume"]; ok {
+		parts := strings.SplitN(v, ":", 3)
+		if len(parts) < 2 {
+			return nil, fmt.Errorf("container: invalid ai.privasys.volume label %q (expected host:container[:ro|rw])", v)
+		}
+		mountOpts := "ro"
+		if len(parts) == 3 {
+			mountOpts = parts[2]
+		}
+		opts = append(opts, oci.WithMounts([]specs.Mount{{
+			Destination: parts[1],
+			Source:      parts[0],
+			Type:        "bind",
+			Options:     []string{"rbind", mountOpts},
+		}}))
+		m.log.Info("image-declared volume mount",
+			zap.String("name", spec.Name),
+			zap.String("source", parts[0]),
+			zap.String("destination", parts[1]),
+			zap.String("options", mountOpts),
+		)
 	}
 
 	// Volume bind mounts (format: "host:container[:ro|rw]").
@@ -222,12 +441,23 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		opts = append(opts, oci.WithMounts(mounts))
 	}
 
+	// Clean up any stale container or snapshot from a prior failed
+	// attempt with the same name. Without this, a half-created
+	// container/snapshot leaks and prevents future loads.
+	if existing, err := m.client.LoadContainer(ctx, spec.Name); err == nil {
+		_ = existing.Delete(ctx, client.WithSnapshotCleanup)
+	}
+	if snSvc := m.client.SnapshotService(""); snSvc != nil {
+		_ = snSvc.Remove(ctx, spec.Name+"-snapshot")
+	}
+
 	// Create the container.
-	container, err := m.client.NewContainer(ctx, spec.Name,
+	containerOpts := []client.NewContainerOpts{
 		client.WithImage(img),
 		client.WithNewSnapshot(spec.Name+"-snapshot", img),
 		client.WithNewSpec(opts...),
-	)
+	}
+	container, err := m.client.NewContainer(ctx, spec.Name, containerOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("container: failed to create %s: %w", spec.Name, err)
 	}
@@ -254,7 +484,18 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	}
 
 	m.mu.Lock()
-	m.containers[spec.Name] = mc
+	// Reuse the existing entry (from Pull) if present, updating its fields.
+	if existing, ok := m.containers[spec.Name]; ok {
+		existing.mu.Lock()
+		existing.Spec = spec
+		existing.Status = StatusRunning
+		existing.Container = container
+		existing.Task = task
+		existing.mu.Unlock()
+		mc = existing
+	} else {
+		m.containers[spec.Name] = mc
+	}
 	m.mu.Unlock()
 
 	m.log.Info("container started", zap.String("name", spec.Name))

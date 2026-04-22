@@ -1,10 +1,9 @@
 # LUKS Data Recovery
 
 This guide explains how to recover data from the LUKS2-encrypted data partition
-of an Enclave OS (Virtual) instance. You will need the **passphrase** that was used
-when the instance was first booted (BYOK) or, if the instance used an
-auto-generated key, the passphrase from that single boot session (which is only
-available in memory while the instance is running).
+of an Enclave OS (Virtual) instance. You will need the **passphrase** that was
+set in the instance metadata (`luks-passphrase` attribute) when the instance
+was first booted.
 
 > **Prerequisite:** You must have the LUKS passphrase. Without it, the data
 > is cryptographically unrecoverable.
@@ -184,11 +183,11 @@ unlock it with the provided passphrase. No data loss occurs.
 
 | Practice | Rationale |
 |----------|-----------|
-| Use BYOK in production | Auto-generated keys exist only in memory for a single boot — data is lost on reboot/termination |
+| BYOK is mandatory | The data partition cannot be unlocked on reboot without the passphrase the operator stored in instance metadata |
 | Store the passphrase in a secrets manager | e.g. GCP Secret Manager, HashiCorp Vault, 1Password |
 | Rotate the passphrase periodically | Use `cryptsetup luksChangeKey` on the unlocked volume |
 | Test recovery before production | Run through this procedure on a staging instance first |
-| Keep disk snapshots | Snapshots preserve the encrypted bytes — you can always recover later with the correct passphrase |
+| Keep disk snapshots | Snapshots preserve the encrypted bytes - you can always recover later with the correct passphrase |
 
 ---
 

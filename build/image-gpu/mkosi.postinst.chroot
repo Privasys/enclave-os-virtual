@@ -4,10 +4,6 @@ set -eu
 # Configure NVIDIA container runtime for containerd.
 # nvidia-ctk modifies the containerd config to register the nvidia
 # runtime, allowing containers to access GPUs automatically.
-#
-# The base post-installation (vmlinuz symlink, signed GRUB, vfat cleanup)
-# is handled by cvm-images/images/tdx-gpu/mkosi.postinst.chroot, which
-# runs before this script via PostInstallationScripts ordering.
 if command -v nvidia-ctk >/dev/null 2>&1; then
     nvidia-ctk runtime configure --runtime=containerd \
         --config=/etc/containerd/config.toml

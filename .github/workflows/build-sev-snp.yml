@@ -1,0 +1,41 @@
+name: Build & Publish SEV-SNP Image
+
+# SEV-SNP variant of Enclave OS Virtual.
+# Requires build/image-sev-snp/ mkosi configs (Phase 4 - not yet implemented).
+# Uses cvm-images sev-snp-base configs as the base layer.
+
+on:
+  push:
+    tags: ['sev-snp-v*']
+  workflow_dispatch:
+    inputs:
+      publish_gcp:
+        description: 'Publish image to GCP (requires WIF credentials)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+  GCS_BUCKET: ${{ vars.GCS_BUCKET || 'privasys-tdx-images' }}
+  IMAGE_FAMILY: ${{ vars.IMAGE_FAMILY_SEV_SNP || 'privasys-sev-snp' }}
+  GOPROXY: https://proxy.golang.org,direct
+  GONOSUMCHECK: '*'
+  GONOSUMDB: '*'
+
+jobs:
+  build:
+    name: Build Enclave OS (Virtual) SEV-SNP image
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Placeholder
+        run: |
+          echo "::error::SEV-SNP image build is not yet implemented (Phase 4)."
+          echo "Requires:"
+          echo "  - build/image-sev-snp/ mkosi config directory"
+          echo "  - cvm-images sev-snp-base configs (sev-snp-base-v* release)"
+          echo "  - AMD SEV-SNP attestation support in manager"
+          exit 1

@@ -7,15 +7,14 @@
 //	Client (RA-TLS) → Caddy (:443) → Container (localhost:PORT)
 //	Operator (RA-TLS) → Caddy (:443) → Manager API (localhost:PORT)
 //
-// Caddy is the sole TLS terminator.  The ra-tls-caddy module generates
-// certificates with hardware attestation evidence (TDX/SGX quotes) and
-// per-hostname OID extensions loaded from the extensions directory.
+// Caddy is the sole TLS terminator. Its RA-TLS module (caddy/ratls/)
+// generates certificates with hardware attestation evidence (TDX/SGX
+// quotes) and per-hostname OID extensions loaded from the extensions
+// directory.
 //
 // This client manages Caddy's JSON config via the admin API:
 //   - POST /load with the full config after every route change
 //   - Routes are maintained in memory and serialised on each update
-//
-// See also: github.com/Privasys/ra-tls-caddy
 package caddy
 
 import (
@@ -146,7 +145,7 @@ func (c *Client) RouteCount() int {
 }
 
 // Reload forces a full Caddy config reload. This is used after updating
-// the CA certificate/key so ra-tls-caddy picks up the new files.
+// the CA certificate/key so the RA-TLS module picks up the new files.
 func (c *Client) Reload() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

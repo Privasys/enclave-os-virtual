@@ -8,7 +8,7 @@ flags needed to deploy an Enclave OS (Virtual) instance.
 ### Intermediary CA (RA-TLS)
 
 The intermediary CA certificate and private key are baked into the image
-and used by Caddy (via ra-tls-caddy) to issue per-hostname RA-TLS leaf
+and used by Caddy (via its RA-TLS module) to issue per-hostname RA-TLS leaf
 certificates.
 
 | File | Purpose | Location |
@@ -19,7 +19,7 @@ certificates.
 - **Algorithm**: ECDSA P-256
 - **Trust model**: The CA key never leaves the VM — it exists only in
   TEE-encrypted memory and on the LUKS-encrypted data partition.
-- **Leaf certificates**: Generated dynamically by ra-tls-caddy for each
+- **Leaf certificates**: Generated dynamically by the RA-TLS module for each
   TLS connection (challenge-response mode) or cached up to 24h
   (deterministic mode). Each leaf embeds the TDX/SEV-SNP quote and
   Privasys OID extensions.
@@ -169,10 +169,10 @@ and `--hostname` are required.
 /run/containers/<name>/         ← per-container encrypted volume (LVM + LUKS2+AEAD)
 
 /run/manager/extensions/        ← RuntimeDirectory, created by launcher
-    <hostname>.json             ← per-hostname OID extensions for ra-tls-caddy
+    <hostname>.json             ← per-hostname OID extensions for the RA-TLS module
 
 /usr/bin/manager                ← static binary
-/usr/bin/caddy                  ← Caddy with ra-tls-caddy module
+/usr/bin/caddy                  ← Caddy with RA-TLS module
 /usr/bin/luks-setup             ← LUKS data partition setup script
 ```
 
@@ -192,16 +192,22 @@ The disk has two encrypted regions:
 | Mode | Source | Mechanism |
 |------|--------|-----------|
 | **BYOK** | Operator passphrase | Passed via instance metadata (e.g. `luks-passphrase` attribute) |
-| **Auto-generated** | Random 256-bit | Generated at first boot if no external key is provided |
+
+BYOK is the only supported mode today. The script fails hard if no
+passphrase is found in instance metadata. Auto-generated random keys
+are not supported because they would brick the partition on the next
+reboot. A Vaults-backed flow (generate inside the TEE, seal to
+attestation evidence, fetch on restart) will be added once Enclave
+Vaults ships.
 
 **Boot sequence:**
 
 1. `luks-data.service` runs (Before `data.mount`)
-2. Reads passphrase from instance metadata or generates one
+2. Reads passphrase from instance metadata (fails hard if absent)
 3. First boot: `cryptsetup luksFormat --integrity aead` + `mkfs.ext4`; subsequent boots: `cryptsetup luksOpen`
-4. Writes key origin (`"byok:<fingerprint>"` or `"generated"`) to `/run/luks/dek-origin`
+4. Writes key origin (`"byok:<fingerprint>"`) to `/run/luks/dek-origin`
 5. `data.mount` mounts `/dev/mapper/data-crypt`
-6. `manager.service` reads `/run/luks/dek-origin` → publishes as OID `1.3.6.1.4.1.65230.2.6`
+6. `manager.service` reads `/run/luks/dek-origin` -> publishes as OID `1.3.6.1.4.1.65230.2.6`
 
 ### Per-container encrypted volumes
 

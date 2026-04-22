@@ -1,0 +1,75 @@
+#!/bin/bash
+# disk-mounter
+#
+# Generic GCE disk mounter for the cloud-optimised image+model cache
+# pattern. Discovers any persistent disk attached to the VM whose GCE device
+# name starts with `image-` or `model-` and mounts it read-only at:
+#
+#   image-<name>-<channel>-<digest12>  ->  /var/lib/images/<name>-<channel>/
+#   model-<name>                       ->  /mnt/<name>/
+#
+# Read-only is non-negotiable: these disks may be shared between
+# VMs and contain attested payloads. Writes would invalidate
+# attestation and corrupt other readers.
+#
+# Skips disks that have no filesystem (must be pre-formatted by the
+# publisher workflow). Logs to journal.
+
+set -uo pipefail
+
+mount_one() {
+  local dev="$1" name target
+  name=$(basename "$dev")
+  name=${name#google-}
+  case "$name" in
+    image-*)
+      target=/var/lib/images/${name#image-}
+      ;;
+    model-*)
+      target=/mnt/${name#model-}
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  if mountpoint -q "$target" 2>/dev/null; then
+    echo "  $name already mounted at $target"
+    return 0
+  fi
+
+  if ! blkid "$dev" >/dev/null 2>&1; then
+    echo "  WARNING: $dev has no filesystem, skipping"
+    return 0
+  fi
+
+  mkdir -p "$target"
+  if mount -o ro "$dev" "$target" 2>&1; then
+    local size
+    size=$(df -h "$target" | awk 'NR==2{print $3"/"$2}')
+    echo "  mounted $dev -> $target ($size)"
+  else
+    echo "  ERROR: failed to mount $dev at $target"
+    rmdir "$target" 2>/dev/null || true
+    return 1
+  fi
+}
+
+echo "=== disk-mounter started at $(date) ==="
+
+# Ensure parent directories exist (image disks live under /var/lib).
+mkdir -p /var/lib/images
+# /mnt may be a tmpfs from the rootfs config, leave it alone.
+
+# Iterate over partition-free, image- and model-prefixed devices.
+shopt -s nullglob
+for dev in /dev/disk/by-id/google-image-* /dev/disk/by-id/google-model-*; do
+  case "$dev" in *-part*) continue ;; esac
+  mount_one "$dev"
+done
+shopt -u nullglob
+
+echo "Image disks: $(ls /var/lib/images 2>/dev/null | tr '\n' ' ')"
+echo "Model disks: $(ls /mnt 2>/dev/null | tr '\n' ' ')"
+echo "=== disk-mounter finished at $(date) ==="
+exit 0

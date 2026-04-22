@@ -75,7 +75,7 @@ type Container struct {
 	// If empty, the container is internal-only (no external TLS).
 	Hostname string `yaml:"hostname,omitempty"`
 
-	// Port is the container's listening port that ra-tls-caddy will
+	// Port is the container's listening port that Caddy will
 	// reverse-proxy to.
 	Port int `yaml:"port"`
 

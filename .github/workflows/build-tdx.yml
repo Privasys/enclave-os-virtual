@@ -1,15 +1,11 @@
-name: Build & Publish GPU Image
+name: Build & Publish TDX Image
 
 on:
   push:
     branches: [main]
-    tags: ['gpu-v*']
+    tags: ['tdx-v*']
   pull_request:
     branches: [main]
-    paths:
-      - 'build/image-gpu/**'
-      - 'build/image/mkosi.extra/**'
-      - 'cmd/**'
   workflow_dispatch:
     inputs:
       publish_gcp:
@@ -24,28 +20,25 @@ permissions:
 env:
   GCP_PROJECT: ${{ vars.GCP_PROJECT }}
   GCS_BUCKET: ${{ vars.GCS_BUCKET || 'privasys-tdx-images' }}
-  IMAGE_FAMILY: ${{ vars.IMAGE_FAMILY_GPU || 'privasys-tdx-gpu' }}
+  IMAGE_FAMILY: ${{ vars.IMAGE_FAMILY || 'privasys-tdx' }}
   GOPROXY: https://proxy.golang.org,direct
   GONOSUMCHECK: '*'
   GONOSUMDB: '*'
 
 jobs:
   build:
-    name: Build Enclave OS (Virtual) GPU image
+    name: Build Enclave OS (Virtual) image
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Free disk space
-        run: |
-          # CUDA toolkit + NVIDIA driver require ~15 GB of disk space.
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
-          sudo apt-get clean
-          df -h /
-
       - name: Install Privasys Go fork
         run: |
+          # The RA-TLS challenge-response feature requires the Privasys Go fork
+          # which adds tls.ClientHelloInfo.RATLSChallenge.
+          # The manager binary compiles with upstream Go (fork needed at runtime),
+          # but Caddy's RA-TLS module requires the fork at COMPILE time.
           curl -sL https://github.com/Privasys/go/releases/download/privasys-v0.2.0-go1.25.8/go-ratls-privasys-v0.2.0-go1.25.8-linux-amd64.tar.gz -o /tmp/go-ratls.tar.gz
           sudo tar -C /usr/local -xzf /tmp/go-ratls.tar.gz
           echo "/usr/local/go-ratls/bin" >> "$GITHUB_PATH"
@@ -58,13 +51,12 @@ jobs:
             -o build/image/mkosi.extra/usr/bin/manager \
             ./cmd/manager/
 
-      - name: Build Caddy with ra-tls-caddy
+      - name: Build Caddy with RA-TLS module
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
           export PATH="$(go env GOPATH)/bin:$PATH"
-          git clone --depth 1 --branch v0.3.0 https://github.com/Privasys/ra-tls-caddy.git /tmp/ra-tls-caddy
           xcaddy build \
-            --with github.com/Privasys/ra-tls-caddy=/tmp/ra-tls-caddy/src \
+            --with github.com/Privasys/enclave-os-virtual/caddy/ratls=./caddy/ratls \
             --output build/image/mkosi.extra/usr/bin/caddy
           chmod +x build/image/mkosi.extra/usr/bin/caddy
           ls -lh build/image/mkosi.extra/usr/bin/caddy
@@ -74,10 +66,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Download pre-built kernel .debs from the cvm-images repo.
-          # The BadAML patch does NOT change the kernel ABI, so Ubuntu-signed
-          # NVIDIA modules (linux-modules-nvidia-590-*) load correctly.
+          # These are built by the "Build Patched Kernel" workflow and
+          # published as GitHub Release artifacts on kernel-v* tags.
           mkdir -p build/kernel/debs
 
+          # Find the latest kernel release (kernel-v* tag).
           KERNEL_TAG=$(gh release list --repo Privasys/cvm-images \
             --json tagName -q '.[].tagName' | grep '^kernel-v' | head -1)
           if [ -z "$KERNEL_TAG" ]; then
@@ -90,11 +83,20 @@ jobs:
           echo "Downloaded kernel .debs:"
           ls -lh build/kernel/debs/*.deb
 
-      - name: Clone cvm-images (GPU overlay configs)
+      - name: Clone cvm-images (base overlay configs)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          CVM_IMAGES_TAG="tdx-gpu-v0.2.0"
+          # Resolve the latest cvm-images release tag for our TEE variant.
+          # The base image mkosi.conf references images/tdx-base/ (boot.conf)
+          # and common/ from the cvm-images repo.
+          CVM_TAG_PREFIX="tdx-base-v"
+          CVM_IMAGES_TAG=$(gh release list --repo Privasys/cvm-images \
+            --json tagName -q '.[].tagName' | grep "^${CVM_TAG_PREFIX}" | head -1)
+          if [ -z "$CVM_IMAGES_TAG" ]; then
+            echo "::error::No cvm-images release found matching ${CVM_TAG_PREFIX}*"
+            exit 1
+          fi
           gh repo clone Privasys/cvm-images build/cvm-images -- --depth 1 --branch "$CVM_IMAGES_TAG"
           echo "Cloned cvm-images at $CVM_IMAGES_TAG"
 
@@ -127,10 +129,10 @@ jobs:
           # 1. enclave-os-virtual own overlay symlinks
           pushd build/image/mkosi.extra/etc/systemd/system
           for f in \
-            local-fs.target.wants/data.mount \
-            local-fs.target.wants/luks-data.service \
             local-fs.target.wants/var-log.mount \
             local-fs.target.wants/var-tmp.mount \
+            multi-user.target.wants/data.mount \
+            multi-user.target.wants/luks-data.service \
             multi-user.target.wants/systemd-networkd.service \
             multi-user.target.wants/containerd.service \
             multi-user.target.wants/manager.service \
@@ -156,22 +158,15 @@ jobs:
           popd
           fix_symlink "build/cvm-images/common/mkosi.extra/etc/resolv.conf"
 
-          # 3. cvm-images GPU-specific overlay symlinks
-          pushd build/cvm-images/images/tdx-gpu/mkosi.extra/etc/systemd/system/multi-user.target.wants
-          for f in nvidia-persistenced.service; do
-            fix_symlink "$f"
-          done
-          popd
-
       - name: Build image
         run: |
           chmod +x build/image/mkosi.extra/usr/bin/luks-setup
-          cd build/image-gpu
+          cd build/image
           sudo mkosi --profile gcp build
 
       - name: Replace unsigned GRUB with Canonical-signed binary
         run: |
-          RAW=$(ls build/image-gpu/enclave-os-virtual-gpu_*.raw)
+          RAW=$(ls build/image/enclave-os-virtual_*.raw)
           LOOPDEV=$(sudo losetup --find --show --partscan "$RAW")
           sudo mkdir -p /mnt/esp
           sudo mount "${LOOPDEV}p1" /mnt/esp
@@ -185,11 +180,12 @@ jobs:
       - name: Extract dm-verity root hash
         id: verity
         run: |
-          RAW=$(ls build/image-gpu/enclave-os-virtual-gpu_*.raw)
+          RAW=$(ls build/image/enclave-os-virtual_*.raw)
           LOOPDEV=$(sudo losetup --find --show --partscan "$RAW")
           sudo partprobe "$LOOPDEV" 2>/dev/null || true
           sleep 1
 
+          # Find the verity hash partition via blkid TYPE=DM_verity_hash
           VERITY_PART=""
           DATA_PART=""
           for part in "${LOOPDEV}p"*; do
@@ -206,6 +202,7 @@ jobs:
             echo "Data partition:   $DATA_PART"
             echo "Verity partition: $VERITY_PART"
 
+            # Read existing verity parameters from the superblock
             DUMP=$(sudo veritysetup dump "$VERITY_PART" 2>/dev/null || true)
             echo "$DUMP"
             SALT=$(echo "$DUMP" | grep 'Salt:' | awk '{print $NF}')
@@ -213,6 +210,8 @@ jobs:
             HASH_BS=$(echo "$DUMP" | grep 'Hash block size:' | awk '{print $NF}')
 
             if [ -n "$SALT" ] && [ -n "$DATA_BS" ] && [ -n "$HASH_BS" ]; then
+              # Recompute the root hash: veritysetup format with the same salt
+              # produces the identical Merkle tree and root hash.
               truncate -s 40M /tmp/verity-recompute.img
               ROOT_HASH=$(sudo veritysetup format "$DATA_PART" /tmp/verity-recompute.img \
                 --data-block-size="$DATA_BS" --hash-block-size="$HASH_BS" \
@@ -220,7 +219,7 @@ jobs:
                 | grep 'Root hash:' | awk '{print $NF}')
               rm -f /tmp/verity-recompute.img
               if [ -n "$ROOT_HASH" ]; then
-                echo "Computed dm-verity root hash: $ROOT_HASH"
+                echo "✓ Computed dm-verity root hash: $ROOT_HASH"
               fi
             else
               echo "::warning::Could not parse verity superblock parameters"
@@ -258,20 +257,21 @@ jobs:
           echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
 
       - name: Package for GCP
-        if: startsWith(github.ref, 'refs/tags/gpu-v') || github.event.inputs.publish_gcp == 'true'
+        if: startsWith(github.ref, 'refs/tags/tdx-v') || github.event.inputs.publish_gcp == 'true'
         run: |
-          cp build/image-gpu/enclave-os-virtual-gpu_*.raw disk.raw
-          tar -czf "enclave-os-virtual-gpu-${{ steps.version.outputs.raw }}.tar.gz" disk.raw
+          cp build/image/enclave-os-virtual_*.raw disk.raw
+          tar -czf "enclave-os-virtual-${{ steps.version.outputs.raw }}.tar.gz" disk.raw
           rm disk.raw
-          ls -lh enclave-os-virtual-gpu-*.tar.gz
+          ls -lh enclave-os-virtual-*.tar.gz
+
+      # ── GitHub Release (tag push only — runs before GCP upload so a WIF
+      #    misconfiguration doesn't block the release) ──
 
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/gpu-v')
-        continue-on-error: true
+        if: startsWith(github.ref, 'refs/tags/tdx-v')
         uses: softprops/action-gh-release@v2
         with:
-          # Image tar.gz exceeds GitHub's 2 GB asset limit (NVIDIA/CUDA).
-          # The image is published via GCS instead.
+          files: enclave-os-virtual-*.tar.gz
           generate_release_notes: true
           body: |
             ## Measurements
@@ -286,17 +286,12 @@ jobs:
             RTMR[1] (CC MR 2) measures the EFI boot path (shim and GRUB binaries).
             Clients can verify these values via RA-TLS by inspecting the TDX quote in the server certificate.
 
-            ### GPU Configuration
-
-            This image includes NVIDIA driver 590 with Confidential Computing mode for Intel TDX + H100.
-            Kernel cmdline includes `nvidia.NVreg_ConfidentialComputing=1` for encrypted GPU memory.
-
             ---
 
       # ── GCP image publish (tag push or manual trigger) ──
 
       - name: Authenticate to GCP
-        if: startsWith(github.ref, 'refs/tags/gpu-v') || github.event.inputs.publish_gcp == 'true'
+        if: startsWith(github.ref, 'refs/tags/tdx-v') || github.event.inputs.publish_gcp == 'true'
         id: gcp_auth
         uses: google-github-actions/auth@v3
         continue-on-error: true
@@ -313,7 +308,7 @@ jobs:
         if: steps.gcp_auth.outcome == 'success'
         run: |
           gcloud storage cp \
-            "enclave-os-virtual-gpu-${{ steps.version.outputs.raw }}.tar.gz" \
+            "enclave-os-virtual-${{ steps.version.outputs.raw }}.tar.gz" \
             "gs://${{ env.GCS_BUCKET }}/"
 
       - name: Create GCP Compute image
@@ -322,45 +317,45 @@ jobs:
           gcloud compute images create \
             "enclave-os-virtual-${{ steps.version.outputs.slug }}" \
             --project="${{ env.GCP_PROJECT }}" \
-            --source-uri="gs://${{ env.GCS_BUCKET }}/enclave-os-virtual-gpu-${{ steps.version.outputs.raw }}.tar.gz" \
+            --source-uri="gs://${{ env.GCS_BUCKET }}/enclave-os-virtual-${{ steps.version.outputs.raw }}.tar.gz" \
             --guest-os-features=TDX_CAPABLE,UEFI_COMPATIBLE,GVNIC,VIRTIO_SCSI_MULTIQUEUE \
             --family="${{ env.IMAGE_FAMILY }}"
-          echo "GCP image created: enclave-os-virtual-${{ steps.version.outputs.slug }}"
+          echo "✓ GCP image created: enclave-os-virtual-${{ steps.version.outputs.slug }}"
 
       - name: Warn if GCP upload was skipped
-        if: steps.gcp_auth.outcome != 'success' && (startsWith(github.ref, 'refs/tags/gpu-v') || github.event.inputs.publish_gcp == 'true')
+        if: steps.gcp_auth.outcome != 'success' && (startsWith(github.ref, 'refs/tags/tdx-v') || github.event.inputs.publish_gcp == 'true')
         run: |
           echo "::warning::GCP image upload was skipped because Workload Identity Federation authentication failed. Configure the GCP_WIF_PROVIDER and GCP_SERVICE_ACCOUNT secrets, or set up the WIF pool in project ${{ env.GCP_PROJECT }}."
 
       # ── Summary ──
 
       - name: Build summary
-        if: startsWith(github.ref, 'refs/tags/gpu-v') || github.event.inputs.publish_gcp == 'true'
+        if: startsWith(github.ref, 'refs/tags/tdx-v') || github.event.inputs.publish_gcp == 'true'
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<EOF
-          ## Enclave OS (Virtual) GPU - Build Summary
+          ## Enclave OS (Virtual) — Build Summary
 
           | Field | Value |
           |-------|-------|
           | **Version** | \`${{ steps.version.outputs.raw }}\` |
           | **GCP Image** | \`enclave-os-virtual-${{ steps.version.outputs.slug }}\` |
-          | **GCS URI** | \`gs://${{ env.GCS_BUCKET }}/enclave-os-virtual-gpu-${{ steps.version.outputs.raw }}.tar.gz\` |
+          | **GCS URI** | \`gs://${{ env.GCS_BUCKET }}/enclave-os-virtual-${{ steps.version.outputs.raw }}.tar.gz\` |
           | **Image Family** | \`${{ env.IMAGE_FAMILY }}\` |
           | **dm-verity Root Hash** | \`${{ steps.verity.outputs.root_hash }}\` |
 
-          ### Deploy (TDX + H100)
+          ### Deploy
 
           \`\`\`bash
-          gcloud compute instances create enclave-os-gpu \\
-              --zone=europe-west4-c \\
-              --machine-type=a3-highgpu-1g \\
+          gcloud compute instances create enclave-os-production \\
+              --zone=europe-west9-a \\
+              --machine-type=c3-standard-4 \\
               --network-interface=nic-type=GVNIC \\
               --maintenance-policy=TERMINATE \\
-              --provisioning-model=SPOT \\
-              --create-disk=auto-delete=yes,boot=yes,image=projects/${{ env.GCP_PROJECT }}/global/images/enclave-os-virtual-${{ steps.version.outputs.slug }},size=40,type=pd-balanced \\
+              --create-disk=auto-delete=yes,boot=yes,image=projects/${{ env.GCP_PROJECT }}/global/images/enclave-os-virtual-${{ steps.version.outputs.slug }},size=12,type=pd-balanced \\
               --shielded-secure-boot \\
               --shielded-vtpm \\
               --shielded-integrity-monitoring \\
-              --confidential-compute-type=TDX
+              --confidential-compute-type=TDX \\
+              --metadata=luks-passphrase=YOUR_SECRET_PASSPHRASE
           \`\`\`
           EOF

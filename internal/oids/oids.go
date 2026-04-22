@@ -9,7 +9,7 @@
 //	  2.1 Egress CA bundle hash (Mini only)
 //	  2.4 Runtime version hash (containerd in Virtual, Wasmtime in Mini)
 //	  2.5 Combined workloads hash (container images in Virtual, WASM apps in Mini)
-//	  2.6 Data Encryption Key Origin ("byok:<fingerprint>" or "generated")
+//	  2.6 Data Encryption Key Origin ("byok:<fingerprint>")
 //	  2.7 Attestation Servers Hash
 //	3.*   Per-container OIDs (via SNI routing)
 //	  3.1 Container Config Merkle Root
@@ -69,12 +69,12 @@ var CombinedWorkloadsHash = append(append(asn1.ObjectIdentifier{}, privasysArc..
 // DataEncryptionKeyOrigin describes how the LUKS data-encryption key was
 // provisioned.  The value is a UTF-8 string:
 //
-//   - "byok:<fingerprint>" — operator-supplied via BYOK (GCP instance metadata);
+//   - "byok:<fingerprint>" — operator-supplied via instance metadata;
 //     <fingerprint> is the hex SHA-256 of the passphrase bytes
-//   - "generated"         — randomly generated inside the enclave at first boot
 //
-// Its presence in the certificate proves data-at-rest is encrypted; the value
-// tells the verifier whether the key is externally managed or ephemeral.
+// BYOK is currently the only supported source. Its presence in the
+// certificate proves data-at-rest is encrypted with an externally
+// managed key.
 var DataEncryptionKeyOrigin = append(append(asn1.ObjectIdentifier{}, privasysArc...), 2, 6)
 
 // AttestationServersHash is the SHA-256 of the canonical attestation
@@ -159,8 +159,9 @@ func PlatformExtensions(quote []byte, quoteOID asn1.ObjectIdentifier, merkleRoot
 //
 // Note: application-specific OIDs (e.g. OID 3.5 model digest) are not included
 // here. Those are served by the container itself via the
-// /.well-known/attestation-extensions endpoint and pulled by ra-tls-caddy at
-// certificate issuance time, the same way enclave-os-mini's custom_oids() works.
+// /.well-known/attestation-extensions endpoint and pulled by Caddy's RA-TLS
+// module at certificate issuance time, the same way enclave-os-mini's
+// custom_oids() works.
 func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef string, volumeEncryption string) []pkix.Extension {
 	// Strip @sha256:... from the image ref; the digest is captured in OID 3.2.
 	if i := strings.Index(imageRef, "@"); i >= 0 {

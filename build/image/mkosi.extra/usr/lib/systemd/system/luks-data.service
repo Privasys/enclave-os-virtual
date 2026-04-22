@@ -1,9 +1,13 @@
 [Unit]
 Description=LUKS setup for data partition
-DefaultDependencies=no
-After=local-fs-pre.target
+# Network is required because the passphrase is fetched from the cloud
+# instance metadata service. Running this in early boot (before networkd
+# is up) leaves curl with ENETUNREACH and the unit fails on every reboot
+# of an already-formatted partition. /data is therefore promoted from a
+# local-fs early mount to a multi-user late mount.
+Wants=network-online.target
+After=network-online.target
 Before=data.mount
-RequiredBy=data.mount
 
 [Service]
 Type=oneshot
@@ -12,4 +16,4 @@ ExecStart=/usr/bin/luks-setup
 ExecStop=/usr/sbin/cryptsetup luksClose data-crypt
 
 [Install]
-WantedBy=local-fs.target
+WantedBy=multi-user.target

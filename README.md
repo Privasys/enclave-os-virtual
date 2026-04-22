@@ -2,7 +2,7 @@
 
 **Container workloads inside Confidential VMs, attested end-to-end.**
 
-Enclave OS (Virtual) runs OCI containers inside [Intel TDX](https://www.intel.com/content/www/us/en/developer/tools/trust-domain-extensions/overview.html) (or AMD SEV-SNP) Confidential VMs. Every container image digest, environment variable, volume mount, and platform configuration is measured into a deterministic Merkle tree and embedded in X.509 certificate extensions via [RA-TLS](https://github.com/Privasys/ra-tls-caddy). Clients can verify the full workload stack in a single TLS handshake — no out-of-band attestation protocol required.
+Enclave OS (Virtual) runs OCI containers inside [Intel TDX](https://www.intel.com/content/www/us/en/developer/tools/trust-domain-extensions/overview.html) (or AMD SEV-SNP) Confidential VMs. Every container image digest, environment variable, volume mount, and platform configuration is measured into a deterministic Merkle tree and embedded in X.509 certificate extensions via RA-TLS. Clients can verify the full workload stack in a single TLS handshake - no out-of-band attestation protocol required.
 
 Part of the [Privasys](https://privasys.org) Confidential Computing platform, alongside [Enclave OS (Mini)](https://github.com/Privasys/enclave-os-mini) (SGX/WASM).
 
@@ -54,6 +54,59 @@ Part of the [Privasys](https://privasys.org) Confidential Computing platform, al
 6. **TLS Handshake** — Clients connecting via TLS receive a certificate chain that proves: which TEE is running, what OS image booted, which containers are deployed (by digest), and how they're configured.
 
 7. **Health & Metrics** — The management API exposes `/healthz`, `/readyz`, `/api/v1/status`, and Prometheus `/metrics` over RA-TLS at `manager.<machine-name>.<hostname>`.
+
+## Image-Declared Volumes
+
+Container images can declare persistent disk mounts via the `ai.privasys.volume`
+OCI label. The manager reads the label at container start and bind-mounts the
+host path into the container. This lets each image be self-describing - no
+hardcoded volume configuration in the management service.
+
+```dockerfile
+LABEL ai.privasys.volume="/mnt/model-gemma4-31b:/models:ro"
+```
+
+Format: `<host-path>:<container-path>[:<options>]`
+
+## OS Images
+
+The VM disk images are built by [cvm-images](https://github.com/Privasys/cvm-images)
+and published as GitHub Releases. Two variants are available for Intel TDX:
+
+| Variant | GCP Image Family | CI Workflow | Tag Pattern | Description |
+|---------|-----------------|-------------|-------------|-------------|
+| **Base** | `privasys-tdx` | `build-tdx-base.yml` | `tdx-base-v*` | CPU-only workloads |
+| **GPU** | `privasys-tdx-gpu` | `build-tdx-gpu.yml` | `tdx-gpu-v*` | NVIDIA GPU workloads (H100, etc.) |
+
+Both variants share the same partition layout, boot chain, and security
+properties:
+
+- **Root filesystem**: erofs (read-only) with dm-verity integrity
+- **Boot**: UEFI Secure Boot via shim-signed + grub-efi-amd64-signed
+- **Partitions**: ESP (512 MB), root + verity hash, data (2 GB LUKS2+AEAD), containers (LVM, remaining disk)
+- **Kernel**: Ubuntu HWE 6.19 with CVM guard patch (BadAML mitigation)
+
+The GPU variant adds:
+
+- `nvidia-driver-590-server-open`, `cuda-toolkit-13-0`, `nvidia-container-toolkit`
+- containerd configured with `nvidia-container-runtime` as default runtime
+- Kernel parameters: `iommu=pt intel_iommu=on nvidia.NVreg_ConfidentialComputing=1`
+
+### Building locally
+
+```bash
+# Base image (generic)
+cd images/tdx-base && sudo mkosi build
+
+# Base image (GCP profile)
+cd images/tdx-base && sudo mkosi --profile gcp build
+
+# GPU image (GCP profile)
+cd images/tdx-gpu && sudo mkosi --profile gcp build
+```
+
+See the [cvm-images README](https://github.com/Privasys/cvm-images) for full
+build instructions and cloud deployment guides.
 
 ## OID Extensions
 

@@ -4,7 +4,7 @@
 // loads containers via authenticated API calls.
 //
 // All API requests are authenticated via OIDC bearer tokens. Caddy
-// (with the ra-tls-caddy module) handles external TLS termination;
+// (with its RA-TLS module) handles external TLS termination;
 // the management API listens on plain HTTP on localhost.
 //
 // Usage:
