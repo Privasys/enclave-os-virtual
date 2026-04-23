@@ -1,0 +1,22 @@
+[Unit]
+Description=Tmpfs at /mnt for read-only model disk mountpoints
+# /mnt lives on the read-only erofs root, so disk-mounter cannot
+# mkdir /mnt/<model-name>. Provide a tiny tmpfs overlay whose only
+# job is to host one empty directory per attached model disk; the
+# actual disk content is mounted on top.
+#
+# Same cycle-avoidance pattern as var-lib-images.mount: no explicit
+# After=systemd-tmpfiles-setup.service (would loop via local-fs.target).
+DefaultDependencies=no
+Before=disk-mounter.service local-fs.target
+Conflicts=umount.target
+Before=umount.target
+
+[Mount]
+What=tmpfs
+Where=/mnt
+Type=tmpfs
+Options=mode=0755,nosuid,nodev,size=1m,nr_inodes=1024
+
+[Install]
+WantedBy=local-fs.target disk-mounter.service
