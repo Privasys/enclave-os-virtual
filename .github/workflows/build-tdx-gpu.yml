@@ -3,7 +3,7 @@ name: Build & Publish TDX GPU Image
 on:
   push:
     branches: [main]
-    tags: ['tdx-gpu-v*', 'tdx-gpu-nopatch-v*']
+    tags: ['tdx-gpu-v*']
   pull_request:
     branches: [main]
     paths:
