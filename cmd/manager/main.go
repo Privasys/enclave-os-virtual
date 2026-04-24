@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -31,6 +32,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/manager"
 	"github.com/Privasys/enclave-os-virtual/internal/oidcbootstrap"
+	"github.com/Privasys/enclave-os-virtual/internal/runtimestatus"
 )
 
 const version = "0.2.0"
@@ -144,6 +146,20 @@ func runServe(args []string) error {
 
 	logLevel := fs.String("log-level", "info",
 		"Log level (debug, info, warn, error)")
+
+	// Runtime-status push (optional). When all four are set, the manager
+	// runs a background goroutine that POSTs nvidia-smi + proxy state
+	// to <mgmt-url>/api/v1/enclave/runtime-status every push-interval.
+	rsMgmtURL := fs.String("mgmt-url", "",
+		"Management-service base URL for runtime-status push (e.g. https://api.developer.privasys.org)")
+	rsEnclaveToken := fs.String("enclave-token", os.Getenv("ENCLAVE_TOKEN"),
+		"Static bearer token for runtime-status push (env: ENCLAVE_TOKEN)")
+	rsEnclaveID := fs.String("enclave-id", os.Getenv("ENCLAVE_ID"),
+		"UUID identifying this enclave to the management-service (env: ENCLAVE_ID)")
+	rsProxyURL := fs.String("proxy-url", "http://localhost:8080",
+		"Local confidential-ai proxy URL for /v1/models/status feed; empty disables the proxy feed")
+	rsInterval := fs.Duration("push-interval", 30*time.Second,
+		"Interval between runtime-status pushes")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -279,6 +295,21 @@ func runServe(args []string) error {
 	g.Go(func() error {
 		return srv.Start(gctx)
 	})
+
+	// Optional runtime-status push sender.
+	if sender := runtimestatus.New(runtimestatus.Config{
+		MgmtBaseURL:  *rsMgmtURL,
+		EnclaveToken: *rsEnclaveToken,
+		EnclaveID:    *rsEnclaveID,
+		ProxyBaseURL: *rsProxyURL,
+		Interval:     *rsInterval,
+	}, log); sender != nil {
+		g.Go(func() error {
+			return sender.Run(gctx)
+		})
+	} else if *rsMgmtURL != "" || *rsEnclaveID != "" {
+		log.Warn("runtime-status push partially configured; need --mgmt-url and --enclave-id together")
+	}
 
 	if err := g.Wait(); err != nil {
 		log.Error("shutdown with error", zap.Error(err))

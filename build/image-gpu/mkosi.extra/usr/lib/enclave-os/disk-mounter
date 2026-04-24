@@ -5,71 +5,156 @@
 # pattern. Discovers any persistent disk attached to the VM whose GCE device
 # name starts with `image-` or `model-` and mounts it read-only at:
 #
-#   image-<name>-<channel>-<digest12>  ->  /var/lib/images/<name>-<channel>/
-#   model-<name>                       ->  /mnt/<name>/
+#   image-<name>-<channel>-<digest12>          ->  /var/lib/images/<name>-<channel>/
+#   model-<name>                               ->  /mnt/<name>/
 #
 # Read-only is non-negotiable: these disks may be shared between
 # VMs and contain attested payloads. Writes would invalidate
 # attestation and corrupt other readers.
+#
+# dm-verity for model disks.
+# When a model disk ships with a paired hash disk under
+#   /dev/disk/by-id/google-model-<name>-verity
+# disk-mounter parses the Privasys verity header from the first
+# 4096 bytes of the verity disk:
+#
+#   PRIVASYS-VERITY-V1\n
+#   ROOTHASH=<hex>\n
+#   HASH_ALG=sha256\n
+#   DATA_BLOCK_SIZE=4096\n
+#   HASH_BLOCK_SIZE=4096\n
+#   <NUL padding to 4096>
+#   <veritysetup hash tree from offset 4096>
+#
+# then opens the data disk via `veritysetup open --hash-offset=4096`.
+#
+# The trust anchor is NOT the on-disk header: it is the attestation
+# OID 3.5 (MODEL_DIGEST), which the manager folds in from
+# /var/lib/enclave-os/model-roothashes/<name>.roothash (written by
+# disk-mounter on success). A remote verifier rejects any quote whose
+# MODEL_DIGEST does not match the published model. Tampering with the
+# verity header on disk therefore breaks attestation, not silently the
+# data path.
 #
 # Skips disks that have no filesystem (must be pre-formatted by the
 # publisher workflow). Logs to journal.
 
 set -uo pipefail
 
-mount_one() {
-  local dev="$1" name target
-  name=$(basename "$dev")
-  name=${name#google-}
-  case "$name" in
-    image-*)
-      target=/var/lib/images/${name#image-}
-      ;;
-    model-*)
-      target=/mnt/${name#model-}
-      ;;
-    *)
-      return 0
-      ;;
-  esac
+ROOTHASH_REGISTRY=/var/lib/enclave-os/model-roothashes
+mkdir -p "$ROOTHASH_REGISTRY"
 
-  if mountpoint -q "$target" 2>/dev/null; then
-    echo "  $name already mounted at $target"
-    return 0
-  fi
+# read_verity_header <verity-dev>
+#
+# Reads the first 4096 bytes of the verity disk, validates the
+# Privasys magic line, extracts ROOTHASH=<hex>, and prints the hash
+# to stdout. Returns non-zero on missing/malformed header.
+read_verity_header() {
+    local dev="$1" header hash
+    header=$(dd if="$dev" bs=4096 count=1 status=none 2>/dev/null | tr -d '\0')
+    if [[ -z "$header" ]] || ! grep -q '^PRIVASYS-VERITY-V1$' <<<"$header"; then
+        return 1
+    fi
+    hash=$(grep -m1 '^ROOTHASH=' <<<"$header" | cut -d= -f2- | tr -d ' \t\r\n')
+    if [[ ! "$hash" =~ ^[0-9a-fA-F]{40,128}$ ]]; then
+        return 1
+    fi
+    printf '%s\n' "$hash"
+}
 
-  if ! blkid "$dev" >/dev/null 2>&1; then
-    echo "  WARNING: $dev has no filesystem, skipping"
-    return 0
-  fi
+# mount_model_verity <data-dev> <verity-dev> <name> <target>
+mount_model_verity() {
+    local data="$1" verity="$2" name="$3" target="$4" hash mapper
 
-  mkdir -p "$target"
-  if mount -o ro "$dev" "$target" 2>&1; then
-    local size
-    size=$(df -h "$target" | awk 'NR==2{print $3"/"$2}')
-    echo "  mounted $dev -> $target ($size)"
-  else
-    echo "  ERROR: failed to mount $dev at $target"
+    if ! hash=$(read_verity_header "$verity"); then
+        echo "  ERROR: $name verity disk has no Privasys header; refusing to mount unverified"
+        return 1
+    fi
+
+    mapper="${name}-verity"
+    if [[ ! -e "/dev/mapper/$mapper" ]]; then
+        if ! veritysetup open \
+                --hash-offset=4096 \
+                "$data" "$mapper" "$verity" "$hash" 2>&1; then
+            echo "  ERROR: veritysetup open failed for $name (data=$data verity=$verity)"
+            return 1
+        fi
+    fi
+
+    mkdir -p "$target"
+    if mount -o ro,nodev,nosuid,noexec "/dev/mapper/$mapper" "$target" 2>&1; then
+        local size
+        size=$(df -h "$target" | awk 'NR==2{print $3"/"$2}')
+        echo "  mounted $data via dm-verity -> $target ($size, roothash=${hash:0:16}...)"
+        printf '%s\n' "$hash" >"$ROOTHASH_REGISTRY/$name.roothash"
+        chmod 0644 "$ROOTHASH_REGISTRY/$name.roothash"
+        return 0
+    fi
+
+    echo "  ERROR: failed to mount /dev/mapper/$mapper at $target"
+    veritysetup close "$mapper" 2>/dev/null || true
     rmdir "$target" 2>/dev/null || true
     return 1
-  fi
+}
+
+mount_one() {
+    local dev="$1" name target verity_dev
+    name=$(basename "$dev")
+    name=${name#google-}
+    case "$name" in
+        image-*) target=/var/lib/images/${name#image-} ;;
+        model-*) target=/mnt/${name#model-} ;;
+        *)       return 0 ;;
+    esac
+
+    if mountpoint -q "$target" 2>/dev/null; then
+        echo "  $name already mounted at $target"
+        return 0
+    fi
+
+    # Model disks may ship with a paired verity hash disk.
+    if [[ "$name" == model-* ]]; then
+        verity_dev="/dev/disk/by-id/google-${name}-verity"
+        if [[ -e "$verity_dev" ]]; then
+            mount_model_verity "$dev" "$verity_dev" "${name#model-}" "$target"
+            return $?
+        fi
+        echo "  WARNING: $name has no paired verity disk; mounting unverified (legacy)"
+    fi
+
+    if ! blkid "$dev" >/dev/null 2>&1; then
+        echo "  WARNING: $dev has no filesystem, skipping"
+        return 0
+    fi
+
+    mkdir -p "$target"
+    if mount -o ro "$dev" "$target" 2>&1; then
+        local size
+        size=$(df -h "$target" | awk 'NR==2{print $3"/"$2}')
+        echo "  mounted $dev -> $target ($size)"
+    else
+        echo "  ERROR: failed to mount $dev at $target"
+        rmdir "$target" 2>/dev/null || true
+        return 1
+    fi
 }
 
 echo "=== disk-mounter started at $(date) ==="
 
-# Ensure parent directories exist (image disks live under /var/lib).
 mkdir -p /var/lib/images
-# /mnt may be a tmpfs from the rootfs config, leave it alone.
 
-# Iterate over partition-free, image- and model-prefixed devices.
 shopt -s nullglob
 for dev in /dev/disk/by-id/google-image-* /dev/disk/by-id/google-model-*; do
-  case "$dev" in *-part*) continue ;; esac
-  mount_one "$dev"
+    case "$dev" in
+        *-part*) continue ;;
+        *-verity) continue ;;
+    esac
+    mount_one "$dev"
 done
 shopt -u nullglob
 
 echo "Image disks: $(ls /var/lib/images 2>/dev/null | tr '\n' ' ')"
 echo "Model disks: $(ls /mnt 2>/dev/null | tr '\n' ' ')"
+echo "Model roothashes: $(ls $ROOTHASH_REGISTRY 2>/dev/null | tr '\n' ' ')"
 echo "=== disk-mounter finished at $(date) ==="
 exit 0
