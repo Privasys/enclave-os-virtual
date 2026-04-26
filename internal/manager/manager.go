@@ -50,6 +50,7 @@ import (
 
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
+	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
 )
 
 const (
@@ -109,11 +110,16 @@ type Config struct {
 
 // Server is the management API server.
 type Server struct {
-	cfg      Config
-	log      *zap.Logger
-	launcher *launcher.Launcher
-	verifier *auth.Verifier
-	server   *http.Server
+	cfg          Config
+	log          *zap.Logger
+	launcher     *launcher.Launcher
+	verifier     *auth.Verifier
+	server       *http.Server
+	// sessionRelay handles browser→enclave sealed-CBOR sessions: it owns
+	// POST /__privasys/session-bootstrap and transparently unwraps any
+	// request whose Content-Type is application/privasys-sealed+cbor
+	// before the inner mux sees it (and re-wraps the response).
+	sessionRelay *sessionrelay.Manager
 }
 
 // New creates a new management API Server.
@@ -122,10 +128,11 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		cfg.Addr = DefaultAddr
 	}
 	return &Server{
-		cfg:      cfg,
-		log:      log.Named("manager"),
-		launcher: l,
-		verifier: v,
+		cfg:          cfg,
+		log:          log.Named("manager"),
+		launcher:     l,
+		verifier:     v,
+		sessionRelay: sessionrelay.NewManager(),
 	}
 }
 
@@ -155,7 +162,7 @@ func (s *Server) Start(ctx context.Context) error {
 
 	s.server = &http.Server{
 		Addr:    s.cfg.Addr,
-		Handler: s.metricsMiddleware(mux),
+		Handler: s.metricsMiddleware(s.sessionRelay.Middleware(mux)),
 	}
 
 	// Start serving in a goroutine.
