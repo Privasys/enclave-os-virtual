@@ -43,13 +43,14 @@ import (
 )
 
 const (
-	sealedContentType = "application/privasys-sealed+cbor"
-	authScheme        = "PrivasysSession"
-	hkdfInfo          = "privasys-session/v1"
-	dirInfoC2S        = "privasys-dir/c2s"
-	dirInfoS2C        = "privasys-dir/s2c"
-	defaultTTL        = 60 * time.Minute
-	initPath          = "/__privasys/session-bootstrap"
+	sealedContentType       = "application/privasys-sealed+cbor"
+	sealedStreamContentType = "application/privasys-sealed-stream+cbor"
+	authScheme              = "PrivasysSession"
+	hkdfInfo                = "privasys-session/v1"
+	dirInfoC2S              = "privasys-dir/c2s"
+	dirInfoS2C              = "privasys-dir/s2c"
+	defaultTTL              = 60 * time.Minute
+	initPath                = "/__privasys/session-bootstrap"
 )
 
 // Manager owns active sessions. Safe for concurrent use.
@@ -226,35 +227,21 @@ func (m *Manager) handleSealed(w http.ResponseWriter, r *http.Request, next http
 	m.mu.Unlock()
 
 	// Replace request body with plaintext and call inner handler with a
-	// capturing ResponseWriter.
+	// streaming sealed writer. The writer decides at first Write/Flush
+	// whether to use single-envelope or stream framing.
 	r2 := r.Clone(r.Context())
 	r2.Body = io.NopCloser(bytes.NewReader(pt))
 	r2.ContentLength = int64(len(pt))
 	r2.Header.Del("Content-Type")
-	if guess := http.DetectContentType(pt); guess != "" && len(pt) > 0 {
-		// Don't override if the SDK already sent its own type prefix —
-		// for now we just default JSON for the inner handler.
+	if len(pt) > 0 {
+		// Default the inner content-type so JSON handlers don't have to
+		// guess. The plaintext is already what the handler expects.
 		r2.Header.Set("Content-Type", "application/json")
-		_ = guess
 	}
 
-	cap := newCapturingWriter()
-	next.ServeHTTP(cap, r2)
-
-	// Build sealed response.
-	m.mu.Lock()
-	ctr := sess.S2CCtr
-	sess.S2CCtr++
-	m.mu.Unlock()
-	respNonce := makeNonce(sess.S2CPrefix[:], ctr)
-	ct := sess.Aead.Seal(nil, respNonce, cap.body.Bytes(), ad)
-	enc := encodeSealed(sealedEnvelope{V: 1, Ctr: ctr, Ct: ct})
-
-	w.Header().Set("Content-Type", sealedContentType)
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Privasys-Inner-Status", fmt.Sprintf("%d", cap.status))
-	w.WriteHeader(http.StatusOK) // outer status is always 200; inner status is sealed
-	_, _ = w.Write(enc)
+	sw := newSealedRespWriter(w, sess, ad, m)
+	next.ServeHTTP(sw, r2)
+	sw.finalize()
 }
 
 func (m *Manager) lookup(r *http.Request) (*Session, bool) {
@@ -506,7 +493,136 @@ func readCborArgument(in []byte, off int) (uint64, int, error) {
 }
 
 // -----------------------------------------------------------------------------
-// capturing http.ResponseWriter
+// sealed response writer (single-envelope OR stream framing)
+// -----------------------------------------------------------------------------
+
+// sealedRespWriter wraps the outer http.ResponseWriter and seals the inner
+// handler's output. It defers the format decision until the first Write or
+// Flush:
+//
+//   - If the inner handler sets Content-Type: text/event-stream OR calls
+//     Flush() before completion, the response is emitted as a stream of
+//     length-prefixed sealed frames (Content-Type:
+//     application/privasys-sealed-stream+cbor). Each frame:
+//     [u32 BE length][CBOR sealed envelope {v,ctr,ct}]
+//     A trailing length=0 frame terminates the stream.
+//   - Otherwise the full body is buffered and emitted as a single sealed
+//     envelope (Content-Type: application/privasys-sealed+cbor) — backwards
+//     compatible with SDK 0.2.0/0.2.1.
+type sealedRespWriter struct {
+	outer   http.ResponseWriter
+	sess    *Session
+	ad      []byte
+	mgr     *Manager
+	header  http.Header
+	status  int
+	buf     bytes.Buffer
+	decided bool
+	stream  bool
+}
+
+func newSealedRespWriter(outer http.ResponseWriter, sess *Session, ad []byte, mgr *Manager) *sealedRespWriter {
+	return &sealedRespWriter{outer: outer, sess: sess, ad: ad, mgr: mgr, header: make(http.Header), status: http.StatusOK}
+}
+
+func (w *sealedRespWriter) Header() http.Header { return w.header }
+
+func (w *sealedRespWriter) WriteHeader(code int) { w.status = code }
+
+func (w *sealedRespWriter) Write(p []byte) (int, error) {
+	if !w.decided {
+		ct := w.header.Get("Content-Type")
+		if strings.HasPrefix(ct, "text/event-stream") {
+			w.startStream()
+		}
+	}
+	if w.stream {
+		return w.writeFrame(p)
+	}
+	return w.buf.Write(p)
+}
+
+// Flush implements http.Flusher. The first Flush forces stream mode (since
+// the handler clearly wants chunked delivery).
+func (w *sealedRespWriter) Flush() {
+	if !w.decided {
+		w.startStream()
+	}
+	if w.stream {
+		if f, ok := w.outer.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+}
+
+func (w *sealedRespWriter) startStream() {
+	w.decided = true
+	w.stream = true
+	out := w.outer.Header()
+	out.Set("Content-Type", sealedStreamContentType)
+	out.Set("Cache-Control", "no-store")
+	out.Set("X-Privasys-Inner-Status", fmt.Sprintf("%d", w.status))
+	w.outer.WriteHeader(http.StatusOK)
+	// If the buffer has bytes (Write happened before SSE header was set, very
+	// unlikely), flush them as the first frame.
+	if w.buf.Len() > 0 {
+		_, _ = w.writeFrame(w.buf.Bytes())
+		w.buf.Reset()
+	}
+}
+
+func (w *sealedRespWriter) writeFrame(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	w.mgr.mu.Lock()
+	ctr := w.sess.S2CCtr
+	w.sess.S2CCtr++
+	w.mgr.mu.Unlock()
+	nonce := makeNonce(w.sess.S2CPrefix[:], ctr)
+	ct := w.sess.Aead.Seal(nil, nonce, p, w.ad)
+	env := encodeSealed(sealedEnvelope{V: 1, Ctr: ctr, Ct: ct})
+	var lenHdr [4]byte
+	binary.BigEndian.PutUint32(lenHdr[:], uint32(len(env)))
+	if _, err := w.outer.Write(lenHdr[:]); err != nil {
+		return 0, err
+	}
+	if _, err := w.outer.Write(env); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (w *sealedRespWriter) finalize() {
+	if w.stream {
+		// Terminator: zero-length frame.
+		var zero [4]byte
+		_, _ = w.outer.Write(zero[:])
+		if f, ok := w.outer.(http.Flusher); ok {
+			f.Flush()
+		}
+		return
+	}
+	// Single-envelope path.
+	w.decided = true
+	w.mgr.mu.Lock()
+	ctr := w.sess.S2CCtr
+	w.sess.S2CCtr++
+	w.mgr.mu.Unlock()
+	respNonce := makeNonce(w.sess.S2CPrefix[:], ctr)
+	ct := w.sess.Aead.Seal(nil, respNonce, w.buf.Bytes(), w.ad)
+	enc := encodeSealed(sealedEnvelope{V: 1, Ctr: ctr, Ct: ct})
+	out := w.outer.Header()
+	out.Set("Content-Type", sealedContentType)
+	out.Set("Cache-Control", "no-store")
+	out.Set("X-Privasys-Inner-Status", fmt.Sprintf("%d", w.status))
+	w.outer.WriteHeader(http.StatusOK)
+	_, _ = w.outer.Write(enc)
+}
+
+// -----------------------------------------------------------------------------
+// capturing http.ResponseWriter (legacy; kept for tests that pre-date the
+// streaming writer)
 // -----------------------------------------------------------------------------
 
 type capturingWriter struct {
