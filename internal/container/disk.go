@@ -24,6 +24,8 @@ package container
 import (
 	"archive/tar"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -31,8 +33,11 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/images/archive"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"go.uber.org/zap"
 )
 
@@ -55,6 +60,10 @@ func diskRefDir(ref string) (string, error) {
 		return "", fmt.Errorf("container: not a disk ref: %s", ref)
 	}
 	name := strings.TrimPrefix(ref, "disk://")
+	// Strip optional @sha256:... digest suffix used for pin verification.
+	if i := strings.Index(name, "@"); i >= 0 {
+		name = name[:i]
+	}
 	if name == "" {
 		return "", fmt.Errorf("container: empty disk ref")
 	}
@@ -111,7 +120,42 @@ func (m *Manager) importFromDisk(ctx context.Context, ref, dir string) (client.I
 		return nil, nil, fmt.Errorf("container: import from %s: %w", dir, err)
 	}
 	if len(imgs) == 0 {
-		return nil, nil, fmt.Errorf("container: %s contained no images", dir)
+		// containerd's archive.ImportIndex only creates named images
+		// for manifest entries that carry an
+		// `org.opencontainers.image.ref.name` annotation. Older OCI
+		// layouts published by skopeo (and the
+		// .operations/scripts/publish-image-disk.sh pipeline) omit
+		// it: the blobs are imported but no Image record is created,
+		// so we get zero results.
+		//
+		// Fall back to parsing index.json ourselves and explicitly
+		// creating an image record pointing at the manifest entry.
+		idx, parseErr := readOCIIndex(dir)
+		if parseErr != nil {
+			return nil, nil, fmt.Errorf("container: %s contained no images and index.json unreadable: %w", dir, parseErr)
+		}
+		desc, pickErr := pickPlatformManifest(idx)
+		if pickErr != nil {
+			return nil, nil, fmt.Errorf("container: %s contained no images: %w", dir, pickErr)
+		}
+		created, createErr := m.client.ImageService().Create(ctx, images.Image{
+			Name:   ref,
+			Target: desc,
+		})
+		if createErr != nil && !errdefs.IsAlreadyExists(createErr) {
+			return nil, nil, fmt.Errorf("container: register image %s: %w", ref, createErr)
+		}
+		if errdefs.IsAlreadyExists(createErr) {
+			created, createErr = m.client.ImageService().Get(ctx, ref)
+			if createErr != nil {
+				return nil, nil, fmt.Errorf("container: get existing image %s: %w", ref, createErr)
+			}
+		}
+		imgs = []images.Image{created}
+		m.log.Info("registered image from index.json (no annotations)",
+			zap.String("ref", ref),
+			zap.String("digest", desc.Digest.String()),
+		)
 	}
 
 	// Pick the first image whose target matches the host platform.
@@ -241,4 +285,46 @@ func isNonOCIEntry(name string) bool {
 		return false
 	}
 	return true
+}
+
+// readOCIIndex parses <dir>/index.json into an OCI image-index struct.
+func readOCIIndex(dir string) (*ocispec.Index, error) {
+	b, err := os.ReadFile(filepath.Join(dir, "index.json"))
+	if err != nil {
+		return nil, err
+	}
+	var idx ocispec.Index
+	if err := json.Unmarshal(b, &idx); err != nil {
+		return nil, fmt.Errorf("parse index.json: %w", err)
+	}
+	return &idx, nil
+}
+
+// pickPlatformManifest returns the manifest descriptor that best
+// matches the host platform. If no entry has a Platform field, the
+// first manifest entry is returned (single-platform layouts published
+// by skopeo commonly omit the field).
+func pickPlatformManifest(idx *ocispec.Index) (ocispec.Descriptor, error) {
+	if idx == nil || len(idx.Manifests) == 0 {
+		return ocispec.Descriptor{}, errors.New("no manifests in index.json")
+	}
+	host := platforms.DefaultSpec()
+	matcher := platforms.NewMatcher(host)
+	var fallback *ocispec.Descriptor
+	for i := range idx.Manifests {
+		d := idx.Manifests[i]
+		if d.Platform == nil {
+			if fallback == nil {
+				fallback = &idx.Manifests[i]
+			}
+			continue
+		}
+		if matcher.Match(*d.Platform) {
+			return d, nil
+		}
+	}
+	if fallback != nil {
+		return *fallback, nil
+	}
+	return ocispec.Descriptor{}, fmt.Errorf("no manifest matches host platform %s/%s", host.OS, host.Architecture)
 }

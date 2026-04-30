@@ -132,15 +132,23 @@ var ContainerModelDigest = append(append(asn1.ObjectIdentifier{}, privasysArc...
 // chosen by the deployer at deploy time.
 const ContainerEnvVarArcPrefix = "1.3.6.1.4.1.65230.3.5."
 
-// ParseEnvVarOID parses a dot-notation OID string under
-// ContainerEnvVarArcPrefix into an asn1.ObjectIdentifier. It returns an
-// error if the OID is not under the prefix, has empty components, or
-// contains non-numeric components.
+// ParseEnvVarOID parses an OID for an env-var attestation extension.
+// It accepts either:
+//   - the full dot-notation OID under ContainerEnvVarArcPrefix
+//     (e.g. "1.3.6.1.4.1.65230.3.5.1.2"), or
+//   - just the sub-arc tail under that prefix
+//     (e.g. "1.2", "1") — the prefix is implied.
+//
+// Returns an error for empty input, empty components, or non-numeric
+// components.
 func ParseEnvVarOID(s string) (asn1.ObjectIdentifier, error) {
-	if !strings.HasPrefix(s, ContainerEnvVarArcPrefix) {
-		return nil, fmt.Errorf("oid %q is not under %s*", s, ContainerEnvVarArcPrefix)
+	if s == "" {
+		return nil, fmt.Errorf("oid is empty")
 	}
-	sub := strings.TrimPrefix(s, ContainerEnvVarArcPrefix)
+	sub := s
+	if strings.HasPrefix(s, ContainerEnvVarArcPrefix) {
+		sub = strings.TrimPrefix(s, ContainerEnvVarArcPrefix)
+	}
 	if sub == "" {
 		return nil, fmt.Errorf("oid %q is missing sub-arc components", s)
 	}

@@ -219,22 +219,10 @@ func (r *LoadRequest) Validate() error {
 		if m.OID == "" {
 			continue
 		}
-		if !strings.HasPrefix(m.OID, oids.ContainerEnvVarArcPrefix) {
-			return fmt.Errorf("env_meta[%q].oid must lie under %s* (got %q)", k, oids.ContainerEnvVarArcPrefix, m.OID)
-		}
-		sub := strings.TrimPrefix(m.OID, oids.ContainerEnvVarArcPrefix)
-		if sub == "" {
-			return fmt.Errorf("env_meta[%q].oid is missing the sub-arc component", k)
-		}
-		for _, part := range strings.Split(sub, ".") {
-			if part == "" {
-				return fmt.Errorf("env_meta[%q].oid has empty sub-arc component", k)
-			}
-			for _, c := range part {
-				if c < '0' || c > '9' {
-					return fmt.Errorf("env_meta[%q].oid sub-arc must be numeric (got %q)", k, m.OID)
-				}
-			}
+		// Defer to oids.ParseEnvVarOID which accepts either the full OID
+		// under ContainerEnvVarArcPrefix or just the sub-arc tail.
+		if _, err := oids.ParseEnvVarOID(m.OID); err != nil {
+			return fmt.Errorf("env_meta[%q].oid invalid: %w", k, err)
 		}
 	}
 	return nil
