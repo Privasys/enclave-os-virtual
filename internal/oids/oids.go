@@ -27,6 +27,8 @@ package oids
 import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -121,6 +123,41 @@ var ContainerVolumeEncryption = append(append(asn1.ObjectIdentifier{}, privasysA
 // used for inference, complementing the container image digest (OID 3.2)
 // which covers the code but not the dynamically-loaded model.
 var ContainerModelDigest = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 5)
+
+// ContainerEnvVarArcPrefix is the dot-notation prefix for per-environment-
+// variable attestation extensions. Each runtime-supplied env var may be
+// pinned at a sub-OID 1.3.6.1.4.1.65230.3.5.<n>[.<n>...]. The extension
+// value contains either the raw UTF-8 value bytes (public vars) or the
+// 32-byte SHA-256 of the value (secret vars). Sub-OID assignment is
+// chosen by the deployer at deploy time.
+const ContainerEnvVarArcPrefix = "1.3.6.1.4.1.65230.3.5."
+
+// ParseEnvVarOID parses a dot-notation OID string under
+// ContainerEnvVarArcPrefix into an asn1.ObjectIdentifier. It returns an
+// error if the OID is not under the prefix, has empty components, or
+// contains non-numeric components.
+func ParseEnvVarOID(s string) (asn1.ObjectIdentifier, error) {
+	if !strings.HasPrefix(s, ContainerEnvVarArcPrefix) {
+		return nil, fmt.Errorf("oid %q is not under %s*", s, ContainerEnvVarArcPrefix)
+	}
+	sub := strings.TrimPrefix(s, ContainerEnvVarArcPrefix)
+	if sub == "" {
+		return nil, fmt.Errorf("oid %q is missing sub-arc components", s)
+	}
+	out := append(asn1.ObjectIdentifier{}, privasysArc...)
+	out = append(out, 3, 5)
+	for _, p := range strings.Split(sub, ".") {
+		if p == "" {
+			return nil, fmt.Errorf("oid %q has empty sub-arc component", s)
+		}
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("oid %q sub-arc must be non-negative integers", s)
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
 
 // --- Extension builders --------------------------------------------------
 

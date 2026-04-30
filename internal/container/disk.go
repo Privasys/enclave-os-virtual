@@ -159,6 +159,16 @@ func tarOCILayout(dir string, w io.Writer) error {
 	root := filepath.Clean(dir)
 	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			// Tolerate unreadable subtrees that aren't part of the OCI
+			// layout (e.g. ext4's root-owned `lost+found` directory on
+			// freshly-formatted partitions). Skipping them lets the
+			// tar continue with the actual OCI files.
+			if info != nil && info.IsDir() {
+				rel, _ := filepath.Rel(root, path)
+				if isNonOCIEntry(rel) {
+					return filepath.SkipDir
+				}
+			}
 			return err
 		}
 		// Skip the top-level dir itself.
@@ -171,6 +181,17 @@ func tarOCILayout(dir string, w io.Writer) error {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
+
+		// Skip filesystem artefacts that are not part of the OCI image
+		// layout (lost+found from mke2fs, snapshot dirs, etc.). We
+		// match only at the top level; the OCI spec defines exactly
+		// three entries: oci-layout, index.json, blobs/.
+		if !strings.Contains(rel, "/") && isNonOCIEntry(rel) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 
 		switch {
 		case info.IsDir():
@@ -208,4 +229,16 @@ func tarOCILayout(dir string, w io.Writer) error {
 			return nil
 		}
 	})
+}
+
+// isNonOCIEntry reports whether a top-level entry name is something
+// other than the three names defined by the OCI image layout spec
+// (oci-layout, index.json, blobs). Used to filter filesystem
+// artefacts like ext4's `lost+found` directory.
+func isNonOCIEntry(name string) bool {
+	switch name {
+	case "oci-layout", "index.json", "blobs", "manifest.json":
+		return false
+	}
+	return true
 }

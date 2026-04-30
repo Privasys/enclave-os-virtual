@@ -105,6 +105,24 @@ type Config struct {
 	DEKOriginFile string
 }
 
+// EnvVarMeta is per-environment-variable metadata that controls how
+// the variable surfaces in attestation extensions.
+//
+//   - Secret = true:  if OID is set, the corresponding extension contains
+//                     the raw SHA-256 of the value (32 bytes). The value
+//                     itself never leaves the enclave via the certificate.
+//   - Secret = false: if OID is set, the extension contains the raw
+//                     UTF-8 value bytes.
+//   - OID empty:      no per-key extension is emitted (the key is still
+//                     measured into the bulk env_hash Merkle leaf).
+//
+// OID values must lie under the Privasys per-container env-var sub-arc
+// 1.3.6.1.4.1.65230.3.5.* — other OIDs are rejected at validation time.
+type EnvVarMeta struct {
+	Secret bool   `json:"secret"`
+	OID    string `json:"oid,omitempty"`
+}
+
 // LoadRequest is the API request to load a container.
 type LoadRequest struct {
 	// Name is a unique identifier for this container.
@@ -119,6 +137,13 @@ type LoadRequest struct {
 
 	// Env is a map of environment variables.
 	Env map[string]string `json:"env,omitempty"`
+
+	// EnvMeta carries optional per-key metadata (secret flag and an
+	// X.509 OID under the Privasys env-var sub-arc) that the manager
+	// uses to emit per-key attestation extensions. Keys MUST also be
+	// present in Env. Keys missing here default to {Secret:true,
+	// OID:""} (no extension emitted).
+	EnvMeta map[string]EnvVarMeta `json:"env_meta,omitempty"`
 
 	// Volumes is a list of "host:container" mount paths.
 	Volumes []string `json:"volumes,omitempty"`
@@ -186,6 +211,31 @@ func (r *LoadRequest) Validate() error {
 	}
 	if r.Port <= 0 || r.Port > 65535 {
 		return fmt.Errorf("port must be 1-65535, got %d", r.Port)
+	}
+	for k, m := range r.EnvMeta {
+		if _, ok := r.Env[k]; !ok {
+			return fmt.Errorf("env_meta references unknown env key %q", k)
+		}
+		if m.OID == "" {
+			continue
+		}
+		if !strings.HasPrefix(m.OID, oids.ContainerEnvVarArcPrefix) {
+			return fmt.Errorf("env_meta[%q].oid must lie under %s* (got %q)", k, oids.ContainerEnvVarArcPrefix, m.OID)
+		}
+		sub := strings.TrimPrefix(m.OID, oids.ContainerEnvVarArcPrefix)
+		if sub == "" {
+			return fmt.Errorf("env_meta[%q].oid is missing the sub-arc component", k)
+		}
+		for _, part := range strings.Split(sub, ".") {
+			if part == "" {
+				return fmt.Errorf("env_meta[%q].oid has empty sub-arc component", k)
+			}
+			for _, c := range part {
+				if c < '0' || c > '9' {
+					return fmt.Errorf("env_meta[%q].oid sub-arc must be numeric (got %q)", k, m.OID)
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -271,6 +321,11 @@ type Launcher struct {
 	// Values: "byok:<fingerprint>" or "generated".  Absent when no volume.
 	volumeEncryption map[string]string
 
+	// envMeta carries the per-container env-var metadata supplied at
+	// load time (validated to be under the env-var sub-arc). Used by
+	// writeContainerExtensions to emit per-key OID extensions.
+	envMeta map[string]map[string]EnvVarMeta
+
 	// Loaded container specs (mirrors what is running).
 	specs map[string]manifest.Container
 
@@ -290,6 +345,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		pulledImages:      make(map[string]client.Image),
 		specs:             make(map[string]manifest.Container),
 		volumeEncryption:  make(map[string]string),
+		envMeta:           make(map[string]map[string]EnvVarMeta),
 		attestationTokens: make(map[string]string),
 	}
 
@@ -671,6 +727,14 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	if volEncryption != "" {
 		l.volumeEncryption[req.Name] = volEncryption
 	}
+	if len(req.EnvMeta) > 0 {
+		// Copy to insulate from caller mutations.
+		m := make(map[string]EnvVarMeta, len(req.EnvMeta))
+		for k, v := range req.EnvMeta {
+			m[k] = v
+		}
+		l.envMeta[req.Name] = m
+	}
 
 	// Recompute attestation.
 	l.recomputeAttestation()
@@ -739,6 +803,7 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	delete(l.imageDigests, name)
 	delete(l.containerTrees, name)
 	delete(l.volumeEncryption, name)
+	delete(l.envMeta, name)
 
 	// Recompute attestation.
 	l.recomputeAttestation()
@@ -981,6 +1046,45 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string, port
 
 	// Build the extensions list (without the quote - the RA-TLS module adds that).
 	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc)
+
+	// Per-key env-var extensions (OIDs under 1.3.6.1.4.1.65230.3.5.*).
+	// Public vars carry the raw value; secret vars carry SHA-256(value).
+	if meta := l.envMeta[containerName]; len(meta) > 0 {
+		// Sort keys for deterministic ordering of the resulting JSON
+		// (independent of map iteration order).
+		keys := make([]string, 0, len(meta))
+		for k := range meta {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			m := meta[k]
+			if m.OID == "" {
+				continue
+			}
+			oid, err := oids.ParseEnvVarOID(m.OID)
+			if err != nil {
+				// Already validated at Load time; log and skip.
+				l.log.Warn("skipping env-var extension with invalid OID",
+					zap.String("container", containerName),
+					zap.String("key", k),
+					zap.Error(err))
+				continue
+			}
+			val, ok := spec.Env[k]
+			if !ok {
+				continue
+			}
+			var raw []byte
+			if m.Secret {
+				h := sha256.Sum256([]byte(val))
+				raw = h[:]
+			} else {
+				raw = []byte(val)
+			}
+			exts = append(exts, oids.Extension(oid, raw))
+		}
+	}
 
 	upstream := fmt.Sprintf("http://127.0.0.1:%d", port)
 	return extensions.Write(l.cfg.ExtensionsDir, hostname, exts, upstream)
