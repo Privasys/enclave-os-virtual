@@ -39,9 +39,12 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -106,6 +109,13 @@ type Config struct {
 	// Addr is the listen address (default "localhost:9443").
 	// The server listens on plain HTTP — TLS is handled by Caddy.
 	Addr string
+
+	// PlatformHostname is the FQDN routed to the management API itself.
+	// Requests with a different Host header are reverse-proxied to the
+	// matching app upstream registered via RegisterAppHost. This lets the
+	// session-relay middleware (which is mounted on this server) apply
+	// uniformly to platform and container traffic — see docs/ra-tls.md.
+	PlatformHostname string
 }
 
 // Server is the management API server.
@@ -120,6 +130,16 @@ type Server struct {
 	// request whose Content-Type is application/privasys-sealed+cbor
 	// before the inner mux sees it (and re-wraps the response).
 	sessionRelay *sessionrelay.Manager
+
+	// appHosts maps container Hostname → loopback upstream (e.g.
+	// "localhost:8080"). Populated by the launcher via RegisterAppHost.
+	appHosts sync.Map // map[string]string
+
+	// appProxy reverse-proxies non-platform Host requests to the upstream
+	// looked up in appHosts. Wrapped by sessionRelay.Middleware so that
+	// SDK clients can run sealed-CBOR sessions against any container host
+	// without the container app having to implement the protocol itself.
+	appProxy *httputil.ReverseProxy
 }
 
 // New creates a new management API Server.
@@ -127,13 +147,71 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 	if cfg.Addr == "" {
 		cfg.Addr = DefaultAddr
 	}
-	return &Server{
+	s := &Server{
 		cfg:          cfg,
 		log:          log.Named("manager"),
 		launcher:     l,
 		verifier:     v,
 		sessionRelay: sessionrelay.NewManager(),
 	}
+	s.appProxy = &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			host := hostOnly(pr.In.Host)
+			upstream, _ := s.lookupAppHost(host)
+			pr.Out.URL.Scheme = "http"
+			pr.Out.URL.Host = upstream
+			pr.Out.Host = pr.In.Host
+			pr.SetXForwarded()
+		},
+		// Stream SSE / chunked bodies promptly (e.g. /v1/chat/completions).
+		FlushInterval: -1,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			s.log.Warn("app proxy error",
+				zap.String("host", hostOnly(r.Host)),
+				zap.String("path", r.URL.Path),
+				zap.Error(err))
+			http.Error(w, "upstream unavailable", http.StatusBadGateway)
+		},
+	}
+	return s
+}
+
+// RegisterAppHost wires a container hostname to its loopback upstream
+// (e.g. "localhost:8080"). Subsequent requests reaching the manager with
+// Host == hostname are reverse-proxied there, after passing through the
+// session-relay middleware. Idempotent.
+func (s *Server) RegisterAppHost(hostname, upstream string) {
+	hostname = strings.ToLower(hostname)
+	s.appHosts.Store(hostname, upstream)
+	s.log.Info("app host registered",
+		zap.String("hostname", hostname),
+		zap.String("upstream", upstream))
+}
+
+// UnregisterAppHost removes a container hostname mapping. Safe to call
+// for unknown hostnames.
+func (s *Server) UnregisterAppHost(hostname string) {
+	hostname = strings.ToLower(hostname)
+	s.appHosts.Delete(hostname)
+	s.log.Info("app host unregistered", zap.String("hostname", hostname))
+}
+
+func (s *Server) lookupAppHost(hostname string) (string, bool) {
+	v, ok := s.appHosts.Load(strings.ToLower(hostname))
+	if !ok {
+		return "", false
+	}
+	return v.(string), true
+}
+
+func hostOnly(h string) string {
+	if h == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		return host
+	}
+	return h
 }
 
 // Start starts the management API server. It blocks until the context is
@@ -160,9 +238,27 @@ func (s *Server) Start(ctx context.Context) error {
 	// Attestation server management (require manager role).
 	mux.HandleFunc("PUT /api/v1/attestation-servers", s.requireAuth(s.handleSetAttestationServers))
 
+	// Dispatch by Host header so the session-relay middleware can apply
+	// uniformly to both the platform API and every container app. Caddy
+	// reverse-proxies all RA-TLS hosts (platform + apps) to this manager;
+	// the platform Host hits the management mux, every other Host gets
+	// reverse-proxied to its registered loopback upstream.
+	dispatcher := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := hostOnly(r.Host)
+		if s.cfg.PlatformHostname == "" || strings.EqualFold(host, s.cfg.PlatformHostname) {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		if _, ok := s.lookupAppHost(host); !ok {
+			http.Error(w, "unknown app host", http.StatusNotFound)
+			return
+		}
+		s.appProxy.ServeHTTP(w, r)
+	})
+
 	s.server = &http.Server{
 		Addr:    s.cfg.Addr,
-		Handler: s.metricsMiddleware(s.sessionRelay.Middleware(mux)),
+		Handler: s.metricsMiddleware(s.sessionRelay.Middleware(dispatcher)),
 	}
 
 	// Start serving in a goroutine.

@@ -358,7 +358,20 @@ The Caddy reverse proxy uses **SNI-based routing**:
 3. The RA-TLS module reads `/run/manager/extensions/myapp.prod1.example.com.json`
 4. If in challenge-response mode: generate fresh key + TDX quote + extensions
 5. If in deterministic mode: serve cached cert (auto-renewed every 24h)
-6. TLS established — traffic is reverse-proxied to `localhost:8080`
+6. TLS established — Caddy reverse-proxies the plaintext to the **manager**
+   (`localhost:9443`), not directly to the container
+7. The manager dispatches by `Host`: the platform hostname hits the
+   management API mux; every other host is reverse-proxied to its
+   registered container loopback (e.g. `localhost:8080`)
+
+Routing through the manager lets the **session-relay middleware**
+(`internal/sessionrelay`) intercept SDK traffic uniformly: any host can
+receive `POST /__privasys/session-bootstrap` and `application/privasys-sealed+cbor`
+requests without the container app implementing the protocol. Since the
+manager, Caddy, and the container all live inside the same TDX-measured
+TCB (dm-verity rootfs + measured boot), terminating the SDK session at
+the manager is no weaker than terminating it at the container — the same
+hardware quote attests both.
 
 ### Route Lifecycle
 
@@ -380,15 +393,19 @@ The launcher:
 3. Derives the hostname: `myapp.<machine-name>.<hostname>`
 4. Recomputes all Merkle trees
 5. Writes OID extensions to `/run/manager/extensions/myapp.<machine-name>.<hostname>.json`
-6. Registers a Caddy route: `myapp.<machine-name>.<hostname>` → `localhost:8080`
-7. Updates the platform extensions (combined workloads hash changed)
+6. Registers a Caddy route: `myapp.<machine-name>.<hostname>` → `localhost:9443` (manager)
+7. Registers the container upstream with the manager's host router
+   (`Host` → `localhost:8080`) so the manager can reverse-proxy after
+   running the session-relay middleware
+8. Updates the platform extensions (combined workloads hash changed)
 
 When unloading:
 
 1. Removes the Caddy route
-2. Deletes the extension file
-3. Stops the container
-4. Recomputes attestation (platform Merkle root changes)
+2. Unregisters the host from the manager's router
+3. Deletes the extension file
+4. Stops the container
+5. Recomputes attestation (platform Merkle root changes)
 
 ### Platform vs. per-container: what goes where
 

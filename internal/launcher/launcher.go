@@ -300,6 +300,11 @@ type Launcher struct {
 	// Takes precedence over attestationTokens when set.
 	tokenSource TokenSource
 
+	// appHostRouter, when non-nil, receives container Host→upstream
+	// registrations so the manager API server can reverse-proxy app
+	// traffic through the session-relay middleware.
+	appHostRouter AppHostRouter
+
 	// dekOrigin is the data-encryption key origin string
 	// ("byok:<fingerprint>").  Empty when the data partition is not
 	// encrypted.
@@ -510,6 +515,25 @@ func (l *Launcher) ReloadCA(certPEM, keyPEM []byte) error {
 // Used by the OIDC bootstrap manager to supply auto-refreshed tokens.
 type TokenSource interface {
 	Token(serverURL string) string
+}
+
+// AppHostRouter is implemented by the management API server. The launcher
+// calls Register/Unregister so that container Host → loopback upstream
+// mappings reach the same in-process router that owns the session-relay
+// middleware. Caddy points every RA-TLS host (platform + container) at the
+// manager port; the manager then dispatches by Host. See docs/ra-tls.md.
+type AppHostRouter interface {
+	RegisterAppHost(hostname, upstream string)
+	UnregisterAppHost(hostname string)
+}
+
+// SetAppHostRouter wires the manager API server's host router. When set,
+// container loads register their loopback upstream with it so traffic
+// flows: Caddy → manager → container, instead of Caddy → container.
+func (l *Launcher) SetAppHostRouter(r AppHostRouter) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.appHostRouter = r
 }
 
 // SetTokenSource sets a dynamic token source that takes precedence over
@@ -740,8 +764,21 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				l.log.Warn("failed to write container extensions",
 					zap.String("name", req.Name), zap.Error(err))
 			}
-			upstream := fmt.Sprintf("localhost:%d", req.Port)
-			if err := l.caddyClient.AddRoute(spec.Hostname, upstream); err != nil {
+			containerUpstream := fmt.Sprintf("localhost:%d", req.Port)
+			// Route external TLS-terminated traffic to the manager so the
+			// session-relay middleware can intercept sealed-CBOR requests
+			// before they reach the container. Falls back to the container
+			// upstream when no app-host router is wired (legacy path).
+			caddyUpstream := containerUpstream
+			if l.appHostRouter != nil {
+				mgmtPort := l.cfg.ManagementPort
+				if mgmtPort == "" {
+					mgmtPort = "9443"
+				}
+				caddyUpstream = "localhost:" + mgmtPort
+				l.appHostRouter.RegisterAppHost(spec.Hostname, containerUpstream)
+			}
+			if err := l.caddyClient.AddRoute(spec.Hostname, caddyUpstream); err != nil {
 				l.log.Warn("failed to add Caddy route",
 					zap.String("hostname", spec.Hostname), zap.Error(err))
 			}
@@ -808,6 +845,9 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 			if err := l.caddyClient.RemoveRoute(removedSpec.Hostname); err != nil {
 				l.log.Warn("failed to remove Caddy route",
 					zap.String("hostname", removedSpec.Hostname), zap.Error(err))
+			}
+			if l.appHostRouter != nil {
+				l.appHostRouter.UnregisterAppHost(removedSpec.Hostname)
 			}
 			if err := extensions.Remove(l.cfg.ExtensionsDir, removedSpec.Hostname); err != nil {
 				l.log.Warn("failed to remove container extensions",

@@ -281,9 +281,16 @@ func runServe(args []string) error {
 
 	// Configure management API server (plain HTTP, localhost only).
 	mgrCfg := manager.Config{
-		Addr: "localhost:9443",
+		Addr:             "localhost:9443",
+		PlatformHostname: platformHostname,
 	}
 	srv := manager.New(mgrCfg, log, l, verifier)
+
+	// Wire the host router so container loads register their loopback
+	// upstreams with the manager. Caddy then routes every RA-TLS host
+	// (platform + container) at the manager port and the manager
+	// dispatches by Host, applying the session-relay middleware to all.
+	l.SetAppHostRouter(srv)
 
 	// Run launcher and management API concurrently.
 	g, gctx := errgroup.WithContext(ctx)
