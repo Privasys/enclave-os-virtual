@@ -240,20 +240,20 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Dispatch by Host header so the session-relay middleware can apply
 	// uniformly to both the platform API and every container app. Caddy
-	// reverse-proxies all RA-TLS hosts (platform + apps) to this manager;
-	// the platform Host hits the management mux, every other Host gets
-	// reverse-proxied to its registered loopback upstream.
+	// reverse-proxies all RA-TLS hosts (platform + apps) to this manager
+	// and now also installs a catch-all fallback for any unknown SNI.
+	//
+	// App-match-wins: if the Host matches a registered container app, the
+	// request goes to that app's loopback upstream; everything else (the
+	// configured PlatformHostname AND any unknown SNI from the catch-all
+	// fallback, e.g. mgmt-service connecting by IP) hits the platform mux.
 	dispatcher := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := hostOnly(r.Host)
-		if s.cfg.PlatformHostname == "" || strings.EqualFold(host, s.cfg.PlatformHostname) {
-			mux.ServeHTTP(w, r)
+		if _, ok := s.lookupAppHost(host); ok {
+			s.appProxy.ServeHTTP(w, r)
 			return
 		}
-		if _, ok := s.lookupAppHost(host); !ok {
-			http.Error(w, "unknown app host", http.StatusNotFound)
-			return
-		}
-		s.appProxy.ServeHTTP(w, r)
+		mux.ServeHTTP(w, r)
 	})
 
 	s.server = &http.Server{

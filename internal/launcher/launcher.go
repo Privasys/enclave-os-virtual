@@ -444,12 +444,16 @@ func (l *Launcher) Run(ctx context.Context) error {
 			return fmt.Errorf("launcher: failed to write platform extensions: %w", err)
 		}
 
-		// Register the management API route in Caddy.
+		mgmtPort := l.cfg.ManagementPort
+		if mgmtPort == "" {
+			mgmtPort = "9443"
+		}
+
+		// Register the management API route in Caddy (named host route).
+		// Kept for explicit logging and back-compat with old SNI values, but
+		// the catch-all fallback below means an empty PlatformHostname is
+		// fine — every TLS SNI now resolves to the management mux.
 		if l.cfg.PlatformHostname != "" {
-			mgmtPort := l.cfg.ManagementPort
-			if mgmtPort == "" {
-				mgmtPort = "9443"
-			}
 			if err := l.caddyClient.AddRoute(l.cfg.PlatformHostname, "localhost:"+mgmtPort); err != nil {
 				return fmt.Errorf("launcher: failed to add management API Caddy route: %w", err)
 			}
@@ -457,6 +461,16 @@ func (l *Launcher) Run(ctx context.Context) error {
 				zap.String("hostname", l.cfg.PlatformHostname),
 				zap.String("upstream", "localhost:"+mgmtPort))
 		}
+
+		// Catch-all fallback so mgmt-service can connect by IP without
+		// hitting Caddy's strict SNI host-matcher. The dispatcher in the
+		// management mux is app-match-wins, so any SNI that doesn't match
+		// a registered container app is routed to the platform API.
+		if err := l.caddyClient.SetFallback("localhost:" + mgmtPort); err != nil {
+			return fmt.Errorf("launcher: failed to set Caddy fallback: %w", err)
+		}
+		l.log.Info("management API catch-all fallback registered in Caddy",
+			zap.String("upstream", "localhost:"+mgmtPort))
 	}
 
 	// 4. Wait for shutdown signal.

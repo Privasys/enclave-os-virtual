@@ -68,8 +68,9 @@ type Client struct {
 	log    *zap.Logger
 	client *http.Client
 
-	mu     sync.Mutex
-	routes map[string]route // hostname → route
+	mu       sync.Mutex
+	routes   map[string]route // hostname → route
+	fallback string           // catch-all upstream ("" = no fallback); see SetFallback
 }
 
 // NewClient creates a new Caddy admin API client.
@@ -144,6 +145,24 @@ func (c *Client) RouteCount() int {
 	return len(c.routes)
 }
 
+// SetFallback registers a catch-all reverse-proxy upstream emitted as the
+// LAST route in the generated Caddy config (no host matcher). It lets the
+// management API answer for any TLS SNI value, which the platform relies on
+// now that the legacy `enclaves.host` SNI is gone — mgmt-service connects
+// to the enclave by IP and sends an arbitrary SNI; the RA-TLS issuer mints a
+// fresh cert for whatever SNI it sees, and this fallback ensures the request
+// is then routed to the management mux.
+//
+// Pass an empty string to clear the fallback.
+func (c *Client) SetFallback(upstream string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.fallback = upstream
+	c.log.Info("setting Caddy fallback upstream",
+		zap.String("upstream", upstream))
+	return c.reload()
+}
+
 // Reload forces a full Caddy config reload. This is used after updating
 // the CA certificate/key so the RA-TLS module picks up the new files.
 func (c *Client) Reload() error {
@@ -193,7 +212,7 @@ func (c *Client) buildConfig() map[string]any {
 	}
 	sort.Strings(hostnames)
 
-	routes := make([]map[string]any, 0, len(c.routes))
+	routes := make([]map[string]any, 0, len(c.routes)+1)
 	for _, h := range hostnames {
 		r := c.routes[h]
 		routes = append(routes, map[string]any{
@@ -204,6 +223,26 @@ func (c *Client) buildConfig() map[string]any {
 				{
 					"handler":   "reverse_proxy",
 					"upstreams": []map[string]any{{"dial": r.Upstream}},
+					"transport": map[string]any{
+						"protocol":                "http",
+						"response_header_timeout": "15m",
+						"read_timeout":            "15m",
+						"write_timeout":           "15m",
+					},
+				},
+			},
+		})
+	}
+
+	// Catch-all fallback emitted LAST. Caddy evaluates routes in order and
+	// stops at the first match; a route with no `match` clause matches
+	// everything.
+	if c.fallback != "" {
+		routes = append(routes, map[string]any{
+			"handle": []map[string]any{
+				{
+					"handler":   "reverse_proxy",
+					"upstreams": []map[string]any{{"dial": c.fallback}},
 					"transport": map[string]any{
 						"protocol":                "http",
 						"response_header_timeout": "15m",
