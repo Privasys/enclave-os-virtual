@@ -74,7 +74,7 @@ jobs:
         run: |
           # Download pre-built kernel .debs from the cvm-images repo.
           # The BadAML patch does NOT change the kernel ABI, so Ubuntu-signed
-          # NVIDIA modules (linux-modules-nvidia-590-*) load correctly.
+          # NVIDIA modules (linux-modules-nvidia-595-*) load correctly.
           mkdir -p build/kernel/debs
 
           KERNEL_TAG=$(gh release list --repo Privasys/cvm-images \

@@ -88,7 +88,7 @@ properties:
 
 The GPU variant adds:
 
-- `nvidia-driver-590-server-open`, `cuda-toolkit-13-0`, `nvidia-container-toolkit`
+- `nvidia-driver-595-server-open`, `cuda-toolkit-13-0`, `nvidia-container-toolkit`
 - containerd configured with `nvidia-container-runtime` as default runtime
 - Kernel parameters: `iommu=pt intel_iommu=on nvidia.NVreg_ConfidentialComputing=1`
 
