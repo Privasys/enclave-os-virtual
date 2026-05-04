@@ -108,6 +108,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -944,15 +945,46 @@ func (g *RATLSCertGetter) issueDeterministic(hello *tls.ClientHelloInfo) (*tls.C
 	}
 	extraExts = append(extraExts, hostExts...)
 
+	// Resolve the cert name. Empty ServerName means the client did not
+	// send SNI — typically a Go HTTP client dialing an https://IP:port URL,
+	// because crypto/tls.hostnameInSNI strips IP literals per RFC 6066.
+	// Caddy then keys the on-demand certificate lookup on the connection's
+	// LocalAddr.IP and rejects any cert whose SAN list does not contain
+	// that IP ("filling cert from leaf: certificate has no names"). We
+	// derive the cert's CN/SAN from the connection so empty/IP-literal SNI
+	// handshakes always succeed.
+	certCN := hello.ServerName
+	var dnsNames []string
+	var ipSANs []net.IP
+	if certCN != "" {
+		if ip := net.ParseIP(certCN); ip != nil {
+			ipSANs = append(ipSANs, ip)
+		} else {
+			dnsNames = []string{certCN}
+		}
+	}
+	if hello.Conn != nil {
+		if local, ok := hello.Conn.LocalAddr().(*net.TCPAddr); ok && local.IP != nil {
+			ipSANs = append(ipSANs, local.IP)
+			if certCN == "" {
+				certCN = local.IP.String()
+			}
+		}
+	}
+	if certCN == "" {
+		certCN = "enclave-default"
+	}
+
 	notAfter := creationTime.Add(24 * time.Hour)
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			CommonName: hello.ServerName,
+			CommonName: certCN,
 		},
-		DNSNames:  []string{hello.ServerName},
-		NotBefore: creationTime,
-		NotAfter:  notAfter,
+		DNSNames:    dnsNames,
+		IPAddresses: ipSANs,
+		NotBefore:   creationTime,
+		NotAfter:    notAfter,
 
 		KeyUsage: x509.KeyUsageDigitalSignature,
 		ExtKeyUsage: []x509.ExtKeyUsage{

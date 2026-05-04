@@ -277,6 +277,22 @@ func (c *Client) buildConfig() map[string]any {
 					"srv0": map[string]any{
 						"listen": []string{c.cfg.ListenAddr},
 						"routes": routes,
+						// Disable Caddy's auto-HTTPS machinery: we never want
+						// Caddy to derive cert identifiers from route hosts and
+						// fall through to ACME / on-demand permission checks.
+						// All certs come from the RA-TLS get_certificate
+						// module below.
+						"automatic_https": map[string]any{
+							"disable": true,
+						},
+						// Empty connection policy ([{}]) matches every
+						// ClientHello, including empty-SNI handshakes from Go
+						// HTTP clients dialing https://IP:port (Go strips
+						// IP-literal SNI per RFC 6066). Without this the http
+						// server has no policy to apply when SNI is missing
+						// and rejects with TLS alert 80 before invoking the
+						// cert getter.
+						"tls_connection_policies": []map[string]any{{}},
 					},
 				},
 			},
