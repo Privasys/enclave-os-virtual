@@ -223,6 +223,16 @@ func (c *Client) buildConfig() map[string]any {
 				{
 					"handler":   "reverse_proxy",
 					"upstreams": []map[string]any{{"dial": r.Upstream}},
+					// flush_interval: -1 forces Caddy to flush every
+					// upstream write to the client immediately. Caddy
+					// auto-detects text/event-stream and does this on its
+					// own, but we set it explicitly so any non-SSE
+					// streaming response (chunked JSONL, raw bytes from
+					// confidential-ai's /v1/completions, etc.) also gets
+					// per-write cadence. Removing buffering here is what
+					// makes vLLM token-by-token chat actually feel
+					// token-by-token in the browser.
+					"flush_interval": -1,
 					"transport": map[string]any{
 						"protocol":                "http",
 						"response_header_timeout": "15m",
@@ -243,6 +253,7 @@ func (c *Client) buildConfig() map[string]any {
 				{
 					"handler":   "reverse_proxy",
 					"upstreams": []map[string]any{{"dial": c.fallback}},
+					"flush_interval": -1,
 					"transport": map[string]any{
 						"protocol":                "http",
 						"response_header_timeout": "15m",
