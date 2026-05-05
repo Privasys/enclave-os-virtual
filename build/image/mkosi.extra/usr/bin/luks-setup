@@ -31,13 +31,61 @@
 
 set -euo pipefail
 
-PART="/dev/disk/by-partlabel/data"
 MAPPER="data-crypt"
 LUKS_DIR="/run/luks"
 ORIGIN_FILE="${LUKS_DIR}/dek-origin"
 KEY_SOURCE_FILE="${LUKS_DIR}/key-source"
 
 mkdir -p "$LUKS_DIR"
+
+# ── 0. Discover the /data block device ───────────────────────────────────
+#
+# Preferred (since v0.4.0): a dedicated cloud persistent disk attached as
+# device-name=data, which surfaces as /dev/disk/by-id/google-data on GCE
+# (and equivalent stable-name links on other clouds via udev).
+#
+# Legacy fallback: /dev/disk/by-partlabel/data — a 1M (since v0.4.0) or
+# 2G (pre-v0.4.0) partition on the boot disk. Used only by VMs that have
+# not yet been migrated to the dedicated-PD layout.
+#
+# Both paths are populated asynchronously by udev after networkd brings
+# the disk online. Wait briefly for either to appear.
+
+discover_data_device() {
+    local candidates=(
+        /dev/disk/by-id/google-data
+        /dev/disk/by-partlabel/data
+    )
+    local d
+    for d in "${candidates[@]}"; do
+        if [ -b "$d" ]; then
+            printf '%s' "$d"
+            return 0
+        fi
+    done
+    return 1
+}
+
+PART=""
+for attempt in $(seq 1 30); do
+    if PART=$(discover_data_device); then
+        break
+    fi
+    sleep 1
+done
+if [ -z "$PART" ]; then
+    echo "luks-setup: ERROR — no /data device found" >&2
+    echo "luks-setup: looked for /dev/disk/by-id/google-data and /dev/disk/by-partlabel/data" >&2
+    exit 1
+fi
+case "$PART" in
+    /dev/disk/by-id/google-data)
+        echo "luks-setup: using dedicated /data PD ($PART)"
+        ;;
+    /dev/disk/by-partlabel/data)
+        echo "luks-setup: WARNING legacy /data on boot disk ($PART) — migrate to a dedicated PD"
+        ;;
+esac
 
 # ── 1. Fetch BYOK passphrase from instance metadata ──────────────────────
 #

@@ -83,8 +83,9 @@ properties:
 
 - **Root filesystem**: erofs (read-only) with dm-verity integrity
 - **Boot**: UEFI Secure Boot via shim-signed + grub-efi-amd64-signed
-- **Partitions**: ESP (512 MB), root + verity hash, data (2 GB LUKS2+AEAD), containers (LVM, remaining disk)
-- **Kernel**: Ubuntu HWE 6.19 with CVM guard patch (BadAML mitigation)
+- **Boot disk partitions**: ESP (512 MB), root + verity hash, data placeholder (1 MB stub, since v0.4.0), containers (LVM, remaining disk)
+- **Data**: dedicated cloud PD attached as `device-name=data` (since v0.4.0). LUKS2 with `aes-xts-plain64` + `--integrity hmac-sha256` (per-4 K-sector dm-integrity tags). Surfaces in the VM as `/dev/disk/by-id/google-data` (GCE) and is unlocked to `/dev/mapper/data-crypt`. Survives image upgrades and Spot preemption. luks-setup falls back to the `partlabel=data` placeholder for not-yet-migrated VMs.
+- **Kernel**: Ubuntu HWE Linux 7.0.3 with CVM guard patch (BadAML mitigation)
 
 The GPU variant adds:
 
