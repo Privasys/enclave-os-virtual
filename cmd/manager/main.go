@@ -283,6 +283,10 @@ func runServe(args []string) error {
 	mgrCfg := manager.Config{
 		Addr:             "localhost:9443",
 		PlatformHostname: platformHostname,
+		// /data is the per-VM LUKS-encrypted volume — the registry MUST
+		// live here so secrets (StorageKey, VaultToken) are not exposed
+		// on the unencrypted rootfs. Set to empty to disable persistence.
+		RegistryPath: "/data/manager-apps.json",
 	}
 	srv := manager.New(mgrCfg, log, l, verifier)
 

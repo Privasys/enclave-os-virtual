@@ -116,6 +116,13 @@ type Config struct {
 	// session-relay middleware (which is mounted on this server) apply
 	// uniformly to platform and container traffic — see docs/ra-tls.md.
 	PlatformHostname string
+
+	// RegistryPath is the on-disk JSON file persisting every successful
+	// container Load so the manager can replay them on restart.
+	// MUST live on the per-VM LUKS-encrypted /data volume — entries
+	// contain runtime secrets (StorageKey, VaultToken). Empty disables
+	// persistence (dev/test only).
+	RegistryPath string
 }
 
 // Server is the management API server.
@@ -125,6 +132,9 @@ type Server struct {
 	launcher     *launcher.Launcher
 	verifier     *auth.Verifier
 	server       *http.Server
+	// registry persists every successful Load so the manager can replay
+	// them on restart. nil when Config.RegistryPath is empty.
+	registry     *registry
 	// sessionRelay handles browser→enclave sealed-CBOR sessions: it owns
 	// POST /__privasys/session-bootstrap and transparently unwraps any
 	// request whose Content-Type is application/privasys-sealed+cbor
@@ -152,6 +162,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		log:          log.Named("manager"),
 		launcher:     l,
 		verifier:     v,
+		registry:     newRegistry(cfg.RegistryPath),
 		sessionRelay: sessionrelay.NewManager(),
 	}
 	s.appProxy = &httputil.ReverseProxy{
@@ -217,6 +228,14 @@ func hostOnly(h string) string {
 // Start starts the management API server. It blocks until the context is
 // cancelled, then gracefully shuts down.
 func (s *Server) Start(ctx context.Context) error {
+	// Replay persisted apps before opening the listener so they begin
+	// pulling/starting immediately. Each Load is async (the launcher
+	// returns once the container record is registered as "pulling"),
+	// so this loop is fast even for large images.
+	if err := s.replayRegistry(ctx); err != nil {
+		s.log.Warn("registry replay failed", zap.Error(err))
+	}
+
 	mux := http.NewServeMux()
 
 	// Liveness probe — always unauthenticated (used by infra health checks).
@@ -502,6 +521,13 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 			)
 			return
 		}
+		// Persist for replay-on-restart only after a successful Load.
+		if err := s.registry.Save(req); err != nil {
+			s.log.Warn("registry save failed (container is running but won't auto-restart)",
+				zap.String("name", req.Name),
+				zap.Error(err),
+			)
+		}
 		containersLoaded.Set(float64(s.launcher.ContainerCount()))
 	}()
 
@@ -563,6 +589,13 @@ func (s *Server) handleUnloadContainer(w http.ResponseWriter, r *http.Request) {
 		)
 		s.jsonError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	if err := s.registry.Remove(name); err != nil {
+		s.log.Warn("registry remove failed (container is gone but stale entry remains)",
+			zap.String("name", name),
+			zap.Error(err),
+		)
 	}
 
 	containersLoaded.Set(float64(s.launcher.ContainerCount()))
@@ -762,4 +795,45 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+// replayRegistry re-issues launcher.Load for every entry persisted in
+// the registry. This runs once at Server.Start before the HTTP listener
+// opens so apps begin pulling/starting immediately on a manager
+// restart, without waiting for the management-service reconciler to
+// notice. Each Load is invoked in its own goroutine so a single slow
+// pull does not block startup. Errors are logged but never propagated:
+// the manager must come up even if some apps fail to relaunch (the
+// reconciler will catch up).
+func (s *Server) replayRegistry(ctx context.Context) error {
+	if s.registry == nil {
+		return nil
+	}
+	entries, err := s.registry.List()
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	s.log.Info("replaying persisted apps",
+		zap.Int("count", len(entries)),
+		zap.String("path", s.cfg.RegistryPath),
+	)
+	for _, e := range entries {
+		req := e
+		go func() {
+			s.log.Info("replaying load",
+				zap.String("name", req.Name),
+				zap.String("image", req.Image),
+			)
+			if _, err := s.launcher.Load(context.Background(), req); err != nil {
+				s.log.Warn("replay load failed",
+					zap.String("name", req.Name),
+					zap.Error(err),
+				)
+			}
+		}()
+	}
+	return nil
 }
