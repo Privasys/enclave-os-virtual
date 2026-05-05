@@ -27,11 +27,20 @@ Restart=on-failure
 RestartSec=5
 
 # Security hardening.
+#
+# NOTE: PrivateTmp / ProtectHome / ProtectKernelTunables / ProtectKernel-
+# Modules are intentionally NOT set. Each of those options forces systemd
+# to give the unit its own mount namespace whose root propagation is
+# `slave` from the host — which means the per-container LUKS mounts the
+# manager creates under /run/containers/<name> would never propagate to
+# containerd's namespace, and containerd's bind-mount of that path into
+# the workload container would see an empty tmpfs directory instead of
+# the encrypted volume. MountFlags=shared on its own is not enough
+# because systemd applies the slave propagation BEFORE honouring it.
+# We therefore stay in the host mount namespace and rely on
+# NoNewPrivileges + the manager's own RA-TLS auth surface for hardening.
 NoNewPrivileges=yes
-ProtectHome=yes
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
+MountFlags=shared
 
 # Logging.
 StandardOutput=journal

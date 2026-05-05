@@ -15,6 +15,30 @@ set -euo pipefail
 PART="/dev/disk/by-partlabel/containers"
 VG="containers"
 
+# ── 0. Provision a writable LVM_SYSTEM_DIR on tmpfs ───────────────────────
+# The root filesystem is read-only erofs in production, so LVM cannot write
+# its archive/backup under /etc/lvm. We mirror /etc/lvm onto /run/lvm-conf
+# and override backup_dir/archive_dir to point at /run/lvm/{backup,archive}.
+# The manager's volume package sets LVM_SYSTEM_DIR=/run/lvm-conf for every
+# LVM invocation; we set it here too so this script's own LVM commands work.
+export LVM_SYSTEM_DIR=/run/lvm-conf
+mkdir -p /run/lvm-conf /run/lvm/archive /run/lvm/backup
+if [ -f /etc/lvm/lvm.conf ]; then
+    cp /etc/lvm/lvm.conf /run/lvm-conf/lvm.conf
+fi
+if [ -d /etc/lvm/profile ]; then
+    cp -r /etc/lvm/profile /run/lvm-conf/profile
+fi
+cat > /run/lvm-conf/lvmlocal.conf <<'EOF'
+backup {
+    backup_dir = "/run/lvm/backup"
+    archive_dir = "/run/lvm/archive"
+}
+EOF
+
+# ── 0.5 Mount point for per-container volumes ─────────────────────────────
+mkdir -p /run/containers
+
 # ── 1. Partition check ───────────────────────────────────────────────────
 
 if [ ! -b "$PART" ]; then

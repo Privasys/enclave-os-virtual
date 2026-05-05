@@ -7,7 +7,10 @@ Before=manager.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/container-volumes-setup
+# Invoke explicitly via /bin/bash so we don't depend on the executable bit
+# of the script (some image-build paths drop the +x bit on /usr/bin scripts
+# placed in mkosi.extra; this guards against that regression).
+ExecStart=/bin/bash /usr/bin/container-volumes-setup
 
 [Install]
 WantedBy=multi-user.target

@@ -325,6 +325,11 @@ type Launcher struct {
 	// Runtime state.
 	pulledImages map[string]client.Image
 
+	// readyCh is closed by Run() once containerd is connected and l.mgr
+	// is non-nil. Other components (notably the management API replay
+	// path) call WaitReady() to avoid racing into Load() with a nil mgr.
+	readyCh chan struct{}
+
 	mu sync.RWMutex
 }
 
@@ -340,6 +345,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		volumeEncryption:  make(map[string]string),
 		envMeta:           make(map[string]map[string]EnvVarMeta),
 		attestationTokens: make(map[string]string),
+		readyCh:           make(chan struct{}),
 	}
 
 	// Compute attestation servers hash (sorted, newline-joined, SHA-256)
@@ -405,6 +411,11 @@ func (l *Launcher) Run(ctx context.Context) error {
 	l.log.Info("containerd connected",
 		zap.String("version_hash", hex.EncodeToString(l.containerdHash)),
 	)
+
+	// Signal that l.mgr (and l.containerdHash) are now safe to read.
+	// The management API's replay-from-registry path waits on this so it
+	// doesn't dereference a nil l.mgr inside Load().
+	close(l.readyCh)
 
 	// 1b. Read DEK origin if the LUKS setup service wrote one.
 	if l.cfg.DEKOriginFile != "" {
@@ -475,6 +486,17 @@ func (l *Launcher) Run(ctx context.Context) error {
 
 	// 4. Wait for shutdown signal.
 	return l.waitForShutdown(ctx)
+}
+
+// WaitReady blocks until Run() has connected to containerd and l.mgr is
+// safe to use, or until ctx is done. Returns ctx.Err() if cancelled.
+func (l *Launcher) WaitReady(ctx context.Context) error {
+	select {
+	case <-l.readyCh:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // ContainerCount returns the number of running containers.

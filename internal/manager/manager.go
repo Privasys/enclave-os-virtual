@@ -823,6 +823,20 @@ func (s *Server) replayRegistry(ctx context.Context) error {
 	for _, e := range entries {
 		req := e
 		go func() {
+			// Wait until launcher.Run() has connected to containerd —
+			// otherwise launcher.Load() panics dereferencing a nil
+			// l.mgr. Server.Start runs in parallel with launcher.Run,
+			// so on a fresh start we typically wait a few hundred
+			// milliseconds here.
+			waitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := s.launcher.WaitReady(waitCtx); err != nil {
+				s.log.Warn("replay aborted: launcher not ready",
+					zap.String("name", req.Name),
+					zap.Error(err),
+				)
+				return
+			}
 			s.log.Info("replaying load",
 				zap.String("name", req.Name),
 				zap.String("image", req.Image),
