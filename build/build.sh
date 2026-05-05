@@ -69,10 +69,16 @@ fi
 # Both base and GPU variants use the BadAML-patched kernel.
 # The patch does NOT change the kernel ABI, so Ubuntu-signed NVIDIA
 # modules load correctly with module.sig_enforce=1.
+#
+# CVM_KERNEL_TAG must match the cvm-images kernel-v* GitHub release
+# whose ABI we want to ship. The matching nvidia-cc-v* bundle (Step 0.4)
+# is also keyed by this tag, so a kernel bump and the patched-NVIDIA
+# module bump are atomic.
+CVM_KERNEL_TAG="${CVM_KERNEL_TAG:-kernel-v0.3.0}"
 KERNEL_DEBS_DIR="$SCRIPT_DIR/kernel/debs"
 if ! ls "$KERNEL_DEBS_DIR"/linux-image-*.deb 1>/dev/null 2>&1; then
     echo ""
-    echo "=== Step 0: Downloading patched kernel .debs from cvm-images ==="
+    echo "=== Step 0: Downloading patched kernel .debs from cvm-images $CVM_KERNEL_TAG ==="
     mkdir -p "$KERNEL_DEBS_DIR"
     if ! command -v gh >/dev/null 2>&1; then
         echo "ERROR: GitHub CLI (gh) is required to download kernel .debs."
@@ -80,7 +86,7 @@ if ! ls "$KERNEL_DEBS_DIR"/linux-image-*.deb 1>/dev/null 2>&1; then
         echo "Or build the kernel manually in cvm-images and copy the .debs to $KERNEL_DEBS_DIR"
         exit 1
     fi
-    gh release download --repo Privasys/cvm-images --tag kernel-v0.1.0 \
+    gh release download --repo Privasys/cvm-images --tag "$CVM_KERNEL_TAG" \
         --pattern '*.deb' --dir "$KERNEL_DEBS_DIR"
     echo "Downloaded kernel .debs:"
     ls "$KERNEL_DEBS_DIR"/*.deb
@@ -88,6 +94,69 @@ else
     echo ""
     echo "=== Step 0: Patched kernel .debs already present, skipping ==="
     ls "$KERNEL_DEBS_DIR"/*.deb
+fi
+
+# Step 0.4: Fetch matching nvidia-cc bundle (TDX CC patched NVIDIA modules).
+# Built by cvm-images .github/workflows/build-nvidia-modules.yml against
+# the SAME kernel-v* tag we just downloaded above (that workflow is
+# triggered automatically by every kernel-v* tag for lock-step ABI).
+# Bundle is unpacked into the GPU image's mkosi.extra tree at
+# /usr/lib/nvidia-cc/<KVER>/{modules,firmware}/, so the patched modules
+# are part of the verity-measured rootfs and there is no /data
+# dependency at runtime.
+if [ "$GPU_VARIANT" = true ]; then
+    KVER=$(ls -1 "$KERNEL_DEBS_DIR"/linux-image-unsigned-*.deb 2>/dev/null \
+        | sed -E 's|.*/linux-image-unsigned-(.*)_[^_]+_amd64\.deb|\1|' | head -1)
+    if [ -z "$KVER" ]; then
+        echo "ERROR: could not infer KVER from $KERNEL_DEBS_DIR"
+        exit 1
+    fi
+    NVCC_DEST="$IMAGE_DIR/mkosi.extra/usr/lib/nvidia-cc/$KVER"
+    if [ ! -f "$NVCC_DEST/modules/nvidia.ko" ]; then
+        echo ""
+        echo "=== Step 0.4: Fetching nvidia-cc bundle for kernel $KVER ==="
+        # Resolve the matching nvidia-cc-v* tag. Convention:
+        # nvidia-cc-v<NV_VER>-<KERNEL_TAG-without-prefix> e.g.
+        # nvidia-cc-v595.58.03-0.2.1. Fall back to latest if the strict
+        # match is missing.
+        NVCC_TAG="${CVM_NVIDIA_CC_TAG:-}"
+        if [ -z "$NVCC_TAG" ]; then
+            KVER_SUFFIX="${CVM_KERNEL_TAG#kernel-v}"
+            CANDIDATE=$(gh release list --repo Privasys/cvm-images \
+                --json tagName -q '.[].tagName' \
+                | grep "^nvidia-cc-v.*-${KVER_SUFFIX}\$" | head -1 || true)
+            if [ -n "$CANDIDATE" ]; then
+                NVCC_TAG="$CANDIDATE"
+            else
+                NVCC_TAG=$(gh release list --repo Privasys/cvm-images \
+                    --json tagName -q '.[].tagName' \
+                    | grep '^nvidia-cc-v' | head -1)
+            fi
+        fi
+        if [ -z "$NVCC_TAG" ]; then
+            echo "ERROR: no nvidia-cc-v* release found in Privasys/cvm-images"
+            exit 1
+        fi
+        echo "Using nvidia-cc release: $NVCC_TAG"
+        TMP=$(mktemp -d)
+        gh release download --repo Privasys/cvm-images --tag "$NVCC_TAG" \
+            --pattern 'nvidia-cc-bundle*.tar.gz' --dir "$TMP"
+        BUNDLE=$(ls "$TMP"/nvidia-cc-bundle*.tar.gz | head -1)
+        mkdir -p "$NVCC_DEST"
+        tar -xzf "$BUNDLE" -C "$TMP"
+        # Bundle layout: nvidia-cc-bundle/{modules,firmware,BUILD-INFO}
+        SRC=$(dirname "$(find "$TMP" -type f -name 'nvidia.ko' | head -1)")
+        SRC=$(dirname "$SRC")
+        cp -a "$SRC/modules" "$NVCC_DEST/"
+        cp -a "$SRC/firmware" "$NVCC_DEST/"
+        [ -f "$SRC/BUILD-INFO" ] && cp "$SRC/BUILD-INFO" "$NVCC_DEST/"
+        rm -rf "$TMP"
+        echo "nvidia-cc bundle staged at $NVCC_DEST"
+        ls -lh "$NVCC_DEST/modules/"
+    else
+        echo ""
+        echo "=== Step 0.4: nvidia-cc bundle already staged for $KVER, skipping ==="
+    fi
 fi
 
 # Step 0.5: Fetch cvm-images.
