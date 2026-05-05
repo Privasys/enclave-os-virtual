@@ -199,6 +199,19 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
     "$REPO_ROOT/cmd/manager/"
 echo "Binary built: $EXTRA_DIR/usr/bin/manager"
 
+# Step 1b: Build the manager-bootstrap binary (Type=oneshot helper that
+# fetches the CA bundle from the management-service on first boot and
+# writes /data/ca.crt + /data/ca.key). Built with stock Go because it
+# does not import RA-TLS / tls.ClientHelloInfo.RATLSChallenge.
+echo ""
+echo "=== Step 1b: Building manager-bootstrap binary ==="
+mkdir -p "$EXTRA_DIR/usr/sbin"
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+    -ldflags="-s -w" \
+    -o "$EXTRA_DIR/usr/sbin/manager-bootstrap" \
+    "$REPO_ROOT/cmd/manager-bootstrap/"
+echo "Binary built: $EXTRA_DIR/usr/sbin/manager-bootstrap"
+
 # Step 2: Build the Caddy binary with RA-TLS module.
 echo ""
 echo "=== Step 2: Building Caddy with RA-TLS module ==="

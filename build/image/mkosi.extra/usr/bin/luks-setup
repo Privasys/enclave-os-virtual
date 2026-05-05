@@ -91,54 +91,21 @@ esac
 #
 # luks-data.service is ordered After=network-online.target, but DNS and
 # metadata DHCP options can still take a few hundred ms to settle after
-# networkd reports online. Retry a small number of times before giving up.
+# networkd reports online. The shared provisioning-secret.sh library
+# probes systemd-creds first (bare-metal QEMU / OVH) then GCP, AWS,
+# Azure metadata.
 
-fetch_passphrase() {
-    local pp=""
-
-    # GCP — DNS hostname, never the link-local IP.
-    pp=$(curl -sf --connect-timeout 2 --max-time 5 \
-        -H "Metadata-Flavor: Google" \
-        "http://metadata.google.internal/computeMetadata/v1/instance/attributes/luks-passphrase" \
-        2>/dev/null || true)
-    if [ -n "$pp" ]; then printf '%s' "$pp"; return 0; fi
-
-    # AWS (IMDSv2)
-    local token
-    token=$(curl -sf --connect-timeout 2 --max-time 5 -X PUT \
-        -H "X-aws-ec2-metadata-token-ttl-seconds: 30" \
-        "http://169.254.169.254/latest/api/token" 2>/dev/null || true)
-    if [ -n "$token" ]; then
-        pp=$(curl -sf --connect-timeout 2 --max-time 5 \
-            -H "X-aws-ec2-metadata-token: $token" \
-            "http://169.254.169.254/latest/meta-data/tags/instance/luks-passphrase" \
-            2>/dev/null || true)
-        if [ -n "$pp" ]; then printf '%s' "$pp"; return 0; fi
-    fi
-
-    # Azure
-    pp=$(curl -sf --connect-timeout 2 --max-time 5 -H "Metadata: true" \
-        "http://169.254.169.254/metadata/instance/compute/tagsList?api-version=2021-02-01" \
-        2>/dev/null | jq -r '.[] | select(.name=="luks-passphrase") | .value' 2>/dev/null || true)
-    if [ -n "$pp" ]; then printf '%s' "$pp"; return 0; fi
-
-    return 1
-}
+# shellcheck disable=SC1091
+source /usr/lib/enclave-os/provisioning-secret.sh
 
 PASSPHRASE=""
-for attempt in 1 2 3 4 5; do
-    if PASSPHRASE=$(fetch_passphrase); then
-        break
-    fi
-    if [ "$attempt" -lt 5 ]; then
-        echo "luks-setup: metadata not yet reachable (attempt $attempt/5), retrying"
-        sleep 2
-    fi
-done
+if PASSPHRASE=$(read_provisioning_secret_retry luks-passphrase 5 2); then
+    :
+fi
 
 if [ -z "$PASSPHRASE" ]; then
-    echo "luks-setup: ERROR — no LUKS passphrase found in instance metadata" >&2
-    echo "luks-setup: set 'luks-passphrase' on the instance and retry" >&2
+    echo "luks-setup: ERROR — no LUKS passphrase found via systemd-creds or cloud metadata" >&2
+    echo "luks-setup: set 'luks-passphrase' (systemd credential or instance metadata) and retry" >&2
     exit 1
 fi
 
