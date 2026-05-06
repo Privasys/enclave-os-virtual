@@ -1,0 +1,88 @@
+#!/bin/bash
+# preemption-watcher
+#
+# GCE Spot VM preemption handler.
+#
+# GCE delivers a preemption notice to the metadata server at:
+#
+#   http://metadata.google.internal/computeMetadata/v1/instance/preempted
+#
+# The endpoint supports the long-poll convention (?wait_for_change=true)
+# so a single hanging GET blocks until the value changes from FALSE to
+# TRUE. When the value flips, GCE has already begun the ~30 s shutdown
+# grace window, after which the VM is forcibly terminated.
+#
+# On preemption we:
+#
+#   1. Log a clearly-marked event to the journal so post-mortem is easy.
+#   2. Stop manager.service via systemd. Manager's SIGTERM handler
+#      drains running containers (StopAll -> SIGTERM with up to 30 s
+#      grace per container, see container.go), giving in-flight vLLM
+#      completions a chance to flush before the kernel disappears.
+#   3. Touch /data/last-preemption (timestamp + reason) so the next
+#      boot can surface the event in the manager event log.
+#
+# The watcher itself is intentionally TINY and dependency-free
+# (curl + bash). It runs on every boot, blocks on the metadata long-poll,
+# and only exits if preemption actually fires. systemd restarts it on
+# any other exit so a transient metadata-server hiccup self-heals.
+#
+# This is best-effort: nothing GUARANTEES we get the full 30 s. If the
+# watcher misses the notice (e.g. metadata-server hiccup) the VM is
+# still terminated cleanly because /data is on a separate PD that
+# survives across boots.
+
+set -uo pipefail
+
+LOG_TAG="preemption-watcher"
+META_URL="http://metadata.google.internal/computeMetadata/v1/instance/preempted"
+DATA_DIR="${DATA_DIR:-/data}"
+PREEMPT_FLAG="${DATA_DIR}/last-preemption"
+
+logger -t "$LOG_TAG" -p daemon.info "watcher started; long-polling $META_URL"
+
+# Hanging GET. ?wait_for_change=true returns immediately the FIRST time
+# (with current value) and then blocks on subsequent calls until the
+# value changes. We drop the immediate response and re-call to enter
+# the actual blocking wait.
+initial=$(curl --silent --fail --max-time 30 \
+    -H "Metadata-Flavor: Google" \
+    "$META_URL" 2>/dev/null || echo "FALSE")
+logger -t "$LOG_TAG" -p daemon.info "initial state: ${initial}"
+
+if [[ "$initial" == "TRUE" ]]; then
+    # Already preempted at boot? Skip wait, fall through to handler.
+    state="TRUE"
+else
+    state=$(curl --silent --fail \
+        --max-time 86400 \
+        -H "Metadata-Flavor: Google" \
+        "${META_URL}?wait_for_change=true&last_etag=" 2>/dev/null || true)
+fi
+
+if [[ "$state" != "TRUE" ]]; then
+    logger -t "$LOG_TAG" -p daemon.warning "long-poll returned non-TRUE state ${state}; exiting (systemd will restart)"
+    exit 1
+fi
+
+ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+logger -t "$LOG_TAG" -p daemon.alert "GCE PREEMPTION NOTICE received at ${ts}; draining"
+
+# Persist the event for the next boot to pick up. /data may be on the
+# crypt mount; the directory exists by the time multi-user.target is
+# reached (luks-data.service is ordered Before=multi-user.target).
+if mountpoint -q "$DATA_DIR" 2>/dev/null; then
+    printf 'preempted_at=%s\nreason=gce_spot\n' "$ts" >"$PREEMPT_FLAG" 2>/dev/null || true
+fi
+
+# Stop the manager. Manager's StopAll sends SIGTERM to each container
+# task and waits up to 30 s before SIGKILL. Run in background so we
+# stay alive long enough to see the systemctl exit; the kernel will
+# tear us down with everything else when GCE terminates the VM.
+logger -t "$LOG_TAG" -p daemon.alert "stopping manager.service"
+systemctl stop manager.service &
+
+# Give the drain a chance, then exit cleanly.
+wait
+logger -t "$LOG_TAG" -p daemon.alert "manager.service stopped; awaiting VM termination"
+exit 0

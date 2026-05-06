@@ -1,0 +1,21 @@
+[Unit]
+Description=GCE Spot VM preemption watcher (drains manager on notice)
+# Run only on GCE; metadata.google.internal must resolve.
+After=network-online.target manager.service
+Wants=network-online.target
+# We are a passive observer; never block boot.
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/enclave-os/preemption-watcher
+# The watcher long-polls and exits on preemption (or on metadata
+# error). Restart so a transient hiccup re-arms the watch.
+Restart=always
+RestartSec=5
+# Allow up to 60 s for the drain to complete after preemption fires.
+TimeoutStopSec=60
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

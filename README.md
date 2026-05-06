@@ -86,6 +86,12 @@ properties:
 - **Boot disk partitions**: ESP (512 MB), root + verity hash, data placeholder (1 MB stub, since v0.4.0), containers (LVM, remaining disk)
 - **Data**: dedicated cloud PD attached as `device-name=data` (since v0.4.0). LUKS2 with `aes-xts-plain64` + `--integrity hmac-sha256` (per-4 K-sector dm-integrity tags). Surfaces in the VM as `/dev/disk/by-id/google-data` (GCE) and is unlocked to `/dev/mapper/data-crypt`. Survives image upgrades and Spot preemption. luks-setup falls back to the `partlabel=data` placeholder for not-yet-migrated VMs.
 - **Kernel**: Ubuntu HWE Linux 6.17 series with CVM guard patch (BadAML mitigation)
+- **Spot preemption drain**: `preemption-watcher.service` long-polls
+  `/computeMetadata/v1/instance/preempted` and, on the GCE preemption
+  notice, invokes `systemctl stop manager.service` so containers receive
+  SIGTERM (with up to 30 s drain per container) before the VM is
+  terminated. The event is recorded at `/data/last-preemption` for the
+  next boot to surface.
 
 The GPU variant adds:
 

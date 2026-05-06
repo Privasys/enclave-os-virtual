@@ -10,6 +10,7 @@ for f in \
   multi-user.target.wants/systemd-networkd.service \
   multi-user.target.wants/containerd.service \
   multi-user.target.wants/manager.service \
+  multi-user.target.wants/preemption-watcher.service \
   sockets.target.wants/systemd-networkd.socket \
   sysinit.target.wants/systemd-networkd-wait-online.service; do
   if [ -f "$f" ] && [ ! -L "$f" ]; then

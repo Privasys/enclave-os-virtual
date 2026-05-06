@@ -274,7 +274,8 @@ for f in local-fs.target.wants/home.mount \
          multi-user.target.wants/containerd.service \
          multi-user.target.wants/manager.service \
          multi-user.target.wants/caddy.service \
-         multi-user.target.wants/container-volumes.service; do
+         multi-user.target.wants/container-volumes.service \
+         multi-user.target.wants/preemption-watcher.service; do
     if [ -f "$f" ] && [ ! -L "$f" ]; then
         target=$(cat "$f" | tr -d '\r\n')
         rm "$f"
