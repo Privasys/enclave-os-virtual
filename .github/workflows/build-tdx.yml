@@ -68,6 +68,15 @@ jobs:
             -o build/image/mkosi.extra/usr/bin/manager \
             ./cmd/manager/
 
+      - name: Build manager-bootstrap binary (Phase B first-boot helper)
+        run: |
+          mkdir -p build/image/mkosi.extra/usr/sbin
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+            -ldflags="-s -w" \
+            -o build/image/mkosi.extra/usr/sbin/manager-bootstrap \
+            ./cmd/manager-bootstrap/
+          ls -lh build/image/mkosi.extra/usr/sbin/manager-bootstrap
+
       - name: Build Caddy with RA-TLS module
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
