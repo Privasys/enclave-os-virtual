@@ -33,6 +33,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Restore Go build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-tdx-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum', 'caddy/ratls/go.mod', 'caddy/ratls/go.sum') }}
+          restore-keys: |
+            go-tdx-${{ runner.os }}-
+
+      - name: Restore mkosi build cache
+        uses: actions/cache@v4
+        with:
+          path: build/image/mkosi.cache
+          key: mkosi-tdx-${{ runner.os }}-${{ hashFiles('build/image/mkosi.conf', 'build/image/mkosi.profiles/**') }}
+          restore-keys: |
+            mkosi-tdx-${{ runner.os }}-
       - name: Install Privasys Go fork
         run: |
           # The RA-TLS challenge-response feature requires the Privasys Go fork
@@ -162,7 +179,8 @@ jobs:
         run: |
           chmod +x build/image/mkosi.extra/usr/bin/luks-setup
           cd build/image
-          sudo mkosi --profile gcp build
+          mkdir -p mkosi.cache
+          sudo mkosi --profile gcp --cache-dir mkosi.cache build
 
       - name: Replace unsigned GRUB with Canonical-signed binary
         run: |

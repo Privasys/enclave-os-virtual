@@ -44,6 +44,26 @@ jobs:
           sudo apt-get clean
           df -h /
 
+      - name: Restore Go build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-tdx-gpu-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum', 'caddy/ratls/go.mod', 'caddy/ratls/go.sum') }}
+          restore-keys: |
+            go-tdx-gpu-${{ runner.os }}-
+
+      - name: Restore mkosi build cache
+        uses: actions/cache@v4
+        with:
+          # apt + downloaded .debs cached between builds. Keyed on mkosi
+          # configuration + APT pin files; invalidated when those change.
+          path: build/image-gpu/mkosi.cache
+          key: mkosi-tdx-gpu-${{ runner.os }}-${{ hashFiles('build/image-gpu/mkosi.conf', 'build/image-gpu/mkosi.profiles/**', 'build/image-gpu/mkosi.pkgmanager/**', 'build/image/mkosi.conf') }}
+          restore-keys: |
+            mkosi-tdx-gpu-${{ runner.os }}-
+
       - name: Install Privasys Go fork
         run: |
           curl -sL https://github.com/Privasys/go/releases/download/privasys-v0.2.0-go1.25.8/go-ratls-privasys-v0.2.0-go1.25.8-linux-amd64.tar.gz -o /tmp/go-ratls.tar.gz
@@ -175,7 +195,11 @@ jobs:
         run: |
           chmod +x build/image/mkosi.extra/usr/bin/luks-setup
           cd build/image-gpu
-          sudo mkosi --profile gcp build
+          mkdir -p mkosi.cache
+          # --cache-dir keeps the apt cache + downloaded .debs between
+          # CI runs (restored above via actions/cache); typical saving
+          # 4-8 min per build on the apt-get install step.
+          sudo mkosi --profile gcp --cache-dir mkosi.cache build
 
       - name: Replace unsigned GRUB with Canonical-signed binary
         run: |
