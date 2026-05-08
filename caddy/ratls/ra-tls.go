@@ -640,15 +640,44 @@ func (iss *RATLSIssuer) GetCertificate(ctx context.Context, hello *tls.ClientHel
 	}
 	crExtraExts = append(crExtraExts, hostExts...)
 
+	// Resolve the cert name. Empty ServerName means the client did not
+	// send SNI, and an IP literal in ServerName must go in IPAddresses
+	// rather than DNSNames (otherwise Go's TLS stack rejects the cert as
+	// having "no names" matching the connection peer). Mirror the SNI
+	// handling from issueDeterministic so challenge-response handshakes
+	// against an IP SNI succeed.
+	certCN := hello.ServerName
+	var dnsNames []string
+	var ipSANs []net.IP
+	if certCN != "" {
+		if ip := net.ParseIP(certCN); ip != nil {
+			ipSANs = append(ipSANs, ip)
+		} else {
+			dnsNames = []string{certCN}
+		}
+	}
+	if hello.Conn != nil {
+		if local, ok := hello.Conn.LocalAddr().(*net.TCPAddr); ok && local.IP != nil {
+			ipSANs = append(ipSANs, local.IP)
+			if certCN == "" {
+				certCN = local.IP.String()
+			}
+		}
+	}
+	if certCN == "" {
+		certCN = "enclave-default"
+	}
+
 	now := time.Now().UTC()
 	template := &x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
-			CommonName: hello.ServerName,
+			CommonName: certCN,
 		},
-		DNSNames:  []string{hello.ServerName},
-		NotBefore: now,
-		NotAfter:  now.Add(5 * time.Minute),
+		DNSNames:    dnsNames,
+		IPAddresses: ipSANs,
+		NotBefore:   now,
+		NotAfter:    now.Add(5 * time.Minute),
 
 		KeyUsage: x509.KeyUsageDigitalSignature,
 		ExtKeyUsage: []x509.ExtKeyUsage{
