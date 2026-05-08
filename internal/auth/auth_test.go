@@ -26,7 +26,7 @@ func TestNewVerifier_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewVerifier: %v", err)
 	}
-	if v.oidc.RoleClaim != "urn:zitadel:iam:org:project:roles" {
+	if v.oidc.RoleClaim != "roles" {
 		t.Fatalf("expected default role claim, got %s", v.oidc.RoleClaim)
 	}
 	if v.oidc.ManagerRole != "privasys-platform:manager" {
@@ -145,18 +145,18 @@ func TestHasMonitoringAccess(t *testing.T) {
 	}
 }
 
-func TestCheckRole_ZitadelMap(t *testing.T) {
+func TestCheckRole_ConfiguredMap(t *testing.T) {
 	claims := map[string]interface{}{
-		"urn:zitadel:iam:org:project:roles": map[string]interface{}{
+		"app_roles": map[string]interface{}{
 			"privasys-platform:manager": map[string]interface{}{
 				"orgId": "123",
 			},
 		},
 	}
-	if !checkRole(claims, "privasys-platform:manager", "urn:zitadel:iam:org:project:roles") {
-		t.Fatal("expected Zitadel map role to match")
+	if !checkRole(claims, "privasys-platform:manager", "app_roles") {
+		t.Fatal("expected configured map role to match")
 	}
-	if checkRole(claims, "privasys-platform:monitoring", "urn:zitadel:iam:org:project:roles") {
+	if checkRole(claims, "privasys-platform:monitoring", "app_roles") {
 		t.Fatal("expected monitoring role not to match")
 	}
 }
@@ -165,10 +165,10 @@ func TestCheckRole_StandardArray(t *testing.T) {
 	claims := map[string]interface{}{
 		"roles": []interface{}{"privasys-platform:monitoring", "user"},
 	}
-	if !checkRole(claims, "privasys-platform:monitoring", "urn:zitadel:iam:org:project:roles") {
+	if !checkRole(claims, "privasys-platform:monitoring", "roles") {
 		t.Fatal("expected standard roles array to match")
 	}
-	if checkRole(claims, "privasys-platform:manager", "urn:zitadel:iam:org:project:roles") {
+	if checkRole(claims, "privasys-platform:manager", "roles") {
 		t.Fatal("expected manager role not in standard roles")
 	}
 }
@@ -179,7 +179,7 @@ func TestCheckRole_KeycloakRealmAccess(t *testing.T) {
 			"roles": []interface{}{"privasys-platform:manager"},
 		},
 	}
-	if !checkRole(claims, "privasys-platform:manager", "urn:zitadel:iam:org:project:roles") {
+	if !checkRole(claims, "privasys-platform:manager", "roles") {
 		t.Fatal("expected Keycloak realm_access role to match")
 	}
 }

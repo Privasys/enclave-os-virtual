@@ -31,7 +31,6 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/manager"
-	"github.com/Privasys/enclave-os-virtual/internal/oidcbootstrap"
 	"github.com/Privasys/enclave-os-virtual/internal/runtimestatus"
 )
 
@@ -117,7 +116,7 @@ func runServe(args []string) error {
 		"OIDC role required for mutating operations (load/unload)")
 	oidcMonitoringRole := fs.String("oidc-monitoring-role", "privasys-platform:monitoring",
 		"OIDC role for read-only access (healthz, readyz, status, metrics)")
-	oidcRoleClaim := fs.String("oidc-role-claim", "urn:zitadel:iam:org:project:roles",
+	oidcRoleClaim := fs.String("oidc-role-claim", "roles",
 		"JWT claim key containing roles (supports map or array formats)")
 
 	// Caddy / RA-TLS flags.
@@ -135,14 +134,6 @@ func runServe(args []string) error {
 	// LUKS / data encryption.
 	dekOriginFile := fs.String("dek-origin-file", "/run/luks/dek-origin",
 		"Path to the DEK origin file (\"external\" or \"enclave-generated\", written by luks-setup)")
-
-	// OIDC bootstrap flags (optional - enables self-provisioning of attestation server tokens).
-	managerToken := fs.String("manager-token", "",
-		"Management API bearer token for OIDC bootstrap (triggers automatic attestation server token provisioning)")
-	oidcServiceAccountID := fs.String("oidc-service-account-id", "",
-		"Zitadel service account user ID for jwt-bearer bootstrap (required with --manager-token)")
-	oidcProjectID := fs.String("oidc-project-id", "",
-		"Zitadel project ID for audience-scoped tokens (optional)")
 
 	logLevel := fs.String("log-level", "info",
 		"Log level (debug, info, warn, error)")
@@ -177,14 +168,6 @@ func runServe(args []string) error {
 	}
 	if *hostname == "" {
 		return fmt.Errorf("--hostname is required")
-	}
-	if *managerToken != "" {
-		if *oidcServiceAccountID == "" {
-			return fmt.Errorf("--oidc-service-account-id is required when --manager-token is set")
-		}
-		if len(attestationServers) == 0 {
-			return fmt.Errorf("--attestation-servers is required when --manager-token is set")
-		}
 	}
 
 	// Set up structured logger.
@@ -245,40 +228,6 @@ func runServe(args []string) error {
 	}
 	l := launcher.New(launcherCfg, log)
 
-	// OIDC bootstrap: self-provision attestation server tokens.
-	var bootstrapMgr *oidcbootstrap.Manager
-	if *managerToken != "" {
-		bootstrapMgr = oidcbootstrap.NewManager(log)
-		bootstrapCfg := oidcbootstrap.Config{
-			Issuer:           *oidcIssuer,
-			ServiceAccountID: *oidcServiceAccountID,
-			ProjectID:        *oidcProjectID,
-		}
-
-		for _, serverURL := range attestationServers {
-			if err := bootstrapMgr.Bootstrap(serverURL, bootstrapCfg, *managerToken); err != nil {
-				return fmt.Errorf("OIDC bootstrap for %s: %w", serverURL, err)
-			}
-		}
-
-		// Feed bootstrapped tokens to the launcher.
-		servers := make([]launcher.AttestationServer, len(attestationServers))
-		for i, u := range attestationServers {
-			servers[i] = launcher.AttestationServer{
-				URL:   u,
-				Token: bootstrapMgr.Token(u),
-			}
-		}
-		l.SetAttestationServers(servers)
-
-		// Set the bootstrap manager as the dynamic token source so the
-		// launcher always gets the latest refreshed tokens.
-		l.SetTokenSource(bootstrapMgr)
-
-		// Start the background token refresh loop.
-		bootstrapMgr.StartRefreshLoop()
-	}
-
 	// Configure management API server (plain HTTP, localhost only).
 	mgrCfg := manager.Config{
 		Addr:             "localhost:9443",
@@ -324,15 +273,9 @@ func runServe(args []string) error {
 
 	if err := g.Wait(); err != nil {
 		log.Error("shutdown with error", zap.Error(err))
-		if bootstrapMgr != nil {
-			bootstrapMgr.Stop()
-		}
 		return err
 	}
 
-	if bootstrapMgr != nil {
-		bootstrapMgr.Stop()
-	}
 	log.Info("shutdown complete")
 	return nil
 }

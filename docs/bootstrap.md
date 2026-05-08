@@ -35,7 +35,7 @@ Manager access implies monitoring access.
 The manager checks for roles in three claim locations (to support different
 providers):
 
-1. **Role-claim map**: `urn:zitadel:iam:org:project:roles` (default) — a
+1. **Role-claim map**: `roles` (default) — a
    map where the role name is a key.
 2. **Standard**: `roles` — a flat string array.
 3. **Keycloak**: `realm_access.roles` — a nested string array.
@@ -68,7 +68,7 @@ problem — the enclave can verify tokens from boot.
 ```
 ┌───────────────────────────────────────────────────────────┐
 │  0. OIDC provider is already running on a classic VM      │
-│     (e.g. Zitadel, Keycloak, or any OIDC-compliant IdP)   │
+│     (e.g. Privasys ID, Keycloak, or any OIDC-compliant IdP)│
 │                                                           │
 │  1. Instance boots — manager starts with no containers    │
 │     --oidc-issuer points to the external OIDC provider    │

@@ -64,7 +64,7 @@ The manager checks three claim paths to support different providers:
 
 | Provider | Claim path | Format |
 |----------|-----------|--------|
-| Role-claim map | `urn:zitadel:iam:org:project:roles` | `{ "role-name": { "orgId": "..." } }` |
+| Role-claim map | `roles` | flat string array (RFC 9068) |
 | Standard | `roles` | `["role-name", ...]` |
 | Keycloak | `realm_access.roles` | `["role-name", ...]` |
 
@@ -104,7 +104,7 @@ provided — the manager will refuse to start without them.
 | `--oidc-audience` | `enclave-os-virtual` | Expected `aud` claim |
 | `--oidc-manager-role` | `privasys-platform:manager` | Role for mutating operations |
 | `--oidc-monitoring-role` | `privasys-platform:monitoring` | Role for read-only access |
-| `--oidc-role-claim` | `urn:zitadel:iam:org:project:roles` | JWT claim key containing roles |
+| `--oidc-role-claim` | `roles` | JWT claim key containing roles |
 | `--log-level` | `info` | Log level: `debug`, `info`, `warn`, `error` |
 
 ### Hostname derivation

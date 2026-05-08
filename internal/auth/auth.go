@@ -130,7 +130,7 @@ type OIDCConfig struct {
 	MonitoringRole string
 
 	// RoleClaim is the JWT claim key containing roles.
-	// Default: "urn:zitadel:iam:org:project:roles".
+	// Default: "roles".
 	RoleClaim string
 }
 
@@ -152,7 +152,7 @@ func NewVerifier(oidcCfg *OIDCConfig, log *zap.Logger) (*Verifier, error) {
 	}
 
 	if oidcCfg.RoleClaim == "" {
-		oidcCfg.RoleClaim = "urn:zitadel:iam:org:project:roles"
+		oidcCfg.RoleClaim = "roles"
 	}
 	if oidcCfg.ManagerRole == "" {
 		oidcCfg.ManagerRole = "privasys-platform:manager"
@@ -297,7 +297,6 @@ func checkAudience(claims map[string]interface{}, expected string) bool {
 //  1. The configured roleClaim (map of role->metadata, or array)
 //  2. "roles" (standard string array)
 //  3. "realm_access.roles" (Keycloak)
-//  4. Zitadel project-specific: any key matching "urn:zitadel:iam:org:project:*:roles"
 func checkRole(claims map[string]interface{}, role, roleClaim string) bool {
 	// 1. Configured claim (may be a map: {"role-name": {...}} or an array).
 	if raw, ok := claims[roleClaim]; ok {
@@ -332,29 +331,6 @@ func checkRole(claims map[string]interface{}, role, roleClaim string) bool {
 			for _, r := range arr {
 				if s, ok := r.(string); ok && s == role {
 					return true
-				}
-			}
-		}
-	}
-
-	// 4. Zitadel project-specific claims: urn:zitadel:iam:org:project:{PROJECT_ID}:roles
-	// Service accounts using JWT profile grants with plural "projects" scope
-	// produce project-scoped claims at this path instead of the generic one.
-	for key, raw := range claims {
-		if key == roleClaim {
-			continue // already checked in path 1
-		}
-		if strings.HasPrefix(key, "urn:zitadel:iam:org:project:") && strings.HasSuffix(key, ":roles") {
-			if roleMap, ok := raw.(map[string]interface{}); ok {
-				if _, has := roleMap[role]; has {
-					return true
-				}
-			}
-			if arr, ok := raw.([]interface{}); ok {
-				for _, r := range arr {
-					if s, ok := r.(string); ok && s == role {
-						return true
-					}
 				}
 			}
 		}
