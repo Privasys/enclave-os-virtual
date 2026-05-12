@@ -169,12 +169,16 @@ See [dist/examples/manifest-example.yaml](dist/examples/manifest-example.yaml) f
 
 ## Data-at-Rest Encryption
 
-The disk has two encrypted regions:
+Operator state lives on a **dedicated cloud persistent disk** (`device-name=data`), not on the boot disk. This decouples image lifecycle from data lifecycle: a new dm-verity measurement (image upgrade) does not migrate data, and Spot preemption of the boot VM never destroys it. The boot disk carries only ESP + read-only erofs root + verity hash (and a small 2 GB on-disk placeholder kept for first-boot bootstrap on legacy VMs).
 
-| Partition | Size | Purpose | Encryption |
-|-----------|------|---------|------------|
+The data PD has two encrypted regions:
+
+| Region | Size | Purpose | Encryption |
+|--------|------|---------|------------|
 | **OS data** (`/data`) | 2 GB | CA cert+key, manager.env | LUKS2+AEAD, single key (BYOK or auto-generated) |
-| **Container volumes** | Remaining disk | Per-container writable storage | LUKS2+AEAD per LVM volume, independent key per container |
+| **Container volumes** | Remaining PD capacity (LVM VG) | Per-container writable storage | LUKS2+AEAD per LVM volume, independent key per container |
+
+The PD is formatted LUKS2+AEAD on first attach (`aes-xts-plain64` + `--integrity hmac-sha256`, per-4 K-sector dm-integrity tags) and surfaces in the VM as `/dev/disk/by-id/google-data` (GCE), unlocked to `/dev/mapper/data-crypt`. Choose PD size at instance creation time \u2014 online resize is not supported because dm-integrity cannot be grown in place.
 
 ### OS data partition
 
@@ -186,14 +190,14 @@ At boot, `luks-data.service` runs before `data.mount`:
 
 ### Per-container encrypted volumes
 
-Each container receives an independent **LVM logical volume** with its own LUKS2+AEAD encryption key. Keys are never shared between containers and never stored on the OS data partition — they are held only in TEE-encrypted memory at runtime.
+Each container receives an independent **LVM logical volume** with its own LUKS2+AEAD encryption key. Keys are never shared between containers and never stored on the OS data partition \u2014 they are held only in TEE-encrypted memory at runtime.
 
 | Key source | Mechanism |
 |------------|----------|
 | **BYOK** | Per-container key provided in the `POST /api/v1/containers` request |
 | **Enclave Vaults** | Key fetched from the vault constellation via mutual RA-TLS |
 
-The container volumes partition fills all remaining disk space. Choose your disk size at instance creation time (e.g. `--create-disk=size=50` for ~46 GB of container storage). Online resize is not supported because `--integrity aead` (dm-integrity) cannot be grown in place.
+Container volumes live on the data PD's LVM volume group (not on the boot disk). Choose the PD size at instance creation time (e.g. `--create-disk=size=50,device-name=data` for ~46 GB of container storage).
 
 ## Kernel hardening (BadAML mitigation)
 
