@@ -236,6 +236,10 @@ func runServe(args []string) error {
 		// live here so secrets (StorageKey, VaultToken) are not exposed
 		// on the unencrypted rootfs. Set to empty to disable persistence.
 		RegistryPath: "/data/manager-apps.json",
+		// Same OIDC issuer used for bearer-token verification is also
+		// the EncAuth IdP: the session-relay middleware uses it to
+		// fetch the JWKS that signs silent-rebind vouchers.
+		IdpIssuer: *oidcIssuer,
 	}
 	srv := manager.New(mgrCfg, log, l, verifier)
 

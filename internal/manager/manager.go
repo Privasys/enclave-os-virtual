@@ -123,6 +123,13 @@ type Config struct {
 	// contain runtime secrets (StorageKey, VaultToken). Empty disables
 	// persistence (dev/test only).
 	RegistryPath string
+
+	// IdpIssuer is the OIDC issuer URL (e.g. "https://privasys.id")
+	// used to discover the JWKS for EncAuth voucher verification.
+	// When empty, the session-relay middleware accepts only legacy
+	// FIDO2-bootstrapped sessions and silently ignores the optional
+	// `encauth` field on /__privasys/session-bootstrap.
+	IdpIssuer string
 }
 
 // Server is the management API server.
@@ -157,13 +164,18 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 	if cfg.Addr == "" {
 		cfg.Addr = DefaultAddr
 	}
+	sr := sessionrelay.NewManager()
+	if cfg.IdpIssuer != "" {
+		resolver := &sessionrelay.HTTPJWKSResolver{Issuer: cfg.IdpIssuer}
+		sr.SetEncAuthVerifier(&sessionrelay.DefaultEncAuthVerifier{Resolver: resolver})
+	}
 	s := &Server{
 		cfg:          cfg,
 		log:          log.Named("manager"),
 		launcher:     l,
 		verifier:     v,
 		registry:     newRegistry(cfg.RegistryPath),
-		sessionRelay: sessionrelay.NewManager(),
+		sessionRelay: sr,
 	}
 	s.appProxy = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {

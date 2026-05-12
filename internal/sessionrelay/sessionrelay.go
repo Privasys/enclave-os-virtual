@@ -59,6 +59,24 @@ type Manager struct {
 	sessions map[string]*Session
 	ttl      time.Duration
 	now      func() time.Time
+
+	// Long-lived enclave identity key. Used for ECDH on every
+	// bootstrap. Stable across SDK sessions for the lifetime of the
+	// enclave process so wallet-issued EncAuth vouchers can pin enc_pub.
+	encStaticPriv *ecdh.PrivateKey
+	encStaticPub  []byte // SEC1 uncompressed (65 B)
+
+	// Optional EncAuth verifier. When non-nil, handleInit accepts an
+	// `encauth` field in the request body and uses it to short-circuit
+	// the FIDO2 ceremony (silent rebind). Returns the canonical
+	// payload on success, or an error to fall through to FIDO2.
+	encAuthVerifier EncAuthVerifier
+
+	// Optional leaf cert hash (SHA-256 of DER) used to bind EncAuth
+	// vouchers to the enclave's RA-TLS leaf. Set by the host via
+	// SetLeafCertHash. When zero, the quote_hash field is not enforced.
+	leafCertHash [32]byte
+	hasLeafHash  bool
 }
 
 // Session holds derived keys and counters for a single SDK ↔ enclave pairing.
@@ -72,9 +90,60 @@ type Session struct {
 	ExpiresAt   time.Time
 }
 
-// NewManager creates a session manager.
+// NewManager creates a session manager. The enclave identity key is
+// generated lazily on the first bootstrap (or via
+// EnsureEncStaticKey() at startup) so existing tests that don't drive
+// the bootstrap path keep working without ECDH setup.
 func NewManager() *Manager {
 	return &Manager{sessions: make(map[string]*Session), ttl: defaultTTL, now: time.Now}
+}
+
+// EnsureEncStaticKey generates the long-lived enclave identity key if
+// it hasn't been created yet. Safe to call multiple times.
+func (m *Manager) EnsureEncStaticKey() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ensureEncStaticKeyLocked()
+}
+
+func (m *Manager) ensureEncStaticKeyLocked() error {
+	if m.encStaticPriv != nil {
+		return nil
+	}
+	k, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		return fmt.Errorf("ecdh keygen: %w", err)
+	}
+	m.encStaticPriv = k
+	m.encStaticPub = k.PublicKey().Bytes()
+	return nil
+}
+
+// EncStaticPub returns the SEC1 uncompressed bytes of the enclave's
+// long-lived identity key. The wallet binds these into EncAuth
+// vouchers so silent rebinds across sessions can pin the same key.
+func (m *Manager) EncStaticPub() []byte {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return append([]byte(nil), m.encStaticPub...)
+}
+
+// SetEncAuthVerifier installs an EncAuth verifier. Pass nil to
+// disable EncAuth (the enclave then always falls back to FIDO2).
+func (m *Manager) SetEncAuthVerifier(v EncAuthVerifier) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.encAuthVerifier = v
+}
+
+// SetLeafCertHash records the SHA-256 hash of the enclave's RA-TLS
+// leaf certificate (DER). When set, EncAuth vouchers are rejected
+// unless their quote_hash field matches.
+func (m *Manager) SetLeafCertHash(h [32]byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.leafCertHash = h
+	m.hasLeafHash = true
 }
 
 // SetTTL overrides the default session lifetime.
@@ -103,7 +172,8 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 
 // initRequest is the body the SDK sends to /privasys/session/init.
 type initRequest struct {
-	SDKPub string `json:"sdk_pub"` // base64url, SEC1 uncompressed P-256
+	SDKPub  string           `json:"sdk_pub"`           // base64url, SEC1 uncompressed P-256
+	EncAuth *EncAuthEnvelope `json:"encauth,omitempty"` // optional silent-rebind voucher
 }
 
 // initResponse is what the enclave returns.
@@ -111,11 +181,15 @@ type initResponse struct {
 	SessionID string `json:"session_id"`
 	EncPub    string `json:"enc_pub"`
 	ExpiresAt int64  `json:"expires_at"` // epoch ms
+	// Subject identifier when the session was bootstrapped from an
+	// EncAuth voucher (silent rebind). Empty for FIDO2-bootstrapped
+	// sessions.
+	Sub string `json:"sub,omitempty"`
 }
 
 func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 	var req initRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
 		http.Error(w, "invalid init body", http.StatusBadRequest)
 		return
 	}
@@ -131,25 +205,62 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid sdk_pub: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	encPriv, err := curve.GenerateKey(rand.Reader)
-	if err != nil {
-		http.Error(w, "ecdh keygen", http.StatusInternalServerError)
+
+	if err := m.EnsureEncStaticKey(); err != nil {
+		http.Error(w, "ecdh keygen: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	m.mu.RLock()
+	encPriv := m.encStaticPriv
+	encPubBytes := m.encStaticPub
+	verifier := m.encAuthVerifier
+	hasLeaf := m.hasLeafHash
+	leaf := m.leafCertHash
+	m.mu.RUnlock()
+
 	shared, err := encPriv.ECDH(sdkPub)
 	if err != nil {
 		http.Error(w, "ecdh derive", http.StatusInternalServerError)
 		return
 	}
 
-	sessionIDBytes := make([]byte, 16)
-	if _, err := rand.Read(sessionIDBytes); err != nil {
-		http.Error(w, "rand", http.StatusInternalServerError)
-		return
-	}
-	sessionID := base64.RawURLEncoding.EncodeToString(sessionIDBytes)
+	// Default: random session id (FIDO2-bound bootstrap).
+	var (
+		sessionID    string
+		sessionIDRaw []byte
+		sub          string
+	)
 
-	sess, err := buildSession(sessionID, sessionIDBytes, shared, m.ttl, m.now)
+	if req.EncAuth != nil && verifier != nil {
+		payload, vErr := verifier.Verify(req.EncAuth, encPubBytes, leaf, hasLeaf, m.now())
+		if vErr != nil {
+			// Fall through to legacy bootstrap path so the SDK can
+			// retry with a fresh FIDO2 ceremony. Surface the reason
+			// via a header for client-side diagnostics.
+			w.Header().Set("X-Privasys-EncAuth-Reject", vErr.Error())
+		} else {
+			sessionID = payload.SID
+			sub = payload.Sub
+			// HKDF salt for EncAuth path is the raw decoded sid bytes
+			// (32 B base64url) so it stays compatible with the wallet
+			// signature input.
+			sessionIDRaw, _ = base64.RawURLEncoding.DecodeString(payload.SID)
+			if len(sessionIDRaw) == 0 {
+				sessionIDRaw = []byte(payload.SID)
+			}
+		}
+	}
+
+	if sessionID == "" {
+		sessionIDRaw = make([]byte, 16)
+		if _, err := rand.Read(sessionIDRaw); err != nil {
+			http.Error(w, "rand", http.StatusInternalServerError)
+			return
+		}
+		sessionID = base64.RawURLEncoding.EncodeToString(sessionIDRaw)
+	}
+
+	sess, err := buildSession(sessionID, sessionIDRaw, shared, m.ttl, m.now)
 	if err != nil {
 		http.Error(w, "session derive: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -162,8 +273,9 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 
 	resp := initResponse{
 		SessionID: sessionID,
-		EncPub:    base64.RawURLEncoding.EncodeToString(encPriv.PublicKey().Bytes()),
+		EncPub:    base64.RawURLEncoding.EncodeToString(encPubBytes),
 		ExpiresAt: sess.ExpiresAt.UnixMilli(),
+		Sub:       sub,
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
