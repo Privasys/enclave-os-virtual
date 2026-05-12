@@ -32,6 +32,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/manager"
 	"github.com/Privasys/enclave-os-virtual/internal/runtimestatus"
+	"github.com/Privasys/enclave-os-virtual/internal/toolspec"
 )
 
 const version = "0.2.0"
@@ -151,6 +152,14 @@ func runServe(args []string) error {
 		"Local confidential-ai proxy URL for /v1/models/status feed; empty disables the proxy feed")
 	rsInterval := fs.Duration("push-interval", 30*time.Second,
 		"Interval between runtime-status pushes")
+
+	// Tool-spec syncer (Phase 5: ai-tools-plan). Reuses --mgmt-url,
+	// --enclave-token, --enclave-id from the runtime-status sender.
+	toolSpecApp := fs.String("tool-spec-app", "confidential-ai",
+		"Container name to mutate when the management-service publishes "+
+			"a new MCP_SERVERS spec. Empty disables tool-spec sync.")
+	toolSpecInterval := fs.Duration("tool-spec-interval", 60*time.Second,
+		"Interval between tool-spec polls")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -273,6 +282,21 @@ func runServe(args []string) error {
 		})
 	} else if *rsMgmtURL != "" || *rsEnclaveID != "" {
 		log.Warn("runtime-status push partially configured; need --mgmt-url and --enclave-id together")
+	}
+
+	// Optional MCP tool-spec syncer.
+	if *toolSpecApp != "" {
+		if syncer := toolspec.New(toolspec.Config{
+			MgmtBaseURL:  *rsMgmtURL,
+			EnclaveToken: *rsEnclaveToken,
+			EnclaveID:    *rsEnclaveID,
+			AppName:      *toolSpecApp,
+			Interval:     *toolSpecInterval,
+		}, log, srv); syncer != nil {
+			g.Go(func() error {
+				return syncer.Run(gctx)
+			})
+		}
 	}
 
 	if err := g.Wait(); err != nil {

@@ -620,6 +620,72 @@ func (s *Server) handleUnloadContainer(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ReloadAppEnv updates a single environment variable on a registered
+// container in-place. Used by the tool-spec syncer to push new
+// MCP_SERVERS values into the AI inference container without going
+// through the management-service deploy path.
+//
+// Behaviour:
+//   - If no container with the given name is in the registry, returns
+//     a NoEntryError so the caller can choose to ignore (e.g. the AI
+//     inference app has not been deployed yet).
+//   - If the env value is already current, returns false, nil with no
+//     side effects.
+//   - Otherwise: writes the mutated LoadRequest to the registry FIRST
+//     (so a crash mid-reload still replays correctly), then unloads
+//     and reloads the container. Reload happens asynchronously: the
+//     method returns true once Unload completes; the new container is
+//     started in the background with logging on failure.
+func (s *Server) ReloadAppEnv(ctx context.Context, name, key, value string) (bool, error) {
+	if s.registry == nil {
+		return false, fmt.Errorf("registry not configured")
+	}
+	entries, err := s.registry.List()
+	if err != nil {
+		return false, fmt.Errorf("registry list: %w", err)
+	}
+	var req *launcher.LoadRequest
+	for i := range entries {
+		if entries[i].Name == name {
+			req = &entries[i]
+			break
+		}
+	}
+	if req == nil {
+		return false, fmt.Errorf("container %q not in registry", name)
+	}
+	if req.Env == nil {
+		req.Env = map[string]string{}
+	}
+	if req.Env[key] == value {
+		return false, nil
+	}
+	s.log.Info("reloading container env",
+		zap.String("name", name),
+		zap.String("key", key),
+		zap.Int("value_len", len(value)),
+	)
+	req.Env[key] = value
+	if err := s.registry.Save(*req); err != nil {
+		return false, fmt.Errorf("registry save: %w", err)
+	}
+	if err := s.launcher.Unload(ctx, name); err != nil {
+		// Try to continue: container may already be gone (crashed).
+		s.log.Warn("unload during env reload failed; attempting load anyway",
+			zap.String("name", name), zap.Error(err))
+	}
+	loaded := *req
+	go func() {
+		if _, err := s.launcher.Load(context.Background(), loaded); err != nil {
+			s.log.Error("env-reload load failed",
+				zap.String("name", loaded.Name), zap.Error(err))
+			return
+		}
+		containersLoaded.Set(float64(s.launcher.ContainerCount()))
+	}()
+	return true, nil
+}
+
 // tlsUpdateRequest is the request body for PUT /api/v1/tls.
 type tlsUpdateRequest struct {
 	CACert string `json:"ca_cert"` // PEM-encoded CA certificate
