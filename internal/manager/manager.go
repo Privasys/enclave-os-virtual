@@ -263,6 +263,15 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("POST /api/v1/containers", s.requireAuth(s.handleLoadContainer))
 	mux.HandleFunc("DELETE /api/v1/containers/{name}", s.requireAuth(s.handleUnloadContainer))
 
+	// SDK setAttestationExtension: container apps call this to install
+	// (or update) a per-app X.509 extension under
+	// 1.3.6.1.4.1.65230.3.5.*. The new value is reflected in the next
+	// RA-TLS cert and forwarded upstream to mgmt-service so it can be
+	// replayed across enclave restarts. Authenticated via the container
+	// app token (manager role required for this enclave's manager API).
+	mux.HandleFunc("POST /api/v1/containers/{name}/attestation-extensions",
+		s.requireAuth(s.handleSetAttestationExtension))
+
 	// TLS certificate rotation (require manager role).
 	mux.HandleFunc("PUT /api/v1/tls", s.requireAuth(s.handleUpdateTLS))
 
@@ -281,6 +290,31 @@ func (s *Server) Start(ctx context.Context) error {
 	dispatcher := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := hostOnly(r.Host)
 		if _, ok := s.lookupAppHost(host); ok {
+			// Freeze gate: if the container declared a config_api at
+			// load time and has not yet been configured, serve only
+			// requests matching that endpoint and return 503 for
+			// everything else. The flag flips to true on the first
+			// 2xx response from the configure path.
+			containerName := s.launcher.AppHostnameToContainer(host)
+			if containerName != "" {
+				st := s.launcher.ContainerFreezeState(containerName)
+				if st.ConfigAPI != nil && !st.Configured {
+					if !matchesConfigAPI(st.ConfigAPI, r) {
+						w.Header().Set("Retry-After", "5")
+						s.jsonError(w, http.StatusServiceUnavailable, "container is awaiting initial configuration")
+						return
+					}
+					// Wrap the writer so we can flip the flag on 2xx.
+					rw := &statusRecorder{ResponseWriter: w}
+					s.appProxy.ServeHTTP(rw, r)
+					if rw.status >= 200 && rw.status < 300 {
+						s.launcher.MarkConfigured(containerName)
+						s.log.Info("container configured (freeze lifted)",
+							zap.String("container", containerName))
+					}
+					return
+				}
+			}
 			s.appProxy.ServeHTTP(w, r)
 			return
 		}
@@ -620,72 +654,6 @@ func (s *Server) handleUnloadContainer(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ReloadAppEnv updates a single environment variable on a registered
-// container in-place. Used by the tool-spec syncer to push new
-// MCP_SERVERS values into the AI inference container without going
-// through the management-service deploy path.
-//
-// Behaviour:
-//   - If no container with the given name is in the registry, returns
-//     a NoEntryError so the caller can choose to ignore (e.g. the AI
-//     inference app has not been deployed yet).
-//   - If the env value is already current, returns false, nil with no
-//     side effects.
-//   - Otherwise: writes the mutated LoadRequest to the registry FIRST
-//     (so a crash mid-reload still replays correctly), then unloads
-//     and reloads the container. Reload happens asynchronously: the
-//     method returns true once Unload completes; the new container is
-//     started in the background with logging on failure.
-func (s *Server) ReloadAppEnv(ctx context.Context, name, key, value string) (bool, error) {
-	if s.registry == nil {
-		return false, fmt.Errorf("registry not configured")
-	}
-	entries, err := s.registry.List()
-	if err != nil {
-		return false, fmt.Errorf("registry list: %w", err)
-	}
-	var req *launcher.LoadRequest
-	for i := range entries {
-		if entries[i].Name == name {
-			req = &entries[i]
-			break
-		}
-	}
-	if req == nil {
-		return false, fmt.Errorf("container %q not in registry", name)
-	}
-	if req.Env == nil {
-		req.Env = map[string]string{}
-	}
-	if req.Env[key] == value {
-		return false, nil
-	}
-	s.log.Info("reloading container env",
-		zap.String("name", name),
-		zap.String("key", key),
-		zap.Int("value_len", len(value)),
-	)
-	req.Env[key] = value
-	if err := s.registry.Save(*req); err != nil {
-		return false, fmt.Errorf("registry save: %w", err)
-	}
-	if err := s.launcher.Unload(ctx, name); err != nil {
-		// Try to continue: container may already be gone (crashed).
-		s.log.Warn("unload during env reload failed; attempting load anyway",
-			zap.String("name", name), zap.Error(err))
-	}
-	loaded := *req
-	go func() {
-		if _, err := s.launcher.Load(context.Background(), loaded); err != nil {
-			s.log.Error("env-reload load failed",
-				zap.String("name", loaded.Name), zap.Error(err))
-			return
-		}
-		containersLoaded.Set(float64(s.launcher.ContainerCount()))
-	}()
-	return true, nil
-}
-
 // tlsUpdateRequest is the request body for PUT /api/v1/tls.
 type tlsUpdateRequest struct {
 	CACert string `json:"ca_cert"` // PEM-encoded CA certificate
@@ -786,6 +754,54 @@ type attestationServersRequest struct {
 	Servers []launcher.AttestationServer `json:"servers"`
 }
 
+// handleSetAttestationExtension handles
+// POST /api/v1/containers/{name}/attestation-extensions.
+// Body: {"oid":"1.3.6.1.4.1.65230.3.5.<n>", "value_b64":"..."}.
+// Installs the extension in-process so the next RA-TLS cert reflects
+// it, and emits an event for the management service to persist for
+// replay across enclave restarts.
+func (s *Server) handleSetAttestationExtension(w http.ResponseWriter, r *http.Request) {
+	result := r.Context().Value(authResultKey).(*auth.AuthResult)
+	if !result.HasManagerAccess() {
+		s.jsonError(w, http.StatusForbidden, "manager role required for attestation extension operations")
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" {
+		s.jsonError(w, http.StatusBadRequest, "container name is required")
+		return
+	}
+	var req struct {
+		OID      string `json:"oid"`
+		ValueB64 string `json:"value_b64"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if req.OID == "" || req.ValueB64 == "" {
+		s.jsonError(w, http.StatusBadRequest, "oid and value_b64 are required")
+		return
+	}
+	value, err := base64.StdEncoding.DecodeString(req.ValueB64)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "value_b64 is not valid base64: "+err.Error())
+		return
+	}
+	if err := s.launcher.SetAttestationExtension(name, req.OID, value); err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.log.Info("attestation extension installed",
+		zap.String("container", name),
+		zap.String("oid", req.OID),
+		zap.Int("value_len", len(value)),
+	)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
 // handleSetAttestationServers handles PUT /api/v1/attestation-servers.
 // It replaces the attestation server list (URLs and optional bearer tokens)
 // and triggers a recomputation of the Merkle tree and OID extensions so that
@@ -873,6 +889,45 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+// statusRecorder is a minimal http.ResponseWriter wrapper used by the
+// freeze gate to detect a 2xx response from the configure endpoint
+// without disturbing the body stream (the proxy may use chunked or SSE
+// transfer; we deliberately do not buffer it).
+type statusRecorder struct {
+	http.ResponseWriter
+	status      int
+	wroteHeader bool
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if !s.wroteHeader {
+		s.status = code
+		s.wroteHeader = true
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	if !s.wroteHeader {
+		s.status = http.StatusOK
+		s.wroteHeader = true
+	}
+	return s.ResponseWriter.Write(b)
+}
+
+// matchesConfigAPI reports whether the inbound request matches the
+// container's declared configure endpoint. Method match is
+// case-insensitive; path is matched literally (no globs).
+func matchesConfigAPI(spec *launcher.ConfigAPISpec, r *http.Request) bool {
+	if spec == nil {
+		return false
+	}
+	if !strings.EqualFold(spec.Method, r.Method) {
+		return false
+	}
+	return r.URL.Path == spec.Path
 }
 
 // replayRegistry re-issues launcher.Load for every entry persisted in

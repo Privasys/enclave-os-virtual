@@ -35,19 +35,20 @@ func TestVaultTokenNotInSpec(t *testing.T) {
 		Image:      "example.com/img@sha256:abcd",
 		Port:       8080,
 		VaultToken: "secret-token",
-		Env:        map[string]string{"FOO": "bar"},
 	}
 
 	spec := req.toContainerSpec()
 
-	// The spec's Env should NOT contain VAULT_TOKEN.
+	// The spec's Env should NOT contain VAULT_TOKEN — it is injected
+	// only at container creation time, never measured into the
+	// per-container Merkle tree.
 	if _, ok := spec.Env["VAULT_TOKEN"]; ok {
 		t.Fatal("VAULT_TOKEN should not be in the attested spec")
 	}
 
-	// Regular env should be present.
-	if spec.Env["FOO"] != "bar" {
-		t.Fatal("regular env should be preserved")
+	// Runtime env helper should surface the vault token.
+	if req.runtimeEnv()["VAULT_TOKEN"] != "secret-token" {
+		t.Fatal("runtimeEnv should expose VAULT_TOKEN for runtime injection")
 	}
 }
 

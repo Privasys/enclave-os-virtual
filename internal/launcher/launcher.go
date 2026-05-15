@@ -105,22 +105,16 @@ type Config struct {
 	DEKOriginFile string
 }
 
-// EnvVarMeta is per-environment-variable metadata that controls how
-// the variable surfaces in attestation extensions.
-//
-//   - Secret = true:  if OID is set, the corresponding extension contains
-//                     the raw SHA-256 of the value (32 bytes). The value
-//                     itself never leaves the enclave via the certificate.
-//   - Secret = false: if OID is set, the extension contains the raw
-//                     UTF-8 value bytes.
-//   - OID empty:      no per-key extension is emitted (the key is still
-//                     measured into the bulk env_hash Merkle leaf).
-//
-// OID values must lie under the Privasys per-container env-var sub-arc
-// 1.3.6.1.4.1.65230.3.5.* — other OIDs are rejected at validation time.
-type EnvVarMeta struct {
-	Secret bool   `json:"secret"`
-	OID    string `json:"oid,omitempty"`
+// ConfigAPISpec describes a post-load configuration endpoint that the
+// runtime must call (or accept a call to) before unfreezing other
+// paths. Sourced from a Dockerfile LABEL `org.privasys.config_api` (the
+// container case) — these win because they are part of the
+// measurement — with `privasys.json` as a fallback. When non-nil, the
+// management API server returns HTTP 503 for every other (Method, Path)
+// pair until a request matching this spec returns a 2xx.
+type ConfigAPISpec struct {
+	Method string `json:"method"` // e.g. "POST"
+	Path   string `json:"path"`   // e.g. "/configure"
 }
 
 // LoadRequest is the API request to load a container.
@@ -134,16 +128,6 @@ type LoadRequest struct {
 
 	// Port is the container's listening port.
 	Port int `json:"port"`
-
-	// Env is a map of environment variables.
-	Env map[string]string `json:"env,omitempty"`
-
-	// EnvMeta carries optional per-key metadata (secret flag and an
-	// X.509 OID under the Privasys env-var sub-arc) that the manager
-	// uses to emit per-key attestation extensions. Keys MUST also be
-	// present in Env. Keys missing here default to {Secret:true,
-	// OID:""} (no extension emitted).
-	EnvMeta map[string]EnvVarMeta `json:"env_meta,omitempty"`
 
 	// Volumes is a list of "host:container" mount paths.
 	Volumes []string `json:"volumes,omitempty"`
@@ -199,6 +183,13 @@ type LoadRequest struct {
 	//
 	// If HealthCheck is nil, this field is ignored.
 	WaitReady bool `json:"wait_ready,omitempty"`
+
+	// ConfigAPI, when non-nil, freezes all non-configure paths with HTTP
+	// 503 until a request matching {Method, Path} returns 2xx. The flag
+	// is in-process only; after a restart the container is frozen again.
+	// The app's responsibility is to persist its config on the encrypted
+	// volume and to re-deliver it via this endpoint after each restart.
+	ConfigAPI *ConfigAPISpec `json:"config_api,omitempty"`
 }
 
 // Validate checks the load request for required fields.
@@ -212,17 +203,9 @@ func (r *LoadRequest) Validate() error {
 	if r.Port <= 0 || r.Port > 65535 {
 		return fmt.Errorf("port must be 1-65535, got %d", r.Port)
 	}
-	for k, m := range r.EnvMeta {
-		if _, ok := r.Env[k]; !ok {
-			return fmt.Errorf("env_meta references unknown env key %q", k)
-		}
-		if m.OID == "" {
-			continue
-		}
-		// Defer to oids.ParseEnvVarOID which accepts either the full OID
-		// under ContainerEnvVarArcPrefix or just the sub-arc tail.
-		if _, err := oids.ParseEnvVarOID(m.OID); err != nil {
-			return fmt.Errorf("env_meta[%q].oid invalid: %w", k, err)
+	if r.ConfigAPI != nil {
+		if r.ConfigAPI.Path == "" {
+			return fmt.Errorf("config_api.path is required")
 		}
 	}
 	return nil
@@ -239,7 +222,6 @@ func (r *LoadRequest) toContainerSpec() manifest.Container {
 		Name:        r.Name,
 		Image:       r.Image,
 		Port:        r.Port,
-		Env:         r.Env,
 		Volumes:     r.Volumes,
 		Command:     r.Command,
 		Internal:    r.Internal,
@@ -314,10 +296,20 @@ type Launcher struct {
 	// Values: "byok:<fingerprint>" or "generated".  Absent when no volume.
 	volumeEncryption map[string]string
 
-	// envMeta carries the per-container env-var metadata supplied at
-	// load time (validated to be under the env-var sub-arc). Used by
-	// writeContainerExtensions to emit per-key OID extensions.
-	envMeta map[string]map[string]EnvVarMeta
+	// oidExts is the per-container set of X.509 attestation extensions
+	// under 1.3.6.1.4.1.65230.3.5.* installed at Load time and updated
+	// in-place via the SDK setAttestationExtension API. Map shape is
+	// container-name → oid → raw value bytes (already base64-decoded).
+	oidExts map[string]map[string][]byte
+
+	// configAPI tracks the optional config-API decoration per container.
+	// nil entries (or a missing key) mean the container is not frozen.
+	configAPI map[string]*ConfigAPISpec
+
+	// configured records whether the freeze gate has been opened for
+	// each container. true when no ConfigAPI is set, or when a
+	// matching successful call has been observed since (re)load.
+	configured map[string]bool
 
 	// Loaded container specs (mirrors what is running).
 	specs map[string]manifest.Container
@@ -343,7 +335,9 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		pulledImages:      make(map[string]client.Image),
 		specs:             make(map[string]manifest.Container),
 		volumeEncryption:  make(map[string]string),
-		envMeta:           make(map[string]map[string]EnvVarMeta),
+		oidExts:           make(map[string]map[string][]byte),
+		configAPI:         make(map[string]*ConfigAPISpec),
+		configured:        make(map[string]bool),
 		attestationTokens: make(map[string]string),
 		readyCh:           make(chan struct{}),
 	}
@@ -737,16 +731,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	runtimeSpec := spec
 	runtimeEnv := req.runtimeEnv()
 	if len(runtimeEnv) > 0 {
-		if runtimeSpec.Env == nil {
-			runtimeSpec.Env = make(map[string]string, len(runtimeEnv))
-		} else {
-			// Clone the map so we don't mutate the original spec.
-			clone := make(map[string]string, len(runtimeSpec.Env)+len(runtimeEnv))
-			for k, v := range runtimeSpec.Env {
-				clone[k] = v
-			}
-			runtimeSpec.Env = clone
-		}
+		runtimeSpec.Env = make(map[string]string, len(runtimeEnv))
 		for k, v := range runtimeEnv {
 			runtimeSpec.Env[k] = v
 		}
@@ -775,13 +760,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	if volEncryption != "" {
 		l.volumeEncryption[req.Name] = volEncryption
 	}
-	if len(req.EnvMeta) > 0 {
-		// Copy to insulate from caller mutations.
-		m := make(map[string]EnvVarMeta, len(req.EnvMeta))
-		for k, v := range req.EnvMeta {
-			m[k] = v
-		}
-		l.envMeta[req.Name] = m
+	if req.ConfigAPI != nil {
+		l.configAPI[req.Name] = req.ConfigAPI
+		l.configured[req.Name] = false
+	} else {
+		l.configured[req.Name] = true
 	}
 
 	// Recompute attestation.
@@ -864,7 +847,9 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	delete(l.imageDigests, name)
 	delete(l.containerTrees, name)
 	delete(l.volumeEncryption, name)
-	delete(l.envMeta, name)
+	delete(l.oidExts, name)
+	delete(l.configAPI, name)
+	delete(l.configured, name)
 
 	// Recompute attestation.
 	l.recomputeAttestation()
@@ -1111,47 +1096,109 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string, port
 	// Build the extensions list (without the quote - the RA-TLS module adds that).
 	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc)
 
-	// Per-key env-var extensions (OIDs under 1.3.6.1.4.1.65230.3.5.*).
-	// Public vars carry the raw value; secret vars carry SHA-256(value).
-	if meta := l.envMeta[containerName]; len(meta) > 0 {
-		// Sort keys for deterministic ordering of the resulting JSON
-		// (independent of map iteration order).
-		keys := make([]string, 0, len(meta))
-		for k := range meta {
+	// Per-app SDK-set X.509 attestation extensions (OIDs under
+	// 1.3.6.1.4.1.65230.3.5.*). Sourced from the in-process oidExts
+	// map (replayed at Load time and updated via the SDK
+	// setAttestationExtension API).
+	if oe := l.oidExts[containerName]; len(oe) > 0 {
+		keys := make([]string, 0, len(oe))
+		for k := range oe {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			m := meta[k]
-			if m.OID == "" {
-				continue
-			}
-			oid, err := oids.ParseEnvVarOID(m.OID)
+			oid, err := oids.ParseEnvVarOID(k)
 			if err != nil {
-				// Already validated at Load time; log and skip.
-				l.log.Warn("skipping env-var extension with invalid OID",
+				l.log.Warn("skipping oid extension with invalid OID",
 					zap.String("container", containerName),
-					zap.String("key", k),
+					zap.String("oid", k),
 					zap.Error(err))
 				continue
 			}
-			val, ok := spec.Env[k]
-			if !ok {
-				continue
-			}
-			var raw []byte
-			if m.Secret {
-				h := sha256.Sum256([]byte(val))
-				raw = h[:]
-			} else {
-				raw = []byte(val)
-			}
-			exts = append(exts, oids.Extension(oid, raw))
+			exts = append(exts, oids.Extension(oid, oe[k]))
 		}
 	}
 
 	upstream := fmt.Sprintf("http://127.0.0.1:%d", port)
 	return extensions.Write(l.cfg.ExtensionsDir, hostname, exts, upstream)
+}
+
+// AppHostnameToContainer returns the container name registered under
+// the given external hostname (e.g. "myapp.apps.privasys.org" →
+// "myapp"). Returns the empty string when no container matches.
+func (l *Launcher) AppHostnameToContainer(hostname string) string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for name, spec := range l.specs {
+		if strings.EqualFold(spec.Hostname, hostname) {
+			return name
+		}
+	}
+	return ""
+}
+
+// FreezeState describes whether the manager API server should hold a
+// request for a given container. When ConfigAPI is non-nil and
+// Configured is false, only requests matching ConfigAPI may pass — the
+// rest receive HTTP 503.
+type FreezeState struct {
+	ConfigAPI  *ConfigAPISpec
+	Configured bool
+}
+
+// ContainerFreezeState reports the current freeze state for the given
+// container. An unknown container returns the zero value (no freeze).
+func (l *Launcher) ContainerFreezeState(name string) FreezeState {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return FreezeState{
+		ConfigAPI:  l.configAPI[name],
+		Configured: l.configured[name],
+	}
+}
+
+// MarkConfigured flips the in-process freeze flag for the given
+// container to true. The manager API server calls this after observing
+// a 2xx response on a request matching the container's ConfigAPI.
+// No-op when the container is not loaded or already configured.
+func (l *Launcher) MarkConfigured(name string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if _, ok := l.specs[name]; !ok {
+		return
+	}
+	l.configured[name] = true
+}
+
+// SetAttestationExtension installs (or updates) a per-app X.509
+// attestation extension under the 1.3.6.1.4.1.65230.3.5.* arc and
+// rewrites the container's extensions file so the next RA-TLS cert
+// reflects the new value. The OID is validated; the value is treated
+// as opaque bytes (no hashing — the SDK is expected to pass either
+// raw public values or pre-hashed digests).
+func (l *Launcher) SetAttestationExtension(name, oid string, value []byte) error {
+	if name == "" {
+		return fmt.Errorf("name is required")
+	}
+	if _, err := oids.ParseEnvVarOID(oid); err != nil {
+		return fmt.Errorf("oid: %w", err)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	spec, ok := l.specs[name]
+	if !ok {
+		return fmt.Errorf("container %q not loaded", name)
+	}
+	if l.oidExts[name] == nil {
+		l.oidExts[name] = make(map[string][]byte)
+	}
+	l.oidExts[name][oid] = value
+	if l.caddyClient != nil && spec.Hostname != "" && !spec.Internal {
+		if err := l.writeContainerExtensions(name, spec.Hostname, spec.Port); err != nil {
+			return fmt.Errorf("rewrite extensions: %w", err)
+		}
+	}
+	return nil
 }
 
 func (l *Launcher) waitForShutdown(ctx context.Context) error {

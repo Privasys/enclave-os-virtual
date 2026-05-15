@@ -2,7 +2,7 @@
 
 **Container workloads inside Confidential VMs, attested end-to-end.**
 
-Enclave OS (Virtual) runs OCI containers inside [Intel TDX](https://www.intel.com/content/www/us/en/developer/tools/trust-domain-extensions/overview.html) (or AMD SEV-SNP) Confidential VMs. Every container image digest, environment variable, volume mount, and platform configuration is measured into a deterministic Merkle tree and embedded in X.509 certificate extensions via RA-TLS. Clients can verify the full workload stack in a single TLS handshake - no out-of-band attestation protocol required.
+Enclave OS (Virtual) runs OCI containers inside [Intel TDX](https://www.intel.com/content/www/us/en/developer/tools/trust-domain-extensions/overview.html) (or AMD SEV-SNP) Confidential VMs. Every container image digest, declared `config_api`, volume mount, and platform configuration is measured into a deterministic Merkle tree and embedded in X.509 certificate extensions via RA-TLS. Per-deployment configuration is delivered in-process to the container's `config_api` endpoint and frozen by the manager; subsequent requests are blocked until configuration completes. Clients can verify the full workload stack in a single TLS handshake — no out-of-band attestation protocol required.
 
 Part of the [Privasys](https://privasys.org) Confidential Computing platform, alongside [Enclave OS (Mini)](https://github.com/Privasys/enclave-os-mini) (SGX/WASM).
 
@@ -43,7 +43,7 @@ Part of the [Privasys](https://privasys.org) Confidential Computing platform, al
 
 1. **Boot** — The VM starts from a dm-verity protected, UKI Secure Boot image built with [cvm-images](https://github.com/Privasys/cvm-images).
 
-2. **Dynamic Loading** — The manager starts with zero containers. Operators call `POST /api/v1/containers` (authenticated via OIDC bearer token) to load containers at runtime. Each request specifies a digest-pinned OCI image reference, environment, volumes, and ports.
+2. **Dynamic Loading** — The manager starts with zero containers. Operators call `POST /api/v1/containers` (authenticated via OIDC bearer token) to load containers at runtime. Each request specifies a digest-pinned OCI image reference, the optional `config_api` declaration, volumes, and ports. Environment variables are not accepted on the public API; per-deployment configuration is delivered in-process to the container's `config_api` endpoint after start.
 
 3. **Pull & Verify** — OCI images are pulled via containerd. Each image digest is verified against the pinned `@sha256:...` reference in the load request.
 
