@@ -118,6 +118,20 @@ jobs:
           echo "Downloaded kernel .debs:"
           ls -lh build/kernel/debs/*.deb
 
+      - name: Stash nvidia-kernel-common-595-server 595.58.03 (apt archive eviction workaround)
+        run: |
+          # noble-updates removed 595.58.03 in favor of 595.71.05 (2026-05),
+          # but `linux-modules-nvidia-595-server-open-6.17.0-23-generic`
+          # depends on common (<= 595.58.03-1) AND (>= 595.58.03). Until
+          # cvm-images bumps to ABI 6.17.0-29 (whose open modules accept
+          # 595.71.05) we must keep the matching common pkg in the local
+          # PackageDirectories=../kernel/debs tree so apt can find it.
+          # Source: Launchpad still serves superseded binaries via the
+          # primary archive +files endpoint.
+          curl -sSL -o build/kernel/debs/nvidia-kernel-common-595-server_595.58.03-0ubuntu0.24.04.1_amd64.deb \
+            "https://launchpad.net/ubuntu/+archive/primary/+files/nvidia-kernel-common-595-server_595.58.03-0ubuntu0.24.04.1_amd64.deb"
+          ls -lh build/kernel/debs/nvidia-kernel-common-595-server_*.deb
+
       - name: Clone cvm-images (GPU overlay configs)
         env:
           GH_TOKEN: ${{ github.token }}
