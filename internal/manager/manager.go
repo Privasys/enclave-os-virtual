@@ -270,7 +270,14 @@ func (s *Server) Start(ctx context.Context) error {
 	// replayed across enclave restarts. Authenticated via the container
 	// app token (manager role required for this enclave's manager API).
 	mux.HandleFunc("POST /api/v1/containers/{name}/attestation-extensions",
-		s.requireAuth(s.handleSetAttestationExtension))
+		s.requireContainerSelf(s.handleSetAttestationExtension))
+
+	// SDK setConfigComplete: container apps call this from their
+	// configure handler after persisting and attesting their
+	// configuration. Lifts the manager's freeze gate so subsequent
+	// requests on any path are forwarded normally. Idempotent.
+	mux.HandleFunc("POST /api/v1/containers/{name}/config-complete",
+		s.requireContainerSelf(s.handleSetConfigComplete))
 
 	// TLS certificate rotation (require manager role).
 	mux.HandleFunc("PUT /api/v1/tls", s.requireAuth(s.handleUpdateTLS))
@@ -392,6 +399,66 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		ctx := context.WithValue(r.Context(), authResultKey, result)
 		next(w, r.WithContext(ctx))
 	}
+}
+
+// requireContainerSelf wraps a handler that may only be called by a
+// container running inside this enclave, targeting itself. The caller
+// MUST come from a loopback address (the manager and all containers
+// share the host network namespace) and MUST present the
+// launcher-minted PRIVASYS_CONTAINER_TOKEN as a Bearer token whose
+// matching container name equals the {name} path parameter.
+//
+// This is NOT OIDC authentication \u2014 it only binds an in-enclave
+// self-targeted call to the calling container's identity so that
+// container A cannot install OID extensions or lift the freeze gate
+// of container B.
+func (s *Server) requireContainerSelf(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Loopback only \u2014 the only legitimate caller is a container
+		// in the same host network namespace.
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil || !isLoopbackHost(host) {
+			s.log.Debug("requireContainerSelf: non-loopback caller rejected",
+				zap.String("remote", r.RemoteAddr))
+			s.jsonError(w, http.StatusForbidden, "this endpoint is reachable only from inside the enclave")
+			return
+		}
+		authHeader := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			s.jsonError(w, http.StatusUnauthorized, "expected Bearer PRIVASYS_CONTAINER_TOKEN")
+			return
+		}
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		boundName := s.launcher.LookupContainerByToken(token)
+		if boundName == "" {
+			s.jsonError(w, http.StatusUnauthorized, "invalid container token")
+			return
+		}
+		pathName := r.PathValue("name")
+		if pathName == "" || pathName != boundName {
+			s.log.Warn("requireContainerSelf: container attempted to act on another container",
+				zap.String("token_bound_to", boundName),
+				zap.String("requested", pathName))
+			s.jsonError(w, http.StatusForbidden, "container token does not match {name} in path")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// isLoopbackHost returns true for any IPv4/IPv6 loopback address.
+func isLoopbackHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		// Caddy / proxies might send "localhost"; the only entries we
+		// expect on RemoteAddr are bare IPs from net.Listen, but be
+		// defensive.
+		return host == "localhost"
+	}
+	return ip.IsLoopback()
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -761,11 +828,6 @@ type attestationServersRequest struct {
 // it, and emits an event for the management service to persist for
 // replay across enclave restarts.
 func (s *Server) handleSetAttestationExtension(w http.ResponseWriter, r *http.Request) {
-	result := r.Context().Value(authResultKey).(*auth.AuthResult)
-	if !result.HasManagerAccess() {
-		s.jsonError(w, http.StatusForbidden, "manager role required for attestation extension operations")
-		return
-	}
 	name := r.PathValue("name")
 	if name == "" {
 		s.jsonError(w, http.StatusBadRequest, "container name is required")
@@ -792,11 +854,37 @@ func (s *Server) handleSetAttestationExtension(w http.ResponseWriter, r *http.Re
 		s.jsonError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s.log.Info("attestation extension installed",
-		zap.String("container", name),
-		zap.String("oid", req.OID),
-		zap.Int("value_len", len(value)),
-	)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleSetConfigComplete handles
+// POST /api/v1/containers/{name}/config-complete.
+// No body required. Flips the in-process freeze flag so the
+// manager forwards subsequent requests on any path. Idempotent —
+// returns 200 even when the container is already configured.
+func (s *Server) handleSetConfigComplete(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.jsonError(w, http.StatusBadRequest, "container name is required")
+		return
+	}
+	st := s.launcher.ContainerFreezeState(name)
+	if st.ConfigAPI == nil {
+		// Container did not declare a config_api at load time;
+		// nothing to unfreeze. Treat as success so callers can
+		// invoke the API unconditionally.
+		s.log.Info("config-complete called on container without config_api (no-op)",
+			zap.String("container", name))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok", "frozen": "false"})
+		return
+	}
+	s.launcher.MarkConfigured(name)
+	s.log.Info("container configured via setConfigComplete (freeze lifted)",
+		zap.String("container", name))
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -953,7 +1041,31 @@ func (s *Server) replayRegistry(ctx context.Context) error {
 		zap.Int("count", len(entries)),
 		zap.String("path", s.cfg.RegistryPath),
 	)
+
+	// Deduplicate by host port: two entries on the same port would
+	// race at container start and only one can bind. Keep the first
+	// occurrence in registry order and skip the rest with a warning.
+	// This prevents the post-reboot lockup we hit when a stale app
+	// (e.g. an e2e benchmark) was still pinned to the same port as
+	// the production app.
+	seenPort := make(map[int]string, len(entries))
+	deduped := make([]launcher.LoadRequest, 0, len(entries))
 	for _, e := range entries {
+		if e.Port > 0 {
+			if owner, ok := seenPort[e.Port]; ok {
+				s.log.Warn("registry replay: skipping port collision",
+					zap.String("name", e.Name),
+					zap.String("conflicts_with", owner),
+					zap.Int("port", e.Port),
+				)
+				continue
+			}
+			seenPort[e.Port] = e.Name
+		}
+		deduped = append(deduped, e)
+	}
+
+	for _, e := range deduped {
 		req := e
 		go func() {
 			// Wait until launcher.Run() has connected to containerd —

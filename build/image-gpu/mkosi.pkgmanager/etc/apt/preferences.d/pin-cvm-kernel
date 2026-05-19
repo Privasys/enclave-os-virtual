@@ -39,5 +39,5 @@ Pin-Priority: -1
 # Remove this pin when bumping the linux-modules-nvidia-* pinned version
 # in mkosi.conf to one that allows the newer common pkg.
 Package: nvidia-kernel-common-595-server
-Pin: version 595.58.03-1
+Pin: version 595.58.03*
 Pin-Priority: 1001
