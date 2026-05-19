@@ -134,14 +134,14 @@ type Config struct {
 
 // Server is the management API server.
 type Server struct {
-	cfg          Config
-	log          *zap.Logger
-	launcher     *launcher.Launcher
-	verifier     *auth.Verifier
-	server       *http.Server
+	cfg      Config
+	log      *zap.Logger
+	launcher *launcher.Launcher
+	verifier *auth.Verifier
+	server   *http.Server
 	// registry persists every successful Load so the manager can replay
 	// them on restart. nil when Config.RegistryPath is empty.
-	registry     *registry
+	registry *registry
 	// sessionRelay handles browser→enclave sealed-CBOR sessions: it owns
 	// POST /__privasys/session-bootstrap and transparently unwraps any
 	// request whose Content-Type is application/privasys-sealed+cbor

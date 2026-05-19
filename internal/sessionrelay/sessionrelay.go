@@ -239,15 +239,13 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 			// via a header for client-side diagnostics.
 			w.Header().Set("X-Privasys-EncAuth-Reject", vErr.Error())
 		} else {
-			sessionID = payload.SID
 			sub = payload.Sub
-			// HKDF salt for EncAuth path is the raw decoded sid bytes
-			// (32 B base64url) so it stays compatible with the wallet
-			// signature input.
-			sessionIDRaw, _ = base64.RawURLEncoding.DecodeString(payload.SID)
-			if len(sessionIDRaw) == 0 {
-				sessionIDRaw = []byte(payload.SID)
-			}
+			// Note: the enclave session_id stays random even when an
+			// EncAuth voucher authenticates the bootstrap — it's a
+			// transport handle, not an identity. The persistent
+			// per-(user, app, device) `sid` lives in the IdP and the
+			// JWT, and the SDK keeps using it to fetch fresh vouchers.
+			_ = payload // (Sub already captured)
 		}
 	}
 

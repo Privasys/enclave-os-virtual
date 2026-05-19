@@ -25,8 +25,7 @@ import (
 
 // EncAuthEnvelope is the on-wire JSON form of a wallet-issued
 // silent-rebind voucher. Mirrors the shape stored in the IdP's
-// `sessions.encauth_blob` column. See
-// `.operations/identity-platform/session-relay/crypto-contract.md` §8.
+// `sessions.encauth_blob` column.
 type EncAuthEnvelope struct {
 	V       uint8  `json:"v"`
 	Payload string `json:"payload"` // base64url(canonical CBOR)

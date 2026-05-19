@@ -123,10 +123,8 @@ func (m *Manager) importFromDisk(ctx context.Context, ref, dir string) (client.I
 		// containerd's archive.ImportIndex only creates named images
 		// for manifest entries that carry an
 		// `org.opencontainers.image.ref.name` annotation. Older OCI
-		// layouts published by skopeo (and the
-		// .operations/scripts/publish-image-disk.sh pipeline) omit
-		// it: the blobs are imported but no Image record is created,
-		// so we get zero results.
+		// layouts published by skopeo omit it: the blobs are imported
+		// but no Image record is created, so we get zero results.
 		//
 		// Fall back to parsing index.json ourselves and explicitly
 		// creating an image record pointing at the manifest entry.
