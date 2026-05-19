@@ -22,7 +22,9 @@ package launcher
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/hex"
@@ -103,6 +105,18 @@ type Config struct {
 	// luks-setup at boot.  If empty or the file does not exist, OID 2.6
 	// is omitted from RA-TLS certificates (data partition is unencrypted).
 	DEKOriginFile string
+
+	// ToolSpecMgmtURL, ToolSpecEnclaveID, ToolSpecEnclaveToken are used
+	// to synthesise the per-container env vars TOOL_SPEC_URL +
+	// TOOL_SPEC_TOKEN that the confidential-ai puller polls for the
+	// fleet's MCP tool catalogue. When any of the three is empty the
+	// env vars are not injected, and tool-using workloads will run with
+	// an empty catalogue. Sourced from the manager's --mgmt-url /
+	// --enclave-id / --enclave-token (i.e. /data/manager.env) — no
+	// per-app config needed.
+	ToolSpecMgmtURL      string
+	ToolSpecEnclaveID    string
+	ToolSpecEnclaveToken string
 }
 
 // ConfigAPISpec describes a post-load configuration endpoint that the
@@ -311,6 +325,15 @@ type Launcher struct {
 	// matching successful call has been observed since (re)load.
 	configured map[string]bool
 
+	// containerTokens maps container name → launcher-minted bearer
+	// token. The token is injected into the container at start time as
+	// PRIVASYS_CONTAINER_TOKEN and bound to the container's name (also
+	// injected as PRIVASYS_CONTAINER_NAME). It is NOT an OIDC token —
+	// it only serves to bind self-targeted manager API calls
+	// (attestation-extensions, config-complete) to the calling
+	// container's identity. Loopback-only enforcement in the manager.
+	containerTokens map[string]string
+
 	// Loaded container specs (mirrors what is running).
 	specs map[string]manifest.Container
 
@@ -338,6 +361,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		oidExts:           make(map[string]map[string][]byte),
 		configAPI:         make(map[string]*ConfigAPISpec),
 		configured:        make(map[string]bool),
+		containerTokens:   make(map[string]string),
 		attestationTokens: make(map[string]string),
 		readyCh:           make(chan struct{}),
 	}
@@ -690,6 +714,20 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		}
 	}
 
+	// Check for duplicate host port. Containers share the host network
+	// namespace, so two apps cannot both bind the same TCP port — if we
+	// let a second Load through, the container would crash on bind and
+	// the manager would be left with a STOPPED task and a dangling
+	// in-memory spec. This bit us after an unattended VM restart where
+	// the registry had two GPU apps both pinned to 8080.
+	if req.Port > 0 {
+		for _, s := range l.specs {
+			if s.Port == req.Port {
+				return nil, fmt.Errorf("launcher: host port %d already in use by %q", req.Port, s.Name)
+			}
+		}
+	}
+
 	// Pull image.
 	l.log.Info("pulling image",
 		zap.String("name", req.Name),
@@ -725,11 +763,46 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		spec.Volumes = append(spec.Volumes, vi.MountPath+":/data")
 	}
 
-	// Start container. Inject runtime env vars (vault token etc.) into a
-	// copy of the spec — these are NOT stored in l.specs and therefore NOT
-	// included in the attestation Merkle tree.
+	// Start container. Inject runtime env vars (vault token, manager
+	// callback identity) into a copy of the spec — these are NOT stored
+	// in l.specs and therefore NOT included in the attestation Merkle
+	// tree.
 	runtimeSpec := spec
 	runtimeEnv := req.runtimeEnv()
+
+	// Mint a per-container manager-callback token. Containers share
+	// the host network namespace and reach the manager at
+	// 127.0.0.1:9443; the token + name pair lets the manager bind
+	// self-targeted calls (POST /api/v1/containers/{name}/...) to
+	// the calling container's identity. The token is a runtime secret
+	// (NOT in the attested spec).
+	containerToken, err := mintContainerToken()
+	if err != nil {
+		if req.Storage != "" && l.volMgr != nil {
+			_ = l.volMgr.Remove(req.Name)
+		}
+		return nil, fmt.Errorf("launcher: mint container token: %w", err)
+	}
+	if runtimeEnv == nil {
+		runtimeEnv = make(map[string]string)
+	}
+	runtimeEnv["PRIVASYS_CONTAINER_NAME"] = req.Name
+	runtimeEnv["PRIVASYS_CONTAINER_TOKEN"] = containerToken
+
+	// Synthesise puller env vars when the manager itself knows where to
+	// fetch tool specs from. Containers that don't care will ignore
+	// these; confidential-ai picks them up via envOr("TOOL_SPEC_URL",...)
+	// and starts polling the mgmt-service /api/v1/enclave/tool-spec
+	// endpoint. Empty fallbacks intentionally — a missing piece (e.g.
+	// pre-bootstrap manager.env) means the puller stays idle, which is
+	// the same behaviour as before this wire-up.
+	if l.cfg.ToolSpecMgmtURL != "" && l.cfg.ToolSpecEnclaveID != "" && l.cfg.ToolSpecEnclaveToken != "" {
+		base := strings.TrimRight(l.cfg.ToolSpecMgmtURL, "/")
+		runtimeEnv["TOOL_SPEC_URL"] = base + "/api/v1/enclave/tool-spec?enclave_id=" + l.cfg.ToolSpecEnclaveID
+		runtimeEnv["TOOL_SPEC_TOKEN"] = l.cfg.ToolSpecEnclaveToken
+		runtimeEnv["TOOL_SPEC_INTERVAL"] = "30s"
+	}
+
 	if len(runtimeEnv) > 0 {
 		runtimeSpec.Env = make(map[string]string, len(runtimeEnv))
 		for k, v := range runtimeEnv {
@@ -766,6 +839,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	} else {
 		l.configured[req.Name] = true
 	}
+	l.containerTokens[req.Name] = containerToken
 
 	// Recompute attestation.
 	l.recomputeAttestation()
@@ -850,6 +924,7 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	delete(l.oidExts, name)
 	delete(l.configAPI, name)
 	delete(l.configured, name)
+	delete(l.containerTokens, name)
 
 	// Recompute attestation.
 	l.recomputeAttestation()
@@ -1168,6 +1243,33 @@ func (l *Launcher) MarkConfigured(name string) {
 		return
 	}
 	l.configured[name] = true
+}
+
+// LookupContainerByToken returns the container name that matches the
+// given launcher-minted callback token, or empty string if no match.
+// Used by the manager middleware to bind self-targeted manager API
+// calls to a specific container identity (loopback only).
+func (l *Launcher) LookupContainerByToken(token string) string {
+	if token == "" {
+		return ""
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for name, t := range l.containerTokens {
+		if subtle.ConstantTimeCompare([]byte(t), []byte(token)) == 1 {
+			return name
+		}
+	}
+	return ""
+}
+
+// mintContainerToken returns a fresh 32-byte hex-encoded random token.
+func mintContainerToken() (string, error) {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf[:]), nil
 }
 
 // SetAttestationExtension installs (or updates) a per-app X.509

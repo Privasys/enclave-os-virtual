@@ -225,6 +225,13 @@ func runServe(args []string) error {
 		CAKeyPath:          *caKeyPath,
 		AttestationServers: []string(attestationServers),
 		DEKOriginFile:      *dekOriginFile,
+		// Wire tool-spec puller env injection. The launcher only
+		// synthesises TOOL_SPEC_* env vars when ALL three are set —
+		// pre-bootstrap (no enclave_id / token) leaves containers
+		// running with an empty catalogue, same as before.
+		ToolSpecMgmtURL:      *rsMgmtURL,
+		ToolSpecEnclaveID:    *rsEnclaveID,
+		ToolSpecEnclaveToken: *rsEnclaveToken,
 	}
 	l := launcher.New(launcherCfg, log)
 
