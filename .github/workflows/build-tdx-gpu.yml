@@ -118,19 +118,54 @@ jobs:
           echo "Downloaded kernel .debs:"
           ls -lh build/kernel/debs/*.deb
 
-      - name: Stash nvidia-kernel-common-595-server 595.58.03 (apt archive eviction workaround)
+      - name: Stash nvidia 595.58.03 .debs (apt archive eviction workaround)
         run: |
-          # noble-updates removed 595.58.03 in favor of 595.71.05 (2026-05),
-          # but `linux-modules-nvidia-595-server-open-6.17.0-23-generic`
-          # depends on common (<= 595.58.03-1) AND (>= 595.58.03). Until
-          # cvm-images bumps to ABI 6.17.0-29 (whose open modules accept
-          # 595.71.05) we must keep the matching common pkg in the local
-          # PackageDirectories=../kernel/debs tree so apt can find it.
-          # Source: Launchpad still serves superseded binaries via the
-          # primary archive +files endpoint.
-          curl -sSL -o build/kernel/debs/nvidia-kernel-common-595-server_595.58.03-0ubuntu0.24.04.1_amd64.deb \
-            "https://launchpad.net/ubuntu/+archive/primary/+files/nvidia-kernel-common-595-server_595.58.03-0ubuntu0.24.04.1_amd64.deb"
-          ls -lh build/kernel/debs/nvidia-kernel-common-595-server_*.deb
+          # noble-updates bumped the entire nvidia-graphics-drivers-595-server
+          # source from 595.58.03 -> 595.71.05 in May 2026, but the kABI-matched
+          # Ubuntu-signed `linux-modules-nvidia-595-server-open-6.17.0-23-generic`
+          # is pinned to `nvidia-kernel-common-595-server (<= 595.58.03-1)`.
+          # noble-updates only has 595.71.05 now -> apt cannot install the open
+          # modules at all. Until cvm-images ships an ABI 6.17.0-29 kernel (whose
+          # corresponding open modules accept 595.71.05) we restore the entire
+          # 595.58.03 binary set from Launchpad's primary +files endpoint into
+          # the local PackageDirectories=../kernel/debs tree, alongside an apt
+          # preferences pin (mkosi.pkgmanager/etc/apt/preferences.d/pin-cvm-kernel)
+          # that forces priority 1001 so apt downgrades from the noble-updates
+          # 595.71.05 set.
+          base="https://launchpad.net/ubuntu/+archive/primary/+files"
+          ver="595.58.03-0ubuntu0.24.04.1"
+          for pkg in \
+              libnvidia-cfg1-595-server \
+              libnvidia-common-595-server \
+              libnvidia-compute-595-server \
+              libnvidia-decode-595-server \
+              libnvidia-encode-595-server \
+              libnvidia-extra-595-server \
+              libnvidia-fbc1-595-server \
+              libnvidia-gl-595-server \
+              nvidia-compute-utils-595-server \
+              nvidia-kernel-common-595-server \
+              nvidia-utils-595-server; do
+            # libnvidia-common is arch:all, the rest are amd64.
+            if [ "$pkg" = "libnvidia-common-595-server" ] || [ "$pkg" = "libnvidia-extra-595-server" ]; then
+              arch=all
+            else
+              arch=amd64
+            fi
+            # libnvidia-extra-595-server is arch:amd64 actually. Inspect at runtime.
+            url="${base}/${pkg}_${ver}_${arch}.deb"
+            out="build/kernel/debs/${pkg}_${ver}_${arch}.deb"
+            echo "Fetching ${pkg} (${arch})"
+            if ! curl -fsSL -o "$out" "$url"; then
+              # Fallback: try the other arch suffix
+              alt_arch=$([ "$arch" = "amd64" ] && echo all || echo amd64)
+              url2="${base}/${pkg}_${ver}_${alt_arch}.deb"
+              out2="build/kernel/debs/${pkg}_${ver}_${alt_arch}.deb"
+              echo "  -> ${arch} not found, trying ${alt_arch}"
+              curl -fsSL -o "$out2" "$url2"
+            fi
+          done
+          ls -lh build/kernel/debs/*nvidia*.deb
 
       - name: Clone cvm-images (GPU overlay configs)
         env:
