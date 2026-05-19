@@ -19,25 +19,6 @@
 #      build/image-gpu/mkosi.conf.
 
 # Block the floating meta-packages that always resolve to the latest ABI.
-Package: linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 linux-modules-nvidia-595-server-open-generic-6.17 linux-modules-nvidia-595-server-open-generic-hwe-24.04
+Package: linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 linux-modules-nvidia-595-server-open-generic-6.17 linux-modules-nvidia-595-server-open-generic-hwe-24.04 linux-modules-nvidia-595-server-generic-6.17 linux-modules-nvidia-595-server-generic-hwe-24.04
 Pin: release *
 Pin-Priority: -1
-
-# Pin nvidia-kernel-common-595-server to the version compatible with our
-# fixed linux-modules-nvidia-595-server-open-6.17.0-23-generic.
-#
-# Why: noble-updates bumped nvidia-kernel-common-595-server from
-# 595.58.03-1 to 595.71.05-0ubuntu0.24.04.1 (2026-05) but the matching
-# linux-modules-nvidia-* for ABI 6.17.0-23 stayed at 595.58.03-1 (our
-# explicit `linux-modules-nvidia-595-server-open-6.17.0-23-generic` in
-# mkosi.conf has `Depends: nvidia-kernel-common-595-server (<= 595.58.03-1)`).
-# Without this pin apt picks the newer common pkg and the install fails:
-#   "linux-modules-nvidia-595-server-open-6.17.0-23-generic : Depends:
-#    nvidia-kernel-common-595-server (<= 595.58.03-1) but 595.71.05-... is
-#    to be installed".
-#
-# Remove this pin when bumping the linux-modules-nvidia-* pinned version
-# in mkosi.conf to one that allows the newer common pkg.
-Package: nvidia-kernel-common-595-server
-Pin: version 595.58.03*
-Pin-Priority: 1001
