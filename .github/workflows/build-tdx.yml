@@ -12,6 +12,10 @@ on:
         description: 'Publish image to GCP (requires WIF credentials)'
         type: boolean
         default: false
+      dev_profile:
+        description: 'Build the dev variant (--profile dev: SSH + debug tools, distinct ImageId/measurements). Never deploy to production.'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -189,11 +193,15 @@ jobs:
           chmod +x build/image/mkosi.extra/usr/bin/luks-setup
           cd build/image
           mkdir -p mkosi.cache
-          sudo mkosi --profile gcp --cache-dir mkosi.cache build
+          PROFILES="--profile gcp"
+          if [[ "${{ github.event.inputs.dev_profile }}" == "true" ]]; then
+            PROFILES="$PROFILES --profile dev"
+          fi
+          sudo mkosi $PROFILES --cache-dir mkosi.cache build
 
       - name: Replace unsigned GRUB with Canonical-signed binary
         run: |
-          RAW=$(ls build/image/enclave-os-virtual_*.raw)
+          RAW=$(ls build/image/enclave-os-virtual*_*.raw)
           LOOPDEV=$(sudo losetup --find --show --partscan "$RAW")
           sudo mkdir -p /mnt/esp
           sudo mount "${LOOPDEV}p1" /mnt/esp
@@ -207,7 +215,7 @@ jobs:
       - name: Extract dm-verity root hash
         id: verity
         run: |
-          RAW=$(ls build/image/enclave-os-virtual_*.raw)
+          RAW=$(ls build/image/enclave-os-virtual*_*.raw)
           LOOPDEV=$(sudo losetup --find --show --partscan "$RAW")
           sudo partprobe "$LOOPDEV" 2>/dev/null || true
           sleep 1
@@ -279,6 +287,9 @@ jobs:
           else
             RAW_VERSION="dev-$(git rev-parse --short HEAD)"
           fi
+          if [[ "${{ github.event.inputs.dev_profile }}" == "true" ]]; then
+            RAW_VERSION="${RAW_VERSION}-devprofile"
+          fi
           SLUG=$(echo "$RAW_VERSION" | tr '.' '-')
           echo "raw=$RAW_VERSION" >> "$GITHUB_OUTPUT"
           echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
@@ -286,7 +297,7 @@ jobs:
       - name: Package for GCP
         if: startsWith(github.ref, 'refs/tags/tdx-v') || github.event.inputs.publish_gcp == 'true'
         run: |
-          cp build/image/enclave-os-virtual_*.raw disk.raw
+          cp build/image/enclave-os-virtual*_*.raw disk.raw
           tar -czf "enclave-os-virtual-${{ steps.version.outputs.raw }}.tar.gz" disk.raw
           rm disk.raw
           ls -lh enclave-os-virtual-*.tar.gz
