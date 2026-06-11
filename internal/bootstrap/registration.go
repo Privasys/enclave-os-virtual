@@ -47,8 +47,14 @@ import (
 const registrationBindingLabel = "privasys-enclave-registration-v1"
 
 // reRegisterInterval is how often a pending enclave refreshes its
-// registration (missed callbacks, Spot IP drift).
-const reRegisterInterval = 30 * time.Minute
+// registration. Kept short: each re-register re-syncs the callback
+// token to BOTH the row and this process's listener, so an admin
+// approving (or re-approving after a reset-registration) within a few
+// minutes always reaches a listener holding the matching token — even
+// if manager-bootstrap restarted and lost its in-memory token. The
+// cost is one quote verification per interval while pending only; the
+// loop exits the moment the result callback arrives.
+const reRegisterInterval = 60 * time.Second
 
 type registerRequest struct {
 	Name         string `json:"name"`
