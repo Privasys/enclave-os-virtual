@@ -128,6 +128,7 @@ All Privasys OIDs live under the arc `1.3.6.1.4.1.65230`:
 | `1.3.6.1.4.1.65230.2.5` | Combined Workloads Hash | SHA-256 covering all container image digests |
 | `1.3.6.1.4.1.65230.2.6` | Data Encryption Key Origin | `"byok:<fingerprint>"` or `"generated"` — proves data-at-rest encryption and key provenance |
 | `1.3.6.1.4.1.65230.2.7` | Attestation Servers Hash | SHA-256 of the attestation server URL list |
+| `1.3.6.1.4.1.65230.2.8` | Image Profile | `"production"` or `"dev"` - baked into the measured rootfs by the mkosi build profile; verifiers reject dev images by default |
 | `1.3.6.1.4.1.65230.3.1` | Container Config Merkle Root | SHA-256 root of a per-container config tree |
 | `1.3.6.1.4.1.65230.3.2` | Container Image Digest | Raw SHA-256 digest of the OCI image |
 | `1.3.6.1.4.1.65230.3.3` | Container Image Ref | Full OCI image reference string |

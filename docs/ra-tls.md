@@ -91,7 +91,8 @@ Root CA (operator-provisioned)
       │        ├── Runtime Version Hash  (OID 1.3.6.1.4.1.65230.2.4)
       │        ├── Combined Workloads Hash (OID 1.3.6.1.4.1.65230.2.5)
       │        ├── DEK Origin            (OID 1.3.6.1.4.1.65230.2.6)
-      │        └── Attestation Servers   (OID 1.3.6.1.4.1.65230.2.7)
+      │        ├── Attestation Servers   (OID 1.3.6.1.4.1.65230.2.7)
+      │        └── Image Profile         (OID 1.3.6.1.4.1.65230.2.8)
       │
       ├── Container RA-TLS cert: "myapp.prod1.example.com"
       │        ├── TDX/SGX Quote         (OID 1.2.840.113741.1.5.5.1.6)
@@ -168,7 +169,8 @@ that encode the VM's attestation data and configuration state.
 │   ├── 2.4                           Runtime Version Hash
 │   ├── 2.5                           Combined Workloads Hash
 │   ├── 2.6                           Data Encryption Key Origin
-│   └── 2.7                           Attestation Servers Hash
+│   ├── 2.7                           Attestation Servers Hash
+│   └── 2.8                           Image Profile ("production" | "dev")
 └── 3.*                               Per-container OIDs
     ├── 3.1                           Container Config Merkle Root
     ├── 3.2                           Container Image Digest
@@ -188,6 +190,7 @@ Present in the **management API certificate** (platform hostname).
 | `1.3.6.1.4.1.65230.2.5` | Combined Workloads Hash | SHA-256 of all image digests | 32 bytes |
 | `1.3.6.1.4.1.65230.2.6` | Data Encryption Key Origin | `"byok:<fingerprint>"` | variable |
 | `1.3.6.1.4.1.65230.2.7` | Attestation Servers Hash | SHA-256 of server URL list | 32 bytes |
+| `1.3.6.1.4.1.65230.2.8` | Image Profile | `"production"` or `"dev"` — read from `/etc/privasys/image-profile`, baked into the dm-verity-measured rootfs by the mkosi build profile. Verifiers reject `"dev"` unless explicitly opted in (`allowDebugImages`). Absent on images predating the marker | variable |
 
 ### Per-Container OIDs
 
