@@ -10,13 +10,19 @@ ConditionPathExists=!/data/ca.crt
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-EnvironmentFile=/data/manager.env
+# Optional ("-"): on a first boot via self-registration manager.env does
+# not exist yet - the binary falls back to instance metadata for
+# MGMT_URL and writes manager.env itself once approved.
+EnvironmentFile=-/data/manager.env
 # Delivered out of band: on bare-metal QEMU (OVH) via -fw_cfg /
 # -smbios type=11 + ImportCredential=, on GCE via instance metadata
 # read by ai-gpu-startup.sh and copied into /run/secrets, etc.
 ImportCredential=bootstrap-service-key
+# When no bootstrap-service-key is delivered, the binary enters
+# self-registration and waits for an admin to approve - hence no
+# start timeout.
 ExecStart=/usr/sbin/manager-bootstrap
-TimeoutStartSec=120
+TimeoutStartSec=infinity
 StandardOutput=journal
 StandardError=journal
 

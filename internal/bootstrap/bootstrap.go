@@ -93,6 +93,14 @@ func Run(ctx context.Context, cfg Config) error {
 		host = h
 	}
 
+	if _, statErr := os.Stat(cfg.ServiceKeyPath); statErr != nil {
+		// No Phase-B service key delivered: fall back to self-registration
+		// (Option B) — enroll with a TDX quote bound to an ephemeral key
+		// and block until an admin approves or rejects. See registration.go.
+		fmt.Fprintln(os.Stderr, "manager-bootstrap: no bootstrap-service-key, entering self-registration")
+		return RunRegistration(ctx, cfg)
+	}
+
 	key, err := loadServiceKey(cfg.ServiceKeyPath)
 	if err != nil {
 		return fmt.Errorf("load service key: %w", err)

@@ -35,15 +35,25 @@ func main() {
 			cfg.HTTPTimeout = time.Duration(n) * time.Second
 		}
 	}
-	if cfg.ManagementURL == "" {
-		fmt.Fprintln(os.Stderr, "manager-bootstrap: MGMT_URL is required")
-		os.Exit(2)
+	// -measurements: post a fresh TDX quote to the management service
+	// for the measurement audit log (enclave-measurements.service, runs
+	// on boots where the enclave is already registered). Always exits 0:
+	// the audit trail must never break a boot, and legacy enclaves
+	// without a per-enclave credential simply skip it.
+	if len(os.Args) > 1 && os.Args[1] == "-measurements" {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if err := bootstrap.ReportMeasurements(ctx, cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "manager-bootstrap: measurements not reported: %v\n", err)
+		}
+		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	if err := bootstrap.Run(ctx, cfg); err != nil {
+	// MGMT_URL may be absent on first boot before manager.env exists;
+	// the self-registration path resolves it from instance metadata.
+	// No overall deadline: the registration flow legitimately blocks
+	// until an admin approves (per-request timeouts still apply).
+	if err := bootstrap.Run(context.Background(), cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "manager-bootstrap: %v\n", err)
 		os.Exit(1)
 	}
