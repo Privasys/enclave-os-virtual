@@ -11,6 +11,7 @@
 //	  2.5 Combined workloads hash (container images in Virtual, WASM apps in Mini)
 //	  2.6 Data Encryption Key Origin ("byok:<fingerprint>")
 //	  2.7 Attestation Servers Hash
+//	  2.8 Image Profile ("production" or "dev")
 //	3.*   Per-container OIDs (via SNI routing)
 //	  3.1 Container Config Merkle Root
 //	  3.2 Container Image Digest (SHA-256 of OCI manifest)
@@ -85,6 +86,21 @@ var DataEncryptionKeyOrigin = append(append(asn1.ObjectIdentifier{}, privasysArc
 //
 // Aligned with enclave-os-mini OID 2.7 (Attestation Servers Hash).
 var AttestationServersHash = append(append(asn1.ObjectIdentifier{}, privasysArc...), 2, 7)
+
+// ImageProfile is the build flavor of the VM image, as a UTF-8 string:
+//
+//   - "production" -- no SSH daemon, no debug tools, no interactive
+//     entry point
+//   - "dev"        -- built with the mkosi `dev` profile (openssh,
+//     strace, tcpdump, ...); NEVER acceptable for production workloads
+//
+// The value is read from /etc/privasys/image-profile, a marker baked
+// into the dm-verity-measured rootfs at image build time — it cannot be
+// changed at runtime, and a forged value would change the rootfs
+// measurement. Verifiers MUST reject "dev" unless explicitly opted in
+// (allowDebugImages). The OID is absent on images that predate the
+// marker.
+var ImageProfile = append(append(asn1.ObjectIdentifier{}, privasysArc...), 2, 8)
 
 // --- Per-container OIDs (1.3.6.1.4.1.65230.3.*) -------------------------
 
