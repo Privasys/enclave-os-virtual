@@ -1,12 +1,12 @@
 // manager-bootstrap is a Type=oneshot helper that runs before manager.service
-// on first boot. It fetches an access token from the Privasys IdP using a
-// JWT-bearer assertion built from a service-account key delivered via
-// systemd-creds (or cloud metadata), then asks the management service for
-// the CA bundle and writes it to /data/ca.crt + /data/ca.key.
+// on first boot. It enrolls the enclave with the management service via
+// self-registration (TDX quote bound to an ephemeral key) and blocks until
+// a platform admin approves the machine; approval delivers the CA bundle
+// and a per-enclave credential, written to /data. Admin approval is the
+// only way a new VM obtains a CA.
 //
-// All configuration comes from the systemd EnvironmentFile=/data/manager.env
-// the startup script wrote, plus the systemd credential
-// `bootstrap-service-key` exposed via $CREDENTIALS_DIRECTORY.
+// With -measurements it instead posts a fresh TDX quote for the
+// measurement audit log and always exits 0.
 package main
 
 import (
@@ -21,14 +21,9 @@ import (
 
 func main() {
 	cfg := bootstrap.Config{
-		DataDir:             os.Getenv("BOOTSTRAP_DATA_DIR"),
-		ManagerEnvPath:      os.Getenv("BOOTSTRAP_MANAGER_ENV"),
-		ServiceKeyPath:      os.Getenv("BOOTSTRAP_SERVICE_KEY"),
-		DekOriginPath:       os.Getenv("BOOTSTRAP_DEK_ORIGIN"),
-		IDPIssuer:           os.Getenv("OIDC_ISSUER"),
-		IDPAudience:         os.Getenv("OIDC_AUDIENCE"),
-		ManagementURL:       os.Getenv("MGMT_URL"),
-		AttestationRequired: os.Getenv("BOOTSTRAP_ATTESTATION_REQUIRED") == "true",
+		DataDir:        os.Getenv("BOOTSTRAP_DATA_DIR"),
+		ManagerEnvPath: os.Getenv("BOOTSTRAP_MANAGER_ENV"),
+		ManagementURL:  os.Getenv("MGMT_URL"),
 	}
 	if v := os.Getenv("BOOTSTRAP_HTTP_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {

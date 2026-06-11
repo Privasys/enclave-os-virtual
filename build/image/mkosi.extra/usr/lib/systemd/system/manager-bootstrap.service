@@ -14,13 +14,9 @@ RemainAfterExit=yes
 # not exist yet - the binary falls back to instance metadata for
 # MGMT_URL and writes manager.env itself once approved.
 EnvironmentFile=-/data/manager.env
-# Delivered out of band: on bare-metal QEMU (OVH) via -fw_cfg /
-# -smbios type=11 + ImportCredential=, on GCE via instance metadata
-# read by ai-gpu-startup.sh and copied into /run/secrets, etc.
-ImportCredential=bootstrap-service-key
-# When no bootstrap-service-key is delivered, the binary enters
-# self-registration and waits for an admin to approve - hence no
-# start timeout.
+# Self-registration blocks until a platform admin approves the
+# machine - hence no start timeout. Admin approval is the only way a
+# new VM obtains a CA.
 ExecStart=/usr/sbin/manager-bootstrap
 TimeoutStartSec=infinity
 StandardOutput=journal
