@@ -49,8 +49,20 @@ const (
 	hkdfInfo                = "privasys-session/v1"
 	dirInfoC2S              = "privasys-dir/c2s"
 	dirInfoS2C              = "privasys-dir/s2c"
-	defaultTTL              = 60 * time.Minute
+	// defaultTTL is a sliding inactivity window: every successfully
+	// authenticated sealed request extends the session by this much.
+	// Aligned with the IdP's 15-minute access-token cadence; idle
+	// sessions are GC'd and silently re-bootstrapped via EncAuth.
+	defaultTTL              = 15 * time.Minute
 	initPath                = "/__privasys/session-bootstrap"
+
+	// EncAuth rebind rate limit: at most rebindRateLimit voucher-backed
+	// bootstrap attempts (accepted or rejected) per sid per window. A
+	// misbehaving iframe re-bootstrapping in a tight loop burns CPU on
+	// signature checks and could churn legitimate sessions; legitimate
+	// silent rebinds happen at most a few times per hour.
+	rebindRateLimit  = 6
+	rebindRateWindow = time.Minute
 )
 
 // Manager owns active sessions. Safe for concurrent use.
@@ -72,11 +84,31 @@ type Manager struct {
 	// payload on success, or an error to fall through to FIDO2.
 	encAuthVerifier EncAuthVerifier
 
-	// Optional leaf cert hash (SHA-256 of DER) used to bind EncAuth
-	// vouchers to the enclave's RA-TLS leaf. Set by the host via
-	// SetLeafCertHash. When zero, the quote_hash field is not enforced.
-	leafCertHash [32]byte
-	hasLeafHash  bool
+	// Optional expected quote digest used to bind EncAuth vouchers to
+	// this enclave's attestation. This is the WALLET attestation digest
+	// (crypto-contract §4.1: SHA-256 over the canonical attestation
+	// field list) — NOT a hash of the RA-TLS leaf certificate. Set by
+	// the host via SetExpectedQuoteDigest, computed over the host's own
+	// attestation OID values. When zero, the voucher's quote_hash field
+	// is not enforced and instance pinning rests on enc_pub equality
+	// (sound: the identity key is regenerated on every restart).
+	expectedQuoteDigest    [32]byte
+	hasExpectedQuoteDigest bool
+
+	// Fixed-window EncAuth rebind counters keyed by voucher sid.
+	rebinds map[string]*rebindWindow
+
+	// Optional predicate: when it returns true for a non-sealed request,
+	// the middleware refuses it with 403 sealed-transport-required
+	// instead of passing it through. Used to enforce "no plaintext app
+	// bodies on an intermediary-terminated leg" (the gateway marks that
+	// leg with X-Privasys-Edge: terminate). Set via SetRequireSealed.
+	requireSealed func(*http.Request) bool
+}
+
+type rebindWindow struct {
+	start time.Time
+	count int
 }
 
 // Session holds derived keys and counters for a single SDK ↔ enclave pairing.
@@ -86,7 +118,7 @@ type Session struct {
 	C2SPrefix   [4]byte
 	S2CPrefix   [4]byte
 	S2CCtr      uint64
-	C2SLastSeen uint64 // largest c2s ctr accepted; rejects strict-replay
+	C2SNext     uint64 // smallest acceptable c2s ctr; rejects replay incl. the last frame
 	ExpiresAt   time.Time
 }
 
@@ -95,7 +127,12 @@ type Session struct {
 // EnsureEncStaticKey() at startup) so existing tests that don't drive
 // the bootstrap path keep working without ECDH setup.
 func NewManager() *Manager {
-	return &Manager{sessions: make(map[string]*Session), ttl: defaultTTL, now: time.Now}
+	return &Manager{
+		sessions: make(map[string]*Session),
+		rebinds:  make(map[string]*rebindWindow),
+		ttl:      defaultTTL,
+		now:      time.Now,
+	}
 }
 
 // EnsureEncStaticKey generates the long-lived enclave identity key if
@@ -136,18 +173,31 @@ func (m *Manager) SetEncAuthVerifier(v EncAuthVerifier) {
 	m.encAuthVerifier = v
 }
 
-// SetLeafCertHash records the SHA-256 hash of the enclave's RA-TLS
-// leaf certificate (DER). When set, EncAuth vouchers are rejected
-// unless their quote_hash field matches.
-func (m *Manager) SetLeafCertHash(h [32]byte) {
+// SetExpectedQuoteDigest arms the optional voucher quote_hash check.
+// The digest MUST be the wallet attestation digest from
+// crypto-contract §4.1 — SHA-256 over the canonical attestation field
+// list, computed by the host from its own attestation OID values. It
+// is NOT a hash of the RA-TLS leaf certificate; arming this with a
+// leaf hash would reject every legitimate voucher.
+func (m *Manager) SetExpectedQuoteDigest(h [32]byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.leafCertHash = h
-	m.hasLeafHash = true
+	m.expectedQuoteDigest = h
+	m.hasExpectedQuoteDigest = true
 }
 
 // SetTTL overrides the default session lifetime.
 func (m *Manager) SetTTL(d time.Duration) { m.ttl = d }
+
+// SetRequireSealed installs the predicate deciding which non-sealed
+// requests must be refused (403) rather than passed through. The
+// session-bootstrap endpoint is always exempt (it is JSON by design —
+// silent rebind posts it from the browser through the gateway).
+func (m *Manager) SetRequireSealed(f func(*http.Request) bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.requireSealed = f
+}
 
 // Middleware wraps next so that:
 //   - POST /privasys/session/init handles handshake itself and never reaches next.
@@ -163,6 +213,20 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 		}
 		ct := r.Header.Get("Content-Type")
 		if !strings.HasPrefix(ct, sealedContentType) {
+			m.mu.RLock()
+			requireSealed := m.requireSealed
+			m.mu.RUnlock()
+			if requireSealed != nil && requireSealed(r) {
+				// Intermediary-terminated leg (gateway sets
+				// X-Privasys-Edge: terminate) carrying a plaintext app
+				// request. Refusing it keeps the "the gateway can never
+				// see app data" invariant enforceable server-side; the
+				// SDK reacts by (re)establishing a sealed session.
+				// RA-TLS clients never hit this: their TLS terminates at
+				// the enclave itself and carries no marker.
+				http.Error(w, "sealed-transport-required", http.StatusForbidden)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -180,7 +244,7 @@ type initRequest struct {
 type initResponse struct {
 	SessionID string `json:"session_id"`
 	EncPub    string `json:"enc_pub"`
-	ExpiresAt int64  `json:"expires_at"` // epoch ms
+	ExpiresAt int64  `json:"expires_at"` // epoch seconds (crypto-contract §3)
 	// Subject identifier when the session was bootstrapped from an
 	// EncAuth voucher (silent rebind). Empty for FIDO2-bootstrapped
 	// sessions.
@@ -214,8 +278,8 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 	encPriv := m.encStaticPriv
 	encPubBytes := m.encStaticPub
 	verifier := m.encAuthVerifier
-	hasLeaf := m.hasLeafHash
-	leaf := m.leafCertHash
+	hasQuoteDigest := m.hasExpectedQuoteDigest
+	quoteDigest := m.expectedQuoteDigest
 	m.mu.RUnlock()
 
 	shared, err := encPriv.ECDH(sdkPub)
@@ -232,7 +296,17 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if req.EncAuth != nil && verifier != nil {
-		payload, vErr := verifier.Verify(req.EncAuth, encPubBytes, leaf, hasLeaf, m.now())
+		// Rate-limit voucher-backed bootstraps per sid BEFORE the
+		// signature checks: failed attempts are the abuse vector and
+		// the sid is readable with a cheap decode (a forged sid only
+		// rate-limits the forger's own bucket; signature verification
+		// still gates acceptance).
+		if sid := encAuthSID(req.EncAuth); sid != "" && !m.allowRebind(sid) {
+			w.Header().Set("X-Privasys-EncAuth-Reject", "rate-limited")
+			http.Error(w, "encauth rate-limited", http.StatusTooManyRequests)
+			return
+		}
+		payload, vErr := verifier.Verify(req.EncAuth, encPubBytes, quoteDigest, hasQuoteDigest, m.now())
 		if vErr != nil {
 			// Fall through to legacy bootstrap path so the SDK can
 			// retry with a fresh FIDO2 ceremony. Surface the reason
@@ -272,7 +346,7 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 	resp := initResponse{
 		SessionID: sessionID,
 		EncPub:    base64.RawURLEncoding.EncodeToString(encPubBytes),
-		ExpiresAt: sess.ExpiresAt.UnixMilli(),
+		ExpiresAt: sess.ExpiresAt.Unix(),
 		Sub:       sub,
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -322,18 +396,22 @@ func (m *Manager) handleSealed(w http.ResponseWriter, r *http.Request, next http
 		http.Error(w, "aead open", http.StatusUnauthorized)
 		return
 	}
-	// Lightweight monotonic-ish replay rejection: the SDK uses a strict
-	// counter, so allow only ctr > last seen. Out-of-order requests across
-	// parallel fetches will fail; that's a deliberate trade-off for now.
+	// Replay rejection: the SDK uses a strict counter, so accept only
+	// ctr >= the smallest not-yet-seen value and advance past it. This
+	// also rejects a byte-exact replay of the most recent frame (same
+	// nonce/AAD/ct would otherwise pass AEAD). Out-of-order requests
+	// across parallel fetches will fail; that's a deliberate trade-off.
 	m.mu.Lock()
-	if env.Ctr < sess.C2SLastSeen {
+	if env.Ctr < sess.C2SNext {
 		m.mu.Unlock()
 		http.Error(w, "replay", http.StatusUnauthorized)
 		return
 	}
-	if env.Ctr > sess.C2SLastSeen {
-		sess.C2SLastSeen = env.Ctr
-	}
+	sess.C2SNext = env.Ctr + 1
+	// Sliding inactivity TTL: an authenticated, non-replayed frame keeps
+	// the session alive. Touched only after AEAD open + counter accept so
+	// replays cannot extend a session's life.
+	sess.ExpiresAt = m.now().Add(m.ttl)
 	m.mu.Unlock()
 
 	// Replace request body with plaintext and call inner handler with a
@@ -382,6 +460,30 @@ func (m *Manager) gcLocked() {
 			delete(m.sessions, id)
 		}
 	}
+}
+
+// allowRebind records one EncAuth-backed bootstrap attempt for sid and
+// reports whether it is within the fixed per-window budget. Expired
+// windows are swept opportunistically so the map cannot grow unbounded
+// under randomly-forged sids.
+func (m *Manager) allowRebind(sid string) bool {
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.rebinds) > 10_000 {
+		for k, w := range m.rebinds {
+			if now.Sub(w.start) > rebindRateWindow {
+				delete(m.rebinds, k)
+			}
+		}
+	}
+	w, ok := m.rebinds[sid]
+	if !ok || now.Sub(w.start) > rebindRateWindow {
+		m.rebinds[sid] = &rebindWindow{start: now, count: 1}
+		return true
+	}
+	w.count++
+	return w.count <= rebindRateLimit
 }
 
 // -----------------------------------------------------------------------------
