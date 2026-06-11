@@ -122,54 +122,35 @@ jobs:
           echo "Downloaded kernel .debs:"
           ls -lh build/kernel/debs/*.deb
 
-      - name: Stash nvidia 595.58.03 .debs (apt archive eviction workaround)
+      # The 595.58.03 launchpad stash is gone: kernel ABI 6.17.0-35's
+      # Ubuntu-signed open modules pair with the 595.71.05 userspace that
+      # noble-updates carries today, so apt resolves everything natively.
+
+      - name: Bake signed NVIDIA CC bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # noble-updates bumped the entire nvidia-graphics-drivers-595-server
-          # source from 595.58.03 -> 595.71.05 in May 2026, but the kABI-matched
-          # Ubuntu-signed `linux-modules-nvidia-595-server-open-6.17.0-23-generic`
-          # is pinned to `nvidia-kernel-common-595-server (<= 595.58.03-1)`.
-          # noble-updates only has 595.71.05 now -> apt cannot install the open
-          # modules at all. Until cvm-images ships an ABI 6.17.0-29 kernel (whose
-          # corresponding open modules accept 595.71.05) we restore the entire
-          # 595.58.03 binary set from Launchpad's primary +files endpoint into
-          # the local PackageDirectories=../kernel/debs tree, alongside an apt
-          # preferences pin (mkosi.pkgmanager/etc/apt/preferences.d/pin-cvm-kernel)
-          # that forces priority 1001 so apt downgrades from the noble-updates
-          # 595.71.05 set.
-          base="https://launchpad.net/ubuntu/+archive/primary/+files"
-          ver="595.58.03-0ubuntu0.24.04.1"
-          for pkg in \
-              libnvidia-cfg1-595-server \
-              libnvidia-common-595-server \
-              libnvidia-compute-595-server \
-              libnvidia-decode-595-server \
-              libnvidia-encode-595-server \
-              libnvidia-extra-595-server \
-              libnvidia-fbc1-595-server \
-              libnvidia-gl-595-server \
-              nvidia-compute-utils-595-server \
-              nvidia-kernel-common-595-server \
-              nvidia-utils-595-server; do
-            # libnvidia-common is arch:all, the rest are amd64.
-            if [ "$pkg" = "libnvidia-common-595-server" ] || [ "$pkg" = "libnvidia-extra-595-server" ]; then
-              arch=all
-            else
-              arch=amd64
-            fi
-            # libnvidia-extra-595-server is arch:amd64 actually. Inspect at runtime.
-            url="${base}/${pkg}_${ver}_${arch}.deb"
-            out="build/kernel/debs/${pkg}_${ver}_${arch}.deb"
-            echo "Fetching ${pkg} (${arch})"
-            if ! curl -fsSL -o "$out" "$url"; then
-              # Fallback: try the other arch suffix
-              alt_arch=$([ "$arch" = "amd64" ] && echo all || echo amd64)
-              url2="${base}/${pkg}_${ver}_${alt_arch}.deb"
-              out2="build/kernel/debs/${pkg}_${ver}_${alt_arch}.deb"
-              echo "  -> ${arch} not found, trying ${alt_arch}"
-              curl -fsSL -o "$out2" "$url2"
-            fi
-          done
-          ls -lh build/kernel/debs/*nvidia*.deb
+          # The patched CC modules are loaded at boot by cvm-runtime-init
+          # from /usr/lib/nvidia-cc/<kver>/. Bake the SIGNED bundle from the
+          # same kernel-v* release as the kernel .debs so the vermagic
+          # matches and the signature chains to the kernel's builtin
+          # trusted keyring (module.sig_enforce=1).
+          set -euo pipefail
+          KERNEL_TAG=$(gh release list --repo Privasys/cvm-images \
+            --json tagName -q '.[].tagName' | grep '^kernel-v' | head -1)
+          mkdir -p /tmp/nvcc
+          gh release download "$KERNEL_TAG" --repo Privasys/cvm-images \
+            --pattern 'nvidia-cc-bundle-signed-*.tar.gz' --dir /tmp/nvcc
+          tar -xzf /tmp/nvcc/nvidia-cc-bundle-signed-*.tar.gz -C /tmp/nvcc
+          KVER=$(grep '^kernel_version=' /tmp/nvcc/nvidia-cc-bundle/BUILD-INFO | cut -d= -f2)
+          DEST="build/image-gpu/mkosi.extra.nvidia-cc/usr/lib/nvidia-cc/$KVER"
+          mkdir -p "$DEST"
+          cp -r /tmp/nvcc/nvidia-cc-bundle/modules "$DEST/"
+          cp -r /tmp/nvcc/nvidia-cc-bundle/firmware "$DEST/"
+          cp /tmp/nvcc/nvidia-cc-bundle/module-signing-cert.x509 "$DEST/"
+          tail -c 100 "$DEST/modules/nvidia.ko" | grep -q "Module signature appended" \
+            || { echo "::error::bundle modules are not signed"; exit 1; }
+          echo "Baked signed CC bundle for kernel $KVER"
 
       - name: Clone cvm-images (GPU overlay configs)
         env:
@@ -459,7 +440,7 @@ jobs:
               --maintenance-policy=TERMINATE \\
               --provisioning-model=SPOT \\
               --create-disk=auto-delete=yes,boot=yes,image=projects/${{ env.GCP_PROJECT }}/global/images/enclave-os-virtual-${{ steps.version.outputs.slug }},size=40,type=pd-balanced \\
-              --shielded-secure-boot \\
+              --no-shielded-secure-boot \\
               --shielded-vtpm \\
               --shielded-integrity-monitoring \\
               --confidential-compute-type=TDX

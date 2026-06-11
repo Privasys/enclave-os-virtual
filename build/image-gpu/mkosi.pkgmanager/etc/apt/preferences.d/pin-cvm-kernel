@@ -1,4 +1,4 @@
-# Pin the patched cvm-images kernel ABI (6.17.0-23-generic) and block any
+# Pin the patched cvm-images kernel ABI (6.17.0-35-generic) and block any
 # newer Ubuntu HWE kernel from being installed alongside it.
 #
 # Why: nvidia-driver-595-server-open and various other Recommends pull in
@@ -23,20 +23,6 @@ Package: linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 linux-mod
 Pin: release *
 Pin-Priority: -1
 
-# Prefer the locally-staged 595.58.03 nvidia binary set (downloaded
-# into PackageDirectories=../kernel/debs by the GPU image workflow)
-# over the noble-updates 595.71.05 set.
-#
-# Why: linux-modules-nvidia-595-server-open-6.17.0-23-generic depends on
-# nvidia-kernel-common-595-server (<= 595.58.03-1) AND (>= 595.58.03),
-# and the other nvidia-*-595-server user-space packages cross-depend on
-# the matching common version (e.g. libnvidia-compute pulls
-# `nvidia-kernel-common-595-server-595.71.05` virtual). To keep apt's
-# resolver consistent we pin the entire family.
-#
-# Pin-Priority 1001 lets apt downgrade if necessary. Remove this once
-# we bump cvm-images kernel to an ABI whose Ubuntu-signed open modules
-# accept 595.71.05 (e.g. 6.17.0-29).
-Package: nvidia-kernel-common-595-server libnvidia-cfg1-595-server libnvidia-common-595-server libnvidia-compute-595-server libnvidia-decode-595-server libnvidia-encode-595-server libnvidia-extra-595-server libnvidia-fbc1-595-server libnvidia-gl-595-server nvidia-compute-utils-595-server nvidia-utils-595-server
-Pin: version 595.58.03-0ubuntu0.24.04.1
-Pin-Priority: 1001
+# (The 595.58.03 launchpad-stash downgrade pin that used to live here was
+# removed on 2026-06-10: the 6.17.0-35 open modules pair natively with
+# the 595.71.05 userspace in noble-updates.)

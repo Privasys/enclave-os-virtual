@@ -74,7 +74,7 @@ fi
 # whose ABI we want to ship. The matching nvidia-cc-v* bundle (Step 0.4)
 # is also keyed by this tag, so a kernel bump and the patched-NVIDIA
 # module bump are atomic.
-CVM_KERNEL_TAG="${CVM_KERNEL_TAG:-kernel-v0.3.0}"
+CVM_KERNEL_TAG="${CVM_KERNEL_TAG:-kernel-v0.4.0}"
 KERNEL_DEBS_DIR="$SCRIPT_DIR/kernel/debs"
 if ! ls "$KERNEL_DEBS_DIR"/linux-image-*.deb 1>/dev/null 2>&1; then
     echo ""

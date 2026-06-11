@@ -42,3 +42,5 @@ build/image/mkosi.conf.d/uki.conf
 
 # Private operations docs
 GCP-Ops.md
+# CI-staged signed NVIDIA CC bundle (from cvm-images kernel-v* releases)
+build/image-gpu/mkosi.extra.nvidia-cc/
