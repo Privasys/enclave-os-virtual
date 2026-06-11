@@ -322,6 +322,20 @@ jobs:
           echo "$ROOT_HASH" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Predict RTMR measurements
+        id: rtmr
+        run: |
+          # Compute the expected TDX RTMR[1]/RTMR[2] values from the
+          # artifact (GPT, shim/GRUB Authenticode, grub.cfg command
+          # sequence, kernel, cmdline, initrds) so verifiers can pin
+          # measurements without ever booting the image. The predictor
+          # ships with cvm-images (cloned above).
+          RAW=$(ls build/image-gpu/enclave-os-virtual-gpu*_*.raw)
+          sudo build/cvm-images/predict-measurements.sh "$RAW" rtmr.json | tee /tmp/rtmr.txt
+          echo "rtmr1=$(awk '/RTMR\[1\]/ {print $3}' /tmp/rtmr.txt)" >> "$GITHUB_OUTPUT"
+          echo "rtmr2=$(awk '/RTMR\[2\]/ {print $3}' /tmp/rtmr.txt)" >> "$GITHUB_OUTPUT"
+          { echo "### Predicted RTMRs"; echo '```'; grep 'RTMR' /tmp/rtmr.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Verify signed NVIDIA CC bundle is baked
         run: |
           # The signed module bundle must end up inside the measured rootfs
@@ -391,6 +405,8 @@ jobs:
             | Measurement | Value |
             |-------------|-------|
             | **dm-verity root hash** | `${{ steps.verity.outputs.root_hash }}` |
+            | **Predicted RTMR[1]** | `${{ steps.rtmr.outputs.rtmr1 }}` |
+            | **Predicted RTMR[2]** | `${{ steps.rtmr.outputs.rtmr2 }}` |
             | **GCP Image** | `enclave-os-virtual-${{ steps.version.outputs.slug }}` |
 
             The dm-verity root hash is a SHA-256 digest of every byte on the read-only root filesystem.
