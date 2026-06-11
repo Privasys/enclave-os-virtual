@@ -322,6 +322,32 @@ jobs:
           echo "$ROOT_HASH" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Verify signed NVIDIA CC bundle is baked
+        run: |
+          # The signed module bundle must end up inside the measured rootfs
+          # at /usr/lib/nvidia-cc/<kver>/ — a silently skipped ExtraTrees
+          # leaves the image bootable but running unpatched modules.
+          RAW=$(ls build/image-gpu/enclave-os-virtual-gpu*_*.raw)
+          KVER=$(ls build/image-gpu/mkosi.extra.nvidia-cc/usr/lib/nvidia-cc/ | head -1)
+          LOOPDEV=$(sudo losetup --find --show --partscan "$RAW")
+          sudo partprobe "$LOOPDEV" 2>/dev/null || true
+          sleep 1
+          DATA_PART=""
+          for part in "${LOOPDEV}p"*; do
+            TYPE=$(sudo blkid -o value -s TYPE "$part" 2>/dev/null || true)
+            [ "$TYPE" = "erofs" ] && DATA_PART="$part"
+          done
+          [ -n "$DATA_PART" ] || { echo "::error::erofs root partition not found"; sudo losetup -d "$LOOPDEV"; exit 1; }
+          sudo dd if="$DATA_PART" of=/tmp/root.img bs=1M status=none
+          sudo losetup -d "$LOOPDEV"
+          if ! dump.erofs --ls --path="/usr/lib/nvidia-cc/$KVER/modules" /tmp/root.img | grep -qw nvidia.ko; then
+            echo "::error::signed NVIDIA CC bundle missing from image (/usr/lib/nvidia-cc/$KVER)"
+            sudo rm -f /tmp/root.img
+            exit 1
+          fi
+          sudo rm -f /tmp/root.img
+          echo "OK: signed NVIDIA CC bundle present at /usr/lib/nvidia-cc/$KVER"
+
       # ── GCP image publish (tag push or manual trigger) ──
 
       - name: Determine version slug
