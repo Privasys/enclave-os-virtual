@@ -1,0 +1,4 @@
+# snapshot.ubuntu.com aggressively rate-limits (503) parallel CI
+# fetches. Retry with backoff instead of failing the build.
+Acquire::Retries "10";
+Acquire::Retries::Delay::Maximum "120";
