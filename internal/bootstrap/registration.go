@@ -94,9 +94,19 @@ func RunRegistration(ctx context.Context, cfg Config) error {
 	if mgmtURL == "" {
 		return errors.New("registration: MGMT_URL not set and no management-url instance metadata")
 	}
-	name, err := os.Hostname()
-	if err != nil {
-		return fmt.Errorf("registration: hostname: %w", err)
+	// The OS hostname is still "localhost" this early in first boot
+	// (the startup script sets it later), so prefer instance metadata:
+	// machine-name (our canonical enclave name) or the instance name.
+	name := gceMetadata("instance/attributes/machine-name")
+	if name == "" {
+		name = gceMetadata("instance/name")
+	}
+	if name == "" {
+		h, err := os.Hostname()
+		if err != nil || h == "localhost" {
+			return errors.New("registration: cannot determine enclave name (no metadata, hostname unset)")
+		}
+		name = h
 	}
 	gateway := gceMetadata("instance/network-interfaces/0/access-configs/0/external-ip")
 	if gateway == "" {
