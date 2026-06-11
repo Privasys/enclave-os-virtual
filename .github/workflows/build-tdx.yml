@@ -285,7 +285,11 @@ jobs:
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             RAW_VERSION="${{ github.ref_name }}"
           else
-            RAW_VERSION="dev-$(git rev-parse --short HEAD)"
+            # Variant-distinct prefix: the GPU workflow publishes
+            # tdx-gpu-dev-<sha>, this one tdx-dev-<sha>. Without it, both
+            # workflows dispatched at the same commit race to create the
+            # same GCE image name.
+            RAW_VERSION="tdx-dev-$(git rev-parse --short HEAD)"
           fi
           if [[ "${{ github.event.inputs.dev_profile }}" == "true" ]]; then
             RAW_VERSION="${RAW_VERSION}-devprofile"

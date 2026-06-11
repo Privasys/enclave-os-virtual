@@ -330,7 +330,11 @@ jobs:
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             RAW_VERSION="${{ github.ref_name }}"
           else
-            RAW_VERSION="dev-$(git rev-parse --short HEAD)"
+            # Variant-distinct prefix: the base workflow publishes
+            # tdx-dev-<sha>, this one tdx-gpu-dev-<sha>. Without it, both
+            # workflows dispatched at the same commit race to create the
+            # same GCE image name.
+            RAW_VERSION="tdx-gpu-dev-$(git rev-parse --short HEAD)"
           fi
           if [[ "${{ github.event.inputs.dev_profile }}" == "true" ]]; then
             RAW_VERSION="${RAW_VERSION}-devprofile"
@@ -370,7 +374,7 @@ jobs:
 
             ### GPU Configuration
 
-            This image includes NVIDIA driver 590 with Confidential Computing mode for Intel TDX + H100.
+            This image includes the NVIDIA 595-server-open driver stack (CI-signed CC kernel modules) for Intel TDX + H100.
             Kernel cmdline includes `nvidia.NVreg_ConfidentialComputing=1` for encrypted GPU memory.
 
             ---
