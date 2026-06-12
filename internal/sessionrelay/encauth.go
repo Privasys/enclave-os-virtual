@@ -56,9 +56,12 @@ type EncAuthVerifier interface {
 	// Verify returns the decoded payload if the envelope is valid for
 	// this enclave. encStaticPub is the SEC1 uncompressed bytes of
 	// the enclave's identity key; payload.EncPub must equal it byte
-	// for byte. leafHash + hasLeaf control the optional quote_hash
-	// binding (some test setups have no RA-TLS leaf).
-	Verify(env *EncAuthEnvelope, encStaticPub []byte, leafHash [32]byte, hasLeaf bool, now time.Time) (*EncAuthPayload, error)
+	// for byte. quoteDigest + hasQuoteDigest control the optional
+	// quote_hash binding: when armed, the voucher's quote_hash must
+	// byte-equal the wallet attestation digest (crypto-contract §4.1
+	// — SHA-256 over the canonical attestation field list, NOT a hash
+	// of the RA-TLS leaf certificate).
+	Verify(env *EncAuthEnvelope, encStaticPub []byte, quoteDigest [32]byte, hasQuoteDigest bool, now time.Time) (*EncAuthPayload, error)
 }
 
 // JWKSResolver fetches the IdP's signing key by kid. Implementations
@@ -86,7 +89,7 @@ type DefaultEncAuthVerifier struct {
 }
 
 // Verify implements EncAuthVerifier.
-func (v *DefaultEncAuthVerifier) Verify(env *EncAuthEnvelope, encStaticPub []byte, leafHash [32]byte, hasLeaf bool, now time.Time) (*EncAuthPayload, error) {
+func (v *DefaultEncAuthVerifier) Verify(env *EncAuthEnvelope, encStaticPub []byte, quoteDigest [32]byte, hasQuoteDigest bool, now time.Time) (*EncAuthPayload, error) {
 	if env == nil {
 		return nil, errors.New("encauth: nil envelope")
 	}
@@ -147,9 +150,9 @@ func (v *DefaultEncAuthVerifier) Verify(env *EncAuthEnvelope, encStaticPub []byt
 		return nil, errors.New("encauth: enc_pub does not match this enclave")
 	}
 
-	// Optional leaf-cert binding.
-	if hasLeaf && !bytes.Equal(payload.QuoteHash, leafHash[:]) {
-		return nil, errors.New("encauth: quote_hash does not match RA-TLS leaf")
+	// Optional attestation-digest binding (crypto-contract §4.1).
+	if hasQuoteDigest && !bytes.Equal(payload.QuoteHash, quoteDigest[:]) {
+		return nil, errors.New("encauth: quote_hash does not match expected attestation digest")
 	}
 
 	// Time window.
@@ -289,6 +292,24 @@ func (r *HTTPJWKSResolver) refreshLocked(ctx context.Context) error {
 	r.any = anyKey
 	r.fetchedAt = time.Now()
 	return nil
+}
+
+// encAuthSID extracts the sid from an envelope with a cheap decode and
+// NO signature verification. Only safe for non-authoritative uses such
+// as rate-limit bucketing — never trust the result for authorisation.
+func encAuthSID(env *EncAuthEnvelope) string {
+	if env == nil {
+		return ""
+	}
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(env.Payload)
+	if err != nil {
+		return ""
+	}
+	var payload EncAuthPayload
+	if err := cbor.Unmarshal(payloadBytes, &payload); err != nil {
+		return ""
+	}
+	return payload.SID
 }
 
 // --- helpers ---------------------------------------------------------

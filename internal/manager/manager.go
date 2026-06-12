@@ -177,6 +177,24 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		registry:     newRegistry(cfg.RegistryPath),
 		sessionRelay: sr,
 	}
+	// No plaintext app bodies through intermediaries: when the gateway
+	// terminated the public TLS leg it marks the request with
+	// X-Privasys-Edge: terminate (and strips any client-supplied value).
+	// Plaintext requests for app hosts on that leg are refused so a
+	// front-end regression can never silently route user data through
+	// the gateway in the clear. Untouched: RA-TLS/splice traffic (no
+	// marker — TLS terminates here), the platform mux (token-authed
+	// management API, not a user data plane), the bootstrap endpoint
+	// (exempted inside the middleware), and well-known metadata.
+	sr.SetRequireSealed(func(r *http.Request) bool {
+		if r.Header.Get("X-Privasys-Edge") != "terminate" {
+			return false
+		}
+		if _, ok := s.lookupAppHost(hostOnly(r.Host)); !ok {
+			return false
+		}
+		return !strings.HasPrefix(r.URL.Path, "/.well-known/")
+	})
 	s.appProxy = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			host := hostOnly(pr.In.Host)
