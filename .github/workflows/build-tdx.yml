@@ -1,5 +1,12 @@
 name: Build & Publish TDX Image
 
+# Successive pushes to the same ref cancel the previous in-flight build:
+# nobody consumes an image superseded minutes later, and these builds
+# are 25+ GPU-runner minutes each.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
 on:
   push:
     branches: [main]
