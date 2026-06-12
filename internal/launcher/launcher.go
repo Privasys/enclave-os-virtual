@@ -698,6 +698,20 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		return nil, fmt.Errorf("launcher: invalid load request: %w", err)
 	}
 
+	// Digest-pinned disk:// refs survive in manager-apps.json across
+	// image-disk rotations; when the pinned build's disk was detached,
+	// re-pin to the newest attached disk of the same family so replay
+	// self-heals instead of failing every boot. The rewritten (still
+	// pinned) ref is what gets persisted and attested.
+	if newRef, ok, fbErr := container.ResolveDiskFallback(req.Image); fbErr == nil && ok {
+		l.log.Warn("pinned disk image missing; using same-family attached disk",
+			zap.String("name", req.Name),
+			zap.String("from", req.Image),
+			zap.String("to", newRef),
+		)
+		req.Image = newRef
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 

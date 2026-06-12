@@ -326,3 +326,94 @@ func pickPlatformManifest(idx *ocispec.Index) (ocispec.Descriptor, error) {
 	}
 	return ocispec.Descriptor{}, fmt.Errorf("no manifest matches host platform %s/%s", host.OS, host.Architecture)
 }
+
+// ResolveDiskFallback handles digest-pinned disk:// refs whose backing
+// directory has been garbage-collected (the image disk for that exact
+// build was detached). manager-apps.json pins the full digest, so a
+// replay after GC would fail forever even though a newer disk of the
+// same <repo>-<channel> family is attached. When the pinned dir is
+// missing, fall back to the newest attached sibling of the same family
+// and re-pin the ref to THAT layout's manifest digest (read from its
+// index.json): the import path re-hashes every blob against the
+// manifest, and the new digest is what gets attested (OID 3.3), so
+// integrity and transparency are preserved — the container simply
+// follows the family's currently-attached build.
+//
+// Returns ok=false when no fallback applies (ref not disk://, dir
+// present, no family suffix, or no candidate found).
+func ResolveDiskFallback(ref string) (string, bool, error) {
+	if !IsDiskRef(ref) {
+		return "", false, nil
+	}
+	dir, err := diskRefDir(ref)
+	if err != nil {
+		return "", false, err
+	}
+	if _, err := os.Stat(filepath.Join(dir, "oci-layout")); err == nil {
+		return "", false, nil // pinned dir is fine
+	}
+	name := strings.TrimPrefix(ref, "disk://")
+	if i := strings.Index(name, "@"); i >= 0 {
+		name = name[:i]
+	}
+	family, ok := diskFamily(name)
+	if !ok {
+		return "", false, nil
+	}
+	entries, err := os.ReadDir(DiskImageRoot)
+	if err != nil {
+		return "", false, err
+	}
+	var bestName string
+	var bestMod int64
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == name {
+			continue
+		}
+		if fam, ok := diskFamily(e.Name()); !ok || fam != family {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(DiskImageRoot, e.Name(), "oci-layout")); err != nil {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if mod := info.ModTime().UnixNano(); bestName == "" || mod > bestMod {
+			bestName, bestMod = e.Name(), mod
+		}
+	}
+	if bestName == "" {
+		return "", false, nil
+	}
+	idx, err := readOCIIndex(filepath.Join(DiskImageRoot, bestName))
+	if err != nil {
+		return "", false, fmt.Errorf("container: disk fallback %s: %w", bestName, err)
+	}
+	desc, err := pickPlatformManifest(idx)
+	if err != nil {
+		return "", false, fmt.Errorf("container: disk fallback %s: %w", bestName, err)
+	}
+	return "disk://" + bestName + "@" + desc.Digest.String(), true, nil
+}
+
+// diskFamily splits a disk layout name of the form
+// <repo>-<channel>-<hexbuild> into its family (<repo>-<channel>),
+// requiring a trailing all-hex build segment of at least 8 chars.
+func diskFamily(name string) (string, bool) {
+	i := strings.LastIndex(name, "-")
+	if i <= 0 {
+		return "", false
+	}
+	suffix := name[i+1:]
+	if len(suffix) < 8 {
+		return "", false
+	}
+	for _, c := range suffix {
+		if !strings.ContainsRune("0123456789abcdef", c) {
+			return "", false
+		}
+	}
+	return name[:i], true
+}

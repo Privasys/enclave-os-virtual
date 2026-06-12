@@ -125,3 +125,25 @@ func TestTarOCILayoutSkipsLostFound(t *testing.T) {
 		t.Errorf("lost+found should not appear in tar, got: %v", got)
 	}
 }
+
+func TestDiskFamily(t *testing.T) {
+	cases := []struct {
+		name   string
+		family string
+		ok     bool
+	}{
+		{"confidential-ai-prod-385944bfdc9e", "confidential-ai-prod", true},
+		{"confidential-ai-prod-dbc6a56cfc45", "confidential-ai-prod", true},
+		{"model-qwen36-35b-a3b-fp8", "", false},          // suffix not hex
+		{"confidential-ai-prod", "", false},              // "prod" too short/not hex
+		{"noseparator", "", false},
+		{"x-deadbeef01", "x", true},
+		{"trailing-DEADBEEF01", "", false},               // uppercase = not our convention
+	}
+	for _, c := range cases {
+		fam, ok := diskFamily(c.name)
+		if ok != c.ok || fam != c.family {
+			t.Errorf("diskFamily(%q) = (%q,%v), want (%q,%v)", c.name, fam, ok, c.family, c.ok)
+		}
+	}
+}
