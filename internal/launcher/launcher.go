@@ -117,6 +117,16 @@ type Config struct {
 	ToolSpecMgmtURL      string
 	ToolSpecEnclaveID    string
 	ToolSpecEnclaveToken string
+
+	// LoadToken, when non-empty, is injected as the per-container env
+	// var LOAD_TOKEN. confidential-ai requires it as the Bearer
+	// credential on /v1/models/{load,unload}; without it those
+	// endpoints run in legacy-open mode and any sealed-session client
+	// can unload the live model. Runtime secret: rides runtimeSpec.Env
+	// (same channel as PRIVASYS_CONTAINER_TOKEN), never the attested
+	// config Merkle tree. Sourced from the manager's --load-token
+	// (i.e. /data/manager.env).
+	LoadToken string
 }
 
 // ConfigAPISpec describes a post-load configuration endpoint that the
@@ -801,6 +811,13 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		runtimeEnv["TOOL_SPEC_URL"] = base + "/api/v1/enclave/tool-spec?enclave_id=" + l.cfg.ToolSpecEnclaveID
 		runtimeEnv["TOOL_SPEC_TOKEN"] = l.cfg.ToolSpecEnclaveToken
 		runtimeEnv["TOOL_SPEC_INTERVAL"] = "30s"
+	}
+
+	// Gate /v1/models/{load,unload}: confidential-ai requires LOAD_TOKEN
+	// as Bearer auth when set; without it those endpoints are open to
+	// any sealed-session client. Other workloads ignore the variable.
+	if l.cfg.LoadToken != "" {
+		runtimeEnv["LOAD_TOKEN"] = l.cfg.LoadToken
 	}
 
 	if len(runtimeEnv) > 0 {

@@ -151,6 +151,8 @@ func runServe(args []string) error {
 		"Local confidential-ai proxy URL for /v1/models/status feed; empty disables the proxy feed")
 	rsInterval := fs.Duration("push-interval", 30*time.Second,
 		"Interval between runtime-status pushes")
+	loadToken := fs.String("load-token", os.Getenv("LOAD_TOKEN"),
+		"Bearer token injected into containers as LOAD_TOKEN to gate /v1/models/{load,unload}; empty leaves those endpoints unauthenticated (env: LOAD_TOKEN)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -232,6 +234,7 @@ func runServe(args []string) error {
 		ToolSpecMgmtURL:      *rsMgmtURL,
 		ToolSpecEnclaveID:    *rsEnclaveID,
 		ToolSpecEnclaveToken: *rsEnclaveToken,
+		LoadToken:            *loadToken,
 	}
 	l := launcher.New(launcherCfg, log)
 
