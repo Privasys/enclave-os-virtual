@@ -193,6 +193,14 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		if _, ok := s.lookupAppHost(hostOnly(r.Host)); !ok {
 			return false
 		}
+		// Liveness/readiness endpoints stay probeable in the clear:
+		// they carry no user data and the chat front-end polls them
+		// through the gateway before any sealed session exists
+		// (reachability probe + model cold-start retry).
+		if r.Method == http.MethodGet &&
+			(r.URL.Path == "/healthz" || r.URL.Path == "/readiness") {
+			return false
+		}
 		return !strings.HasPrefix(r.URL.Path, "/.well-known/")
 	})
 	s.appProxy = &httputil.ReverseProxy{
