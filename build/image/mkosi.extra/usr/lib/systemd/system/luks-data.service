@@ -12,6 +12,13 @@ Before=data.mount
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# First-boot formatting does a full LUKS2 + dm-integrity wipe (writes
+# integrity tags across the whole PD), which exceeds systemd's default
+# 90s TimeoutStartSec on a multi-GB disk — the unit was being killed
+# mid-format, failing data.mount and cascading to manager-bootstrap.
+# The format legitimately takes minutes; let it run (matches
+# manager-bootstrap.service). Subsequent boots only luksOpen (fast).
+TimeoutStartSec=infinity
 ExecStart=/usr/bin/luks-setup
 ExecStop=/usr/sbin/cryptsetup luksClose data-crypt
 
