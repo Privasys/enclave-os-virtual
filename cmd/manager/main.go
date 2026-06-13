@@ -242,9 +242,9 @@ func runServe(args []string) error {
 	mgrCfg := manager.Config{
 		Addr:             "localhost:9443",
 		PlatformHostname: platformHostname,
-		// /data is the per-VM LUKS-encrypted volume — the registry MUST
-		// live here so secrets (StorageKey, VaultToken) are not exposed
-		// on the unencrypted rootfs. Set to empty to disable persistence.
+		// /data is the per-VM LUKS-encrypted volume — keep the registry
+		// here (entries may carry Env values flagged secret; volume keys
+		// are never persisted). Set to empty to disable persistence.
 		RegistryPath: "/data/manager-apps.json",
 		// Same OIDC issuer used for bearer-token verification is also
 		// the EncAuth IdP: the session-relay middleware uses it to

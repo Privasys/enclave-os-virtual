@@ -119,9 +119,11 @@ type Config struct {
 
 	// RegistryPath is the on-disk JSON file persisting every successful
 	// container Load so the manager can replay them on restart.
-	// MUST live on the per-VM LUKS-encrypted /data volume — entries
-	// contain runtime secrets (StorageKey, VaultToken). Empty disables
-	// persistence (dev/test only).
+	// Keep it on the per-VM LUKS-encrypted /data volume — entries may
+	// contain Env values flagged secret. Volume keys are NOT persisted:
+	// vault-backed volumes (KeyHandle) are re-resolved from the
+	// constellation on replay. Empty disables persistence (dev/test
+	// only).
 	RegistryPath string
 
 	// IdpIssuer is the OIDC issuer URL (e.g. "https://privasys.id")
@@ -636,9 +638,8 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 		zap.String("name", req.Name),
 		zap.String("image", req.Image),
 		zap.Int("port", req.Port),
-		zap.Bool("vault_token", req.VaultToken != ""),
 		zap.String("storage", req.Storage),
-		zap.Bool("storage_key", req.StorageKey != ""),
+		zap.String("key_handle", req.KeyHandle),
 		zap.String("auth_source", result.Source),
 		zap.String("auth_subject", result.Subject),
 	)

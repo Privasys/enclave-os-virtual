@@ -7,6 +7,8 @@ go 1.25.0
 // Build with: GOROOT=~/go-ratls go build ./cmd/manager
 
 require (
+	enclave-os-mini/clients/go v0.0.0
+	github.com/Privasys/enclave-vaults-client/go v0.0.0
 	github.com/containerd/containerd/v2 v2.0.4
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/platforms v1.0.0-rc.1
@@ -19,6 +21,16 @@ require (
 	golang.org/x/crypto v0.31.0
 	golang.org/x/sync v0.12.0
 	gopkg.in/yaml.v3 v3.0.1
+)
+
+// Sibling checkouts: ra-tls-clients' module path (enclave-os-mini/clients/go)
+// is not resolvable, so both SDKs are consumed via replace — the org-wide
+// pattern (management-service does the same). CI clones the two repos to
+// these relative locations; locally they match the standard workspace
+// layout (Privasys/{platform,enclave-os}/...).
+replace (
+	enclave-os-mini/clients/go => ../../platform/ra-tls-clients/go
+	github.com/Privasys/enclave-vaults-client/go => ../../platform/enclave-vaults-client/go
 )
 
 require (

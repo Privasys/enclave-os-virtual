@@ -11,10 +11,11 @@
 // /data/manager-apps.json) containing a JSON array of LoadRequest
 // objects. Writes are atomic (tmp+rename), 0600, root-owned.
 //
-// Security: LoadRequest contains runtime secrets (VaultToken,
-// StorageKey, Env values flagged secret). The registry path MUST live
-// on the per-VM LUKS-encrypted /data volume — it is unsafe to point it
-// at the unencrypted rootfs.
+// Security: LoadRequest no longer carries volume-key material —
+// vault-backed volumes persist only the (non-secret) KeyHandle and are
+// re-resolved from the constellation on replay. Env values flagged
+// secret may still appear, so keep the registry path on the per-VM
+// LUKS-encrypted /data volume rather than the unencrypted rootfs.
 
 package manager
 

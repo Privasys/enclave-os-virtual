@@ -82,9 +82,23 @@ jobs:
           echo "/usr/local/go-ratls/bin" >> "$GITHUB_PATH"
           /usr/local/go-ratls/bin/go version
 
+      - name: Clone SDK siblings (go.mod replace directives)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # vaultkey (vault-backed volume keys) consumes the vault SDK +
+          # ra-tls-clients via replace directives mirroring the local
+          # workspace layout (see go.mod).
+          gh repo clone Privasys/ra-tls-clients "$GITHUB_WORKSPACE/../../platform/ra-tls-clients" -- --depth 1
+          gh repo clone Privasys/enclave-vaults-client "$GITHUB_WORKSPACE/../../platform/enclave-vaults-client" -- --depth 1
+
       - name: Build manager binary
         run: |
+          # -tags ratls: the vault key flow reads the vault's challenge
+          # nonce from tls.CertificateRequestInfo.RATLSChallenge (Privasys
+          # Go fork, installed above).
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+            -tags ratls \
             -ldflags="-s -w" \
             -o build/image/mkosi.extra/usr/bin/manager \
             ./cmd/manager/

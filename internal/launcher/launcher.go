@@ -45,6 +45,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/merkle"
 	"github.com/Privasys/enclave-os-virtual/internal/oids"
 	"github.com/Privasys/enclave-os-virtual/internal/tpm"
+	"github.com/Privasys/enclave-os-virtual/internal/vaultkey"
 	"github.com/Privasys/enclave-os-virtual/internal/volume"
 
 	"github.com/containerd/containerd/v2/client"
@@ -165,15 +166,6 @@ type LoadRequest struct {
 	// HealthCheck defines how to verify the container is ready.
 	HealthCheck *manifest.HealthCheck `json:"health_check,omitempty"`
 
-	// VaultToken is an optional bearer token for authenticating to
-	// vault instances. If set, it is injected as the VAULT_TOKEN
-	// environment variable at container creation time.
-	//
-	// IMPORTANT: This field is a runtime secret and is deliberately
-	// excluded from the per-container Config Merkle Tree. Changing
-	// the vault token does not change the attested container identity.
-	VaultToken string `json:"vault_token,omitempty"`
-
 	// Storage is the requested size for a per-container encrypted volume
 	// (e.g. "1G", "500M"). If non-empty a LUKS2+AEAD logical volume of
 	// this size is created on the "containers" VG and bind-mounted into
@@ -183,12 +175,25 @@ type LoadRequest struct {
 	// the storage size changes the attested container identity.
 	Storage string `json:"storage,omitempty"`
 
-	// StorageKey is the LUKS passphrase for the per-container volume.
-	// If empty, a random 256-bit key is generated inside the enclave.
-	//
-	// IMPORTANT: This is a runtime secret and is deliberately excluded
-	// from the per-container Config Merkle Tree.
-	StorageKey string `json:"storage_key,omitempty"`
+	// KeyHandle names the vault key holding (or reserved for) this
+	// container's volume DEK, e.g.
+	// "vault:apps.privasys.org/<app-id>/storage-kek/v1". When set, the
+	// DEK is reconstructed from (or, on first boot, generated in-enclave
+	// and filled into) the vault constellation — see internal/vaultkey.
+	// The handle is not a secret; the platform never sees the DEK.
+	// When empty and Storage is set, a throwaway DEK is generated
+	// in-enclave (key_origin "generated"): the volume does not survive a
+	// host reboot.
+	KeyHandle string `json:"key_handle,omitempty"`
+
+	// VaultEndpoints, VaultMrenclave and VaultAttestationServer address
+	// and pin the vault constellation for KeyHandle resolution. Supplied
+	// by the platform; untrusted (each vault is verified by attestation
+	// at dial time, the MRENCLAVE pin and AS are part of what this VM
+	// will accept, not secrets).
+	VaultEndpoints          []string `json:"vault_endpoints,omitempty"`
+	VaultMrenclave          string   `json:"vault_mrenclave,omitempty"`
+	VaultAttestationServer  string   `json:"vault_attestation_server,omitempty"`
 
 	// Hostname is the external FQDN for this container's Caddy route
 	// and extension files. If set, it overrides the auto-derived
@@ -238,9 +243,10 @@ func (r *LoadRequest) Validate() error {
 // toContainerSpec converts a LoadRequest to a manifest.Container spec
 // that the container manager understands.
 //
-// Note: VaultToken is deliberately NOT included here — it is a runtime
-// secret that must not be measured into the Config Merkle Tree. It is
-// injected separately at container creation time via runtimeEnv().
+// Note: the vault addressing fields (KeyHandle, VaultEndpoints, ...)
+// are deliberately NOT included here — they are deployment plumbing,
+// not workload identity. The volume's key origin is attested
+// separately via OID 3.4.
 func (r *LoadRequest) toContainerSpec() manifest.Container {
 	return manifest.Container{
 		Name:        r.Name,
@@ -258,11 +264,7 @@ func (r *LoadRequest) toContainerSpec() manifest.Container {
 // runtimeEnv returns additional environment variables that should be
 // injected at container creation time but NOT measured into attestation.
 func (r *LoadRequest) runtimeEnv() map[string]string {
-	env := make(map[string]string)
-	if r.VaultToken != "" {
-		env["VAULT_TOKEN"] = r.VaultToken
-	}
-	return env
+	return make(map[string]string)
 }
 
 // Launcher is the main workload orchestrator.
@@ -772,17 +774,40 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		zap.String("digest", hex.EncodeToString(digest)),
 	)
 
-	// Provision per-container encrypted volume if requested.
+	// Provision per-container encrypted volume if requested. With a
+	// KeyHandle the DEK comes from (or, on first boot, is filled into)
+	// the vault constellation, so the volume survives host reboots and
+	// enclave upgrades without the platform ever seeing the key. Without
+	// one, a throwaway in-enclave DEK is generated (volume dies with the
+	// VM).
 	var volEncryption string
 	if req.Storage != "" {
 		if l.volMgr == nil {
 			return nil, fmt.Errorf("launcher: encrypted storage requested but no 'containers' VG available")
 		}
-		vi, err := l.volMgr.Create(req.Name, req.Storage, req.StorageKey)
+		volumeKey := ""
+		volOrigin := ""
+		if req.KeyHandle != "" {
+			keyHex, origin, err := vaultkey.ResolveOrProvision(ctx, l.log, vaultkey.Config{
+				Endpoints:            req.VaultEndpoints,
+				MrenclaveHex:         req.VaultMrenclave,
+				AttestationServerURL: req.VaultAttestationServer,
+			}, req.KeyHandle, digest)
+			if err != nil {
+				return nil, fmt.Errorf("launcher: vault volume key: %w", err)
+			}
+			volumeKey = keyHex
+			volOrigin = origin
+		}
+		vi, err := l.volMgr.Create(req.Name, req.Storage, volumeKey)
 		if err != nil {
 			return nil, fmt.Errorf("launcher: failed to create encrypted volume: %w", err)
 		}
 		volEncryption = vi.KeyOrigin
+		if volOrigin != "" {
+			// Attested key origin (OID 3.4): vault-backed, named handle.
+			volEncryption = volOrigin
+		}
 		// Auto-inject the volume mount: /run/containers/<name>:/data
 		spec.Volumes = append(spec.Volumes, vi.MountPath+":/data")
 	}

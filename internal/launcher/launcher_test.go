@@ -5,50 +5,34 @@ import (
 )
 
 func TestLoadRequestRuntimeEnv(t *testing.T) {
-	// With vault token.
 	req := LoadRequest{
-		Name:       "test",
-		Image:      "example.com/img@sha256:abcd",
-		Port:       8080,
-		VaultToken: "secret-token-123",
-	}
-	env := req.runtimeEnv()
-	if env["VAULT_TOKEN"] != "secret-token-123" {
-		t.Fatalf("expected VAULT_TOKEN=secret-token-123, got %q", env["VAULT_TOKEN"])
-	}
-
-	// Without vault token.
-	req2 := LoadRequest{
-		Name:  "test2",
+		Name:  "test",
 		Image: "example.com/img@sha256:abcd",
 		Port:  8080,
 	}
-	env2 := req2.runtimeEnv()
-	if len(env2) != 0 {
-		t.Fatalf("expected empty runtime env, got %v", env2)
+	if env := req.runtimeEnv(); len(env) != 0 {
+		t.Fatalf("expected empty runtime env, got %v", env)
 	}
 }
 
-func TestVaultTokenNotInSpec(t *testing.T) {
+func TestVaultFieldsNotInSpec(t *testing.T) {
 	req := LoadRequest{
-		Name:       "test",
-		Image:      "example.com/img@sha256:abcd",
-		Port:       8080,
-		VaultToken: "secret-token",
+		Name:                   "test",
+		Image:                  "example.com/img@sha256:abcd",
+		Port:                   8080,
+		KeyHandle:              "vault:apps.privasys.org/app/storage-kek/v1",
+		VaultEndpoints:         []string{"141.94.219.130:8443"},
+		VaultMrenclave:         "015ff920efbe97be7593a657169d10fb9f7ab285805c7b02d81a807431c427ae",
+		VaultAttestationServer: "https://as.privasys.org/verify",
 	}
 
 	spec := req.toContainerSpec()
 
-	// The spec's Env should NOT contain VAULT_TOKEN — it is injected
-	// only at container creation time, never measured into the
-	// per-container Merkle tree.
-	if _, ok := spec.Env["VAULT_TOKEN"]; ok {
-		t.Fatal("VAULT_TOKEN should not be in the attested spec")
-	}
-
-	// Runtime env helper should surface the vault token.
-	if req.runtimeEnv()["VAULT_TOKEN"] != "secret-token" {
-		t.Fatal("runtimeEnv should expose VAULT_TOKEN for runtime injection")
+	// The vault addressing fields are deployment plumbing, not workload
+	// identity: they must not leak into the attested container spec.
+	// (The resulting key origin IS attested, via OID 3.4.)
+	if _, ok := spec.Env["KEY_HANDLE"]; ok {
+		t.Fatal("vault fields should not be in the attested spec env")
 	}
 }
 
@@ -64,8 +48,12 @@ func TestValidateLoadRequest(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "valid with vault token",
-			req:     LoadRequest{Name: "a", Image: "img@sha256:abc", Port: 443, VaultToken: "tok"},
+			name: "valid with key handle",
+			req: LoadRequest{
+				Name: "a", Image: "img@sha256:abc", Port: 443,
+				Storage:   "1G",
+				KeyHandle: "vault:apps.privasys.org/a/storage-kek/v1",
+			},
 			wantErr: false,
 		},
 		{
