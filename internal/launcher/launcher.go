@@ -794,8 +794,10 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				AttestationServerURL: req.VaultAttestationServer,
 				// The manager fetches the attestation-server bearer from
 				// mgmt-service (it has no OIDC key); reuse the MGMT_URL +
-				// ENCLAVE_TOKEN it already holds for runtime-status.
+				// ENCLAVE_ID + ENCLAVE_TOKEN it already holds for
+				// runtime-status.
 				MgmtURL:      l.cfg.ToolSpecMgmtURL,
+				EnclaveID:    l.cfg.ToolSpecEnclaveID,
 				EnclaveToken: l.cfg.ToolSpecEnclaveToken,
 			}, req.KeyHandle, digest)
 			if err != nil {

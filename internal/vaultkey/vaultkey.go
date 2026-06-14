@@ -60,12 +60,14 @@ type Config struct {
 	// AttestationServerURL is the quote-verification endpoint used to
 	// verify each vault's quote (e.g. "https://as.privasys.org/verify").
 	AttestationServerURL string
-	// MgmtURL and EnclaveToken let the manager fetch a short-lived OIDC
-	// bearer for the attestation-server quote verification (the manager
-	// has no OIDC key of its own; the platform mints the token on demand,
-	// authenticated by the per-enclave credential). Both come from the
-	// manager's env (MGMT_URL, ENCLAVE_TOKEN), delivered at approval.
+	// MgmtURL, EnclaveID and EnclaveToken let the manager fetch a
+	// short-lived OIDC bearer for the attestation-server quote
+	// verification (the manager has no OIDC key of its own; the platform
+	// mints the token on demand, authenticated by the per-enclave
+	// credential). All come from the manager's env (MGMT_URL, ENCLAVE_ID,
+	// ENCLAVE_TOKEN), delivered at approval.
 	MgmtURL      string
+	EnclaveID    string
 	EnclaveToken string
 }
 
@@ -89,22 +91,25 @@ func (c Config) validate() error {
 	if c.AttestationServerURL == "" {
 		return errors.New("vaultkey: attestation server URL is required")
 	}
-	if c.MgmtURL == "" || c.EnclaveToken == "" {
-		return errors.New("vaultkey: MgmtURL and EnclaveToken are required (to fetch the attestation-server token)")
+	if c.MgmtURL == "" || c.EnclaveID == "" || c.EnclaveToken == "" {
+		return errors.New("vaultkey: MgmtURL, EnclaveID and EnclaveToken are required (to fetch the attestation-server token)")
 	}
 	return nil
 }
 
 // fetchAttestationToken gets a short-lived OIDC bearer from the
 // management service (authed by the per-enclave credential) for the
-// attestation-server quote verification.
+// attestation-server quote verification. The credential auth resolves
+// the enclave row from the enclave_id in the body.
 func fetchAttestationToken(ctx context.Context, cfg Config) (string, error) {
 	url := strings.TrimRight(cfg.MgmtURL, "/") + "/api/v1/enclave/attestation-token"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	reqBody, _ := json.Marshal(map[string]string{"enclave_id": cfg.EnclaveID})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(reqBody)))
 	if err != nil {
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.EnclaveToken)
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("attestation-token request: %w", err)

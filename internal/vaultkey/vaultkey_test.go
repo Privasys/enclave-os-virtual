@@ -75,6 +75,7 @@ func TestConfigValidate(t *testing.T) {
 		MrenclaveHex:         "015ff920efbe97be7593a657169d10fb9f7ab285805c7b02d81a807431c427ae",
 		AttestationServerURL: "https://as.privasys.org/verify",
 		MgmtURL:              "https://api-test.developer.privasys.org",
+		EnclaveID:            "bc60c540-6d11-4a7c-97b3-1c55182f2663",
 		EnclaveToken:         "tok",
 	}
 	if err := good.validate(); err != nil {
