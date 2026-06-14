@@ -12,11 +12,17 @@
 # manager when a container is loaded with storage={size}.
 set -euo pipefail
 
-# Prefer a dedicated attached PD (device-name=containers, surfaced by GCE
+# Use the dedicated attached PD (device-name=containers, surfaced by GCE
 # at /dev/disk/by-id/google-containers). It survives enclave IMAGE
-# UPGRADES, which replace the boot disk and therefore wipe the in-image
-# boot-disk 'containers' partition along with every per-container volume.
-# Fall back to that partition for VMs provisioned without the PD.
+# UPGRADES, which replace the boot disk. The /dev/disk/by-id/google-*
+# symlinks are created by udev (65-gce-disk-naming.rules) a couple of
+# seconds into boot, sometimes AFTER this service starts, so wait briefly
+# rather than racing. Fall back to the legacy in-image boot-disk partition
+# only for VMs that predate the PD (it does NOT survive image upgrades).
+for _ in $(seq 1 30); do
+    [ -b /dev/disk/by-id/google-containers ] && break
+    sleep 1
+done
 if [ -b /dev/disk/by-id/google-containers ]; then
     PART="/dev/disk/by-id/google-containers"
 else
