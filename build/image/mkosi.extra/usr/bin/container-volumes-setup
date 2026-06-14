@@ -12,7 +12,16 @@
 # manager when a container is loaded with storage={size}.
 set -euo pipefail
 
-PART="/dev/disk/by-partlabel/containers"
+# Prefer a dedicated attached PD (device-name=containers, surfaced by GCE
+# at /dev/disk/by-id/google-containers). It survives enclave IMAGE
+# UPGRADES, which replace the boot disk and therefore wipe the in-image
+# boot-disk 'containers' partition along with every per-container volume.
+# Fall back to that partition for VMs provisioned without the PD.
+if [ -b /dev/disk/by-id/google-containers ]; then
+    PART="/dev/disk/by-id/google-containers"
+else
+    PART="/dev/disk/by-partlabel/containers"
+fi
 VG="containers"
 
 # ── 0. Provision a writable LVM_SYSTEM_DIR on tmpfs ───────────────────────
