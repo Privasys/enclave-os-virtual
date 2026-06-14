@@ -1,28 +1,17 @@
 [Unit]
 Description=Enclave OS (Virtual) — Workload Manager
 Documentation=https://github.com/Privasys/enclave-os-virtual
-After=containerd.service caddy.service network-online.target data.mount luks-data.service container-volumes.service manager-ready.service
+After=containerd.service caddy.service network-online.target data.mount luks-data.service container-volumes.service
 Requires=containerd.service caddy.service
-Wants=network-online.target container-volumes.service manager-ready.service
+Wants=network-online.target container-volumes.service
 
 [Service]
 Type=simple
 RuntimeDirectory=manager/extensions
-EnvironmentFile=-/data/manager.env
-ExecStart=/usr/bin/manager serve \
-    --ca-cert ${CA_CERT:-/data/ca.crt} \
-    --ca-key ${CA_KEY:-/data/ca.key} \
-    --attestation-servers ${ATTESTATION_SERVERS} \
-    --caddy-listen :443 \
-    --extensions-dir /run/manager/extensions \
-    --machine-name %H \
-    --hostname ${HOSTNAME_SUFFIX} \
-    --dek-origin-file /run/luks/dek-origin \
-    --oidc-issuer ${OIDC_ISSUER} \
-    --oidc-audience ${OIDC_AUDIENCE:-enclave-os-virtual} \
-    --oidc-manager-role ${OIDC_MANAGER_ROLE:-privasys-platform:manager} \
-    --oidc-monitoring-role ${OIDC_MONITORING_ROLE:-privasys-platform:monitoring} \
-    --log-level info
+# The launch wrapper sources /data/manager.env itself rather than relying
+# on systemd's EnvironmentFile, which is unreliable early in boot and made
+# the manager crash-loop on the unexpanded ${CA_CERT:-/data/ca.crt}.
+ExecStart=/bin/bash /usr/bin/manager-launch
 Restart=on-failure
 RestartSec=5
 

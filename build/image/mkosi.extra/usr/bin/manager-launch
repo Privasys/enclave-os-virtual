@@ -1,0 +1,34 @@
+#!/bin/bash
+# Launch wrapper for manager.service.
+#
+# systemd's `EnvironmentFile=-/data/manager.env` is unreliable early in
+# boot: the file is present and readable (the manager process itself reads
+# other /data files fine), yet for several minutes systemd does not load
+# its variables into the unit environment. The unexpanded
+# ${CA_CERT:-/data/ca.crt} then reaches Caddy's RA-TLS module and it 400s,
+# crash-looping the manager ~25 times until the env finally settles.
+#
+# Sourcing the env here — in the exec'd process, which has the host mount
+# view and runs after data.mount — is reliable, and bash's ${VAR:-default}
+# expansion always works. This makes the manager start once, clean.
+set -u
+
+# Pull in the per-machine config written by manager-bootstrap at approval.
+set -a
+[ -r /data/manager.env ] && . /data/manager.env
+set +a
+
+exec /usr/bin/manager serve \
+    --ca-cert "${CA_CERT:-/data/ca.crt}" \
+    --ca-key "${CA_KEY:-/data/ca.key}" \
+    --attestation-servers "${ATTESTATION_SERVERS:-}" \
+    --caddy-listen :443 \
+    --extensions-dir /run/manager/extensions \
+    --machine-name "$(hostname)" \
+    --hostname "${HOSTNAME_SUFFIX:-}" \
+    --dek-origin-file /run/luks/dek-origin \
+    --oidc-issuer "${OIDC_ISSUER:-}" \
+    --oidc-audience "${OIDC_AUDIENCE:-enclave-os-virtual}" \
+    --oidc-manager-role "${OIDC_MANAGER_ROLE:-privasys-platform:manager}" \
+    --oidc-monitoring-role "${OIDC_MONITORING_ROLE:-privasys-platform:monitoring}" \
+    --log-level info
