@@ -27,8 +27,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 
 	ratls "enclave-os-mini/clients/go/ratls"
@@ -57,6 +60,13 @@ type Config struct {
 	// AttestationServerURL is the quote-verification endpoint used to
 	// verify each vault's quote (e.g. "https://as.privasys.org/verify").
 	AttestationServerURL string
+	// MgmtURL and EnclaveToken let the manager fetch a short-lived OIDC
+	// bearer for the attestation-server quote verification (the manager
+	// has no OIDC key of its own; the platform mints the token on demand,
+	// authenticated by the per-enclave credential). Both come from the
+	// manager's env (MGMT_URL, ENCLAVE_TOKEN), delivered at approval.
+	MgmtURL      string
+	EnclaveToken string
 }
 
 func (c Config) threshold() int {
@@ -79,7 +89,38 @@ func (c Config) validate() error {
 	if c.AttestationServerURL == "" {
 		return errors.New("vaultkey: attestation server URL is required")
 	}
+	if c.MgmtURL == "" || c.EnclaveToken == "" {
+		return errors.New("vaultkey: MgmtURL and EnclaveToken are required (to fetch the attestation-server token)")
+	}
 	return nil
+}
+
+// fetchAttestationToken gets a short-lived OIDC bearer from the
+// management service (authed by the per-enclave credential) for the
+// attestation-server quote verification.
+func fetchAttestationToken(ctx context.Context, cfg Config) (string, error) {
+	url := strings.TrimRight(cfg.MgmtURL, "/") + "/api/v1/enclave/attestation-token"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.EnclaveToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("attestation-token request: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("attestation-token: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil || out.Token == "" {
+		return "", fmt.Errorf("attestation-token: bad response")
+	}
+	return out.Token, nil
 }
 
 // dialOptions builds the per-vault dial options: pin the vault
@@ -87,7 +128,7 @@ func (c Config) validate() error {
 // freshly minted challenge-bound client identity carrying the
 // container's image digest (OID 3.2) so the vault's Principal::Tee
 // profile matches.
-func dialOptions(cfg Config, imageDigest []byte) (vault.DialOptions, error) {
+func dialOptions(cfg Config, imageDigest []byte, attToken string) (vault.DialOptions, error) {
 	mre, err := hex.DecodeString(cfg.MrenclaveHex)
 	if err != nil {
 		return vault.DialOptions{}, fmt.Errorf("vaultkey: bad mrenclave hex: %w", err)
@@ -108,6 +149,10 @@ func dialOptions(cfg Config, imageDigest []byte) (vault.DialOptions, error) {
 			ReportData: ratls.ReportDataDeterministic,
 			QuoteVerification: &ratls.QuoteVerificationConfig{
 				Endpoint: cfg.AttestationServerURL,
+				// The attestation server requires an OIDC bearer; the
+				// manager fetched one from mgmt-service (it has no OIDC
+				// key of its own).
+				Token: attToken,
 			},
 		},
 		GetClientCertificate: certFn,
@@ -163,7 +208,11 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 	}
 	log = log.Named("vaultkey").With(zap.String("handle", handle))
 
-	opts, err := dialOptions(cfg, imageDigest)
+	attToken, err := fetchAttestationToken(ctx, cfg)
+	if err != nil {
+		return "", "", fmt.Errorf("vaultkey: %w", err)
+	}
+	opts, err := dialOptions(cfg, imageDigest, attToken)
 	if err != nil {
 		return "", "", err
 	}

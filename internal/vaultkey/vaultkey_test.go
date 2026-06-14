@@ -74,6 +74,8 @@ func TestConfigValidate(t *testing.T) {
 		Endpoints:            []string{"a:8443", "b:8443"},
 		MrenclaveHex:         "015ff920efbe97be7593a657169d10fb9f7ab285805c7b02d81a807431c427ae",
 		AttestationServerURL: "https://as.privasys.org/verify",
+		MgmtURL:              "https://api-test.developer.privasys.org",
+		EnclaveToken:         "tok",
 	}
 	if err := good.validate(); err != nil {
 		t.Fatalf("valid config rejected: %v", err)

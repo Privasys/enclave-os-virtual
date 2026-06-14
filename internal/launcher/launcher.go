@@ -792,6 +792,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				Endpoints:            req.VaultEndpoints,
 				MrenclaveHex:         req.VaultMrenclave,
 				AttestationServerURL: req.VaultAttestationServer,
+				// The manager fetches the attestation-server bearer from
+				// mgmt-service (it has no OIDC key); reuse the MGMT_URL +
+				// ENCLAVE_TOKEN it already holds for runtime-status.
+				MgmtURL:      l.cfg.ToolSpecMgmtURL,
+				EnclaveToken: l.cfg.ToolSpecEnclaveToken,
 			}, req.KeyHandle, digest)
 			if err != nil {
 				return nil, fmt.Errorf("launcher: vault volume key: %w", err)
