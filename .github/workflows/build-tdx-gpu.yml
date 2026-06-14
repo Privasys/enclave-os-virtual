@@ -430,6 +430,19 @@ jobs:
             | **Predicted RTMR[2]** | `${{ steps.rtmr.outputs.rtmr2 }}` |
             | **GCP Image** | `enclave-os-virtual-${{ steps.version.outputs.slug }}` |
 
+            ## Download
+
+            The image tar.gz exceeds GitHub's 2 GB asset limit (NVIDIA/CUDA driver stack), so it is published to Google Cloud Storage instead of as a release asset.
+
+            | | |
+            |-------------|-------|
+            | **GCS object** | `gs://${{ env.GCS_BUCKET }}/enclave-os-virtual-gpu-${{ steps.version.outputs.raw }}.tar.gz` |
+            | **HTTPS** | https://storage.googleapis.com/${{ env.GCS_BUCKET }}/enclave-os-virtual-gpu-${{ steps.version.outputs.raw }}.tar.gz |
+
+            ```bash
+            gcloud storage cp gs://${{ env.GCS_BUCKET }}/enclave-os-virtual-gpu-${{ steps.version.outputs.raw }}.tar.gz .
+            ```
+
             The dm-verity root hash is a SHA-256 digest of every byte on the read-only root filesystem.
             It is embedded in the kernel command line and measured into **RTMR[2]** at boot (via CC MR 3).
             RTMR[1] (CC MR 2) measures the EFI boot path (shim and GRUB binaries).
