@@ -8,8 +8,13 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 on:
+  # Releases (GitHub Release + GCP image) come only from version tags; dev
+  # images come from a manual workflow_dispatch (publish_gcp / dev_profile).
+  # We deliberately do NOT build on every main push: those runs produced no
+  # consumable artifact (publish + release are tag-gated) yet cost 25+
+  # GPU-runner minutes each. Validate a main commit on demand by dispatching
+  # this workflow.
   push:
-    branches: [main]
     tags: ['tdx-v*']
   pull_request:
     branches: [main]
