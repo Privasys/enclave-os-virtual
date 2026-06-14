@@ -31,4 +31,8 @@ exec /usr/bin/manager serve \
     --oidc-audience "${OIDC_AUDIENCE:-enclave-os-virtual}" \
     --oidc-manager-role "${OIDC_MANAGER_ROLE:-privasys-platform:manager}" \
     --oidc-monitoring-role "${OIDC_MONITORING_ROLE:-privasys-platform:monitoring}" \
+    --mgmt-url "${MGMT_URL:-}" \
+    --enclave-id "${ENCLAVE_ID:-}" \
+    --enclave-token "${ENCLAVE_TOKEN:-}" \
+    --load-token "${LOAD_TOKEN:-}" \
     --log-level info
