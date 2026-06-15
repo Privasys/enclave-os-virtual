@@ -445,6 +445,16 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	// attempt with the same name. Without this, a half-created
 	// container/snapshot leaks and prevents future loads.
 	if existing, err := m.client.LoadContainer(ctx, spec.Name); err == nil {
+		// Delete any lingering task FIRST: containerd refuses to delete a
+		// container that still has a task (even a STOPPED one), so a bare
+		// Delete here silently fails and leaves the orphan — which then
+		// breaks the next load with "container already exists". This bit
+		// the upgrade flow when a transient load failure left a stopped
+		// task behind.
+		if t, terr := existing.Task(ctx, nil); terr == nil {
+			_ = t.Kill(ctx, 9)
+			_, _ = t.Delete(ctx)
+		}
 		_ = existing.Delete(ctx, client.WithSnapshotCleanup)
 	}
 	if snSvc := m.client.SnapshotService(""); snSvc != nil {

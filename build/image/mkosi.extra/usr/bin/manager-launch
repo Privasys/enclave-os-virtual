@@ -26,6 +26,8 @@ exec /usr/bin/manager serve \
     --extensions-dir /run/manager/extensions \
     --machine-name "$(hostname)" \
     --hostname "${HOSTNAME_SUFFIX:-}" \
+    --platform-hostname "${PLATFORM_HOSTNAME:-}" \
+    --proxy-url "${PROXY_URL:-http://localhost:8080}" \
     --dek-origin-file /run/luks/dek-origin \
     --oidc-issuer "${OIDC_ISSUER:-}" \
     --oidc-audience "${OIDC_AUDIENCE:-enclave-os-virtual}" \
