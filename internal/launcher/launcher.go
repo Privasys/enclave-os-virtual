@@ -846,7 +846,8 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// (NOT in the attested spec).
 	containerToken, err := mintContainerToken()
 	if err != nil {
-		if req.Storage != "" && l.volMgr != nil {
+		// Never remove a vault-keyed (persistent) volume on cleanup — see below.
+		if req.Storage != "" && l.volMgr != nil && req.KeyHandle == "" {
 			_ = l.volMgr.Remove(req.Name)
 		}
 		return nil, fmt.Errorf("launcher: mint container token: %w", err)
@@ -886,8 +887,12 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	}
 	mc, err := l.mgr.Create(ctx, runtimeSpec, img)
 	if err != nil {
-		// Clean up volume if container creation fails.
-		if req.Storage != "" && l.volMgr != nil {
+		// Clean up the volume if container creation fails — but NEVER for a
+		// vault-keyed volume. It holds customer data, is encrypted at rest,
+		// and reattaches on the next load; lvremove'ing it here on a
+		// transient failure (e.g. a stale containerd container) would destroy
+		// that data. Ephemeral (no-handle) volumes are safe to remove.
+		if req.Storage != "" && l.volMgr != nil && req.KeyHandle == "" {
 			_ = l.volMgr.Remove(req.Name)
 		}
 		return nil, err
