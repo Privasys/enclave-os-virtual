@@ -322,6 +322,17 @@ type Launcher struct {
 	// Values: "byok:<fingerprint>" or "generated".  Absent when no volume.
 	volumeEncryption map[string]string
 
+	// persistentVolume marks containers whose encrypted volume is backed by
+	// a vault key (the LoadRequest carried a KeyHandle). Such volumes are
+	// LUKS-encrypted at rest with the DEK held in the vault constellation —
+	// never on this box — so they MUST survive an unload/upgrade and be
+	// reattached on the next load. Unload must NOT lvremove them (that would
+	// destroy customer data on every stop). Ephemeral volumes (generated
+	// in-enclave key, no handle) are removed on unload as before: their key
+	// dies with the process, so a leftover LV would only block the next
+	// load's reattach.
+	persistentVolume map[string]bool
+
 	// oidExts is the per-container set of X.509 attestation extensions
 	// under 1.3.6.1.4.1.65230.3.5.* installed at Load time and updated
 	// in-place via the SDK setAttestationExtension API. Map shape is
@@ -370,6 +381,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		pulledImages:      make(map[string]client.Image),
 		specs:             make(map[string]manifest.Container),
 		volumeEncryption:  make(map[string]string),
+		persistentVolume:  make(map[string]bool),
 		oidExts:           make(map[string]map[string][]byte),
 		configAPI:         make(map[string]*ConfigAPISpec),
 		configured:        make(map[string]bool),
@@ -896,6 +908,10 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	if volEncryption != "" {
 		l.volumeEncryption[req.Name] = volEncryption
 	}
+	// A vault-keyed volume persists across unload/upgrade (see Unload).
+	if req.KeyHandle != "" {
+		l.persistentVolume[req.Name] = true
+	}
 	if req.ConfigAPI != nil {
 		l.configAPI[req.Name] = req.ConfigAPI
 		l.configured[req.Name] = false
@@ -970,9 +986,22 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 		return err
 	}
 
-	// Tear down per-container encrypted volume if one was provisioned.
+	// Tear down per-container encrypted volume if one was provisioned —
+	// but NEVER for a vault-keyed (persistent) volume. Those hold customer
+	// data, are LUKS-encrypted at rest, and have their DEK in the vault (not
+	// on this box), so they must survive unload/upgrade and be reattached on
+	// the next load. lvremove'ing one here would destroy customer data on
+	// every stop/redeploy. The container manager has already closed the
+	// dm-crypt mapping via Stop; leaving the encrypted LV in place is safe.
 	if l.volumeEncryption[name] != "" && l.volMgr != nil {
-		if err := l.volMgr.Remove(name); err != nil {
+		if l.persistentVolume[name] {
+			l.log.Info("preserving vault-keyed volume across unload (data persists)",
+				zap.String("container", name))
+			if err := l.volMgr.Close(name); err != nil {
+				l.log.Warn("failed to close persistent volume mapping",
+					zap.String("container", name), zap.Error(err))
+			}
+		} else if err := l.volMgr.Remove(name); err != nil {
 			l.log.Warn("failed to remove encrypted volume (data may leak)",
 				zap.String("container", name), zap.Error(err))
 		}
@@ -984,6 +1013,7 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	delete(l.imageDigests, name)
 	delete(l.containerTrees, name)
 	delete(l.volumeEncryption, name)
+	delete(l.persistentVolume, name)
 	delete(l.oidExts, name)
 	delete(l.configAPI, name)
 	delete(l.configured, name)
