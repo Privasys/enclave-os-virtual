@@ -236,6 +236,7 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 	byGen := make(map[string][]*vault.Share)
 	pending := 0
 	notFound := 0
+	denied := 0
 	var lastErr error
 	for _, ep := range cfg.Endpoints {
 		material, err := exportFrom(ctx, ep, opts, handle)
@@ -251,6 +252,11 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 			pending++
 		case strings.Contains(err.Error(), "key not found"):
 			notFound++
+		case strings.Contains(err.Error(), "policy.principals"):
+			// The key EXISTS on this vault but our TEE is not in its policy
+			// (the upgrade gate). Crucially this is NOT "pending" — the vault
+			// holds material we are simply not authorised to export.
+			denied++
 		default:
 			lastErr = err
 			log.Warn("vault unavailable", zap.String("vault", ep), zap.Error(err))
@@ -268,6 +274,17 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 		log.Info("volume DEK reconstructed from constellation",
 			zap.Int("shares", len(best)))
 		return hex.EncodeToString(dek), "vault:" + handle, nil
+	}
+
+	// The key EXISTS (some vault denied our export on policy grounds) but we
+	// could not assemble a quorum we are authorised to read. This is the
+	// upgrade gate, NOT a first boot. Fail CLOSED — never fall through to
+	// Phase 2: generating a new DEK and filling the still-pending vaults would
+	// split the key's generations and permanently corrupt it (the volume was
+	// formatted with the original DEK). The app/data owner must promote this
+	// measurement first.
+	if denied > 0 {
+		return "", "", fmt.Errorf("vaultkey: key %q exists but this measurement is not authorised to reconstruct it (%d/%d vaults denied on policy) — the owner must approve (promote) this version before it can run", handle, denied, len(cfg.Endpoints))
 	}
 
 	if pending == 0 {
