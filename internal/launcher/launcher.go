@@ -867,6 +867,16 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	runtimeEnv["PRIVASYS_CONTAINER_NAME"] = req.Name
 	runtimeEnv["PRIVASYS_CONTAINER_TOKEN"] = containerToken
 
+	// PaaS port contract (12-factor): the management-service allocates a
+	// unique port per app and routes Caddy -> localhost:req.Port. With host
+	// networking the listen port IS the host port, so the app must bind the
+	// port we hand it. Inject it as $PORT (platform value wins over any
+	// app-declared PORT). Apps listen on os.Getenv("PORT"); see the
+	// container build contract.
+	if req.Port > 0 {
+		runtimeEnv["PORT"] = fmt.Sprintf("%d", req.Port)
+	}
+
 	// Synthesise puller env vars when the manager itself knows where to
 	// fetch tool specs from. Containers that don't care will ignore
 	// these; confidential-ai picks them up via envOr("TOOL_SPEC_URL",...)
