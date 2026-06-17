@@ -1,0 +1,41 @@
+# Supervised developer SSH daemon — DEV IMAGE ONLY.
+#
+# Production images ship no openssh-server and no SSH unit: every code
+# path that can execute in a production CVM is measured at build time and
+# a runtime shell would break that guarantee. This unit lives in
+# build/image/mkosi.extra.dev (shared by the base and -gpu dev profiles)
+# and depends on the dev-only openssh-server package, so it can never
+# appear in a tdx-v* production image. The dev ImageId yields distinct
+# measurements, so verifiers always tell dev from prod.
+#
+# Why a real unit instead of the old startup-script `/usr/sbin/sshd` one-
+# shot: that bare process had no supervisor, so if it died (or a reboot
+# raced past a clean startup-script run) nothing brought it back — :22
+# would accept-then-reset and stay broken until the VM was reset. systemd
+# supervises this one and restarts it.
+[Unit]
+Description=Privasys dev SSH daemon (dev image only)
+Documentation=https://github.com/Privasys/enclave-os-virtual
+After=network-online.target
+Wants=network-online.target
+# Own :22 exclusively. openssh-server enables socket activation
+# (ssh.socket); left alone it binds :22 and, with the handler disabled,
+# accepts-then-resets. Conflicts stops ssh.socket/ssh.service before we
+# start, leaving a single supervised listener.
+Conflicts=ssh.socket ssh.service
+
+[Service]
+Type=simple
+# /run/sshd is the privsep dir; root fs is read-only erofs so it must be
+# on tmpfs. systemd creates/removes it around the service lifecycle.
+RuntimeDirectory=sshd
+RuntimeDirectoryMode=0755
+# Keys: baked /root/.ssh/authorized_keys (mkosi.extra.dev) AND GCE
+# metadata via AuthorizedKeysCommand (sshd_config.d/60-gce.conf). Host
+# keys are baked at build. Policy in sshd_config.d/50-dev.conf.
+ExecStart=/usr/sbin/sshd -D -e
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
