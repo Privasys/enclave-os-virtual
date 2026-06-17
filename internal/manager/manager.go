@@ -291,6 +291,10 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("POST /api/v1/containers", s.requireAuth(s.handleLoadContainer))
 	mux.HandleFunc("DELETE /api/v1/containers/{name}", s.requireAuth(s.handleUnloadContainer))
 
+	// Host-driven billing freeze (credits exhausted): pause/resume the
+	// container without tearing it down. Manager-role only.
+	mux.HandleFunc("POST /api/v1/containers/{name}/freeze", s.requireAuth(s.handleFreezeContainer))
+
 	// SDK setAttestationExtension: container apps call this to install
 	// (or update) a per-app X.509 extension under
 	// 1.3.6.1.4.1.65230.3.5.*. The new value is reflected in the next
@@ -333,6 +337,15 @@ func (s *Server) Start(ctx context.Context) error {
 			containerName := s.launcher.AppHostnameToContainer(host)
 			if containerName != "" {
 				st := s.launcher.ContainerFreezeState(containerName)
+				// Billing freeze (credits exhausted): the container task is
+				// paused, so reject all of its traffic with 503 + reason.
+				// Attestation is served outside this app-host path, so the
+				// chain stays verifiable.
+				if st.BillingFrozen {
+					w.Header().Set("Retry-After", "30")
+					s.jsonError(w, http.StatusServiceUnavailable, "app paused: "+st.BillingReason)
+					return
+				}
 				if st.ConfigAPI != nil && !st.Configured {
 					if !matchesConfigAPI(st.ConfigAPI, r) {
 						w.Header().Set("Retry-After", "5")
@@ -746,6 +759,45 @@ func (s *Server) handleUnloadContainer(w http.ResponseWriter, r *http.Request) {
 		"name":   name,
 		"status": "unloaded",
 	})
+}
+
+// handleFreezeContainer handles POST /api/v1/containers/{name}/freeze. The
+// management-service applies or lifts the host-driven billing freeze (credits
+// exhausted): a frozen container is paused (cgroup freezer) and its traffic is
+// 503'd; unfreezing resumes it. Manager-role only, idempotent.
+func (s *Server) handleFreezeContainer(w http.ResponseWriter, r *http.Request) {
+	result := r.Context().Value(authResultKey).(*auth.AuthResult)
+	if !result.HasManagerAccess() {
+		s.jsonError(w, http.StatusForbidden, "manager role required for container operations")
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" {
+		s.jsonError(w, http.StatusBadRequest, "container name is required")
+		return
+	}
+	var req struct {
+		Frozen bool   `json:"frozen"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Frozen && req.Reason == "" {
+		req.Reason = "credits_exhausted"
+	}
+	if err := s.launcher.SetBillingFrozen(r.Context(), name, req.Frozen, req.Reason); err != nil {
+		s.log.Error("failed to set billing freeze",
+			zap.String("name", name), zap.Bool("frozen", req.Frozen), zap.Error(err))
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.log.Info("billing freeze updated",
+		zap.String("name", name), zap.Bool("frozen", req.Frozen), zap.String("reason", req.Reason))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "frozen": req.Frozen})
 }
 
 // tlsUpdateRequest is the request body for PUT /api/v1/tls.

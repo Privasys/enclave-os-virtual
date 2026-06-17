@@ -63,6 +63,7 @@ const (
 	StatusUnhealthy Status = "unhealthy"
 	StatusStopped   Status = "stopped"
 	StatusFailed    Status = "failed"
+	StatusFrozen    Status = "frozen"
 )
 
 // PullProgress tracks the progress of an image pull.
@@ -553,6 +554,50 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 	m.mu.Unlock()
 
 	m.log.Info("container stopped", zap.String("name", name))
+	return nil
+}
+
+// Pause freezes the container's task via the cgroup freezer. The process stops
+// consuming CPU but keeps its memory and state, so Resume restores it instantly.
+// Non-destructive (the container + volume stay loaded) — used for the
+// host-driven billing freeze (credits exhausted). No-op if already frozen.
+func (m *Manager) Pause(ctx context.Context, name string) error {
+	ctx = m.ctx(ctx)
+	m.mu.RLock()
+	mc, ok := m.containers[name]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("container: %s not found", name)
+	}
+	if mc.Task == nil {
+		return fmt.Errorf("container: %s has no task", name)
+	}
+	if err := mc.Task.Pause(ctx); err != nil {
+		return fmt.Errorf("pause %s: %w", name, err)
+	}
+	mc.SetStatus(StatusFrozen)
+	m.log.Info("container frozen (paused)", zap.String("name", name))
+	return nil
+}
+
+// Resume lifts a Pause, returning the container to the running state. No-op if
+// the container is not currently frozen.
+func (m *Manager) Resume(ctx context.Context, name string) error {
+	ctx = m.ctx(ctx)
+	m.mu.RLock()
+	mc, ok := m.containers[name]
+	m.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("container: %s not found", name)
+	}
+	if mc.Task == nil {
+		return fmt.Errorf("container: %s has no task", name)
+	}
+	if err := mc.Task.Resume(ctx); err != nil {
+		return fmt.Errorf("resume %s: %w", name, err)
+	}
+	mc.SetStatus(StatusRunning)
+	m.log.Info("container resumed (unfrozen)", zap.String("name", name))
 	return nil
 }
 

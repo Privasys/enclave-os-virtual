@@ -348,6 +348,14 @@ type Launcher struct {
 	// matching successful call has been observed since (re)load.
 	configured map[string]bool
 
+	// billingFrozen tracks the host-driven billing freeze per container
+	// (name → reason, e.g. "credits_exhausted"). A present entry means the
+	// container's task is paused (cgroup freezer) and the manager returns 503
+	// for its traffic. Independent of the config gate; set/cleared by the
+	// management-service over the manager freeze endpoint. In-memory only —
+	// re-asserted by the usage feed within one sweep after a restart.
+	billingFrozen map[string]string
+
 	// containerTokens maps container name → launcher-minted bearer
 	// token. The token is injected into the container at start time as
 	// PRIVASYS_CONTAINER_TOKEN and bound to the container's name (also
@@ -385,6 +393,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		oidExts:           make(map[string]map[string][]byte),
 		configAPI:         make(map[string]*ConfigAPISpec),
 		configured:        make(map[string]bool),
+		billingFrozen:     make(map[string]string),
 		containerTokens:   make(map[string]string),
 		attestationTokens: make(map[string]string),
 		readyCh:           make(chan struct{}),
@@ -1336,6 +1345,11 @@ func (l *Launcher) AppHostnameToContainer(hostname string) string {
 type FreezeState struct {
 	ConfigAPI  *ConfigAPISpec
 	Configured bool
+	// BillingFrozen is the host-driven billing freeze (credits exhausted),
+	// independent of the config gate. When set, the container task is paused
+	// and the manager returns 503 (BillingReason) for its traffic.
+	BillingFrozen bool
+	BillingReason string
 }
 
 // ContainerFreezeState reports the current freeze state for the given
@@ -1343,10 +1357,58 @@ type FreezeState struct {
 func (l *Launcher) ContainerFreezeState(name string) FreezeState {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
+	reason, billingFrozen := l.billingFrozen[name]
 	return FreezeState{
-		ConfigAPI:  l.configAPI[name],
-		Configured: l.configured[name],
+		ConfigAPI:     l.configAPI[name],
+		Configured:    l.configured[name],
+		BillingFrozen: billingFrozen,
+		BillingReason: reason,
 	}
+}
+
+// SetBillingFrozen applies or lifts the host-driven billing freeze for a
+// container. Freezing pauses the container task (cgroup freezer) so it stops
+// consuming CPU while keeping its state, and makes the manager return 503 for
+// its traffic; unfreezing resumes it. Idempotent — only pauses/resumes on a
+// real transition. Errors roll the in-memory flag back so the next sweep retries.
+func (l *Launcher) SetBillingFrozen(ctx context.Context, name string, frozen bool, reason string) error {
+	l.mu.Lock()
+	if _, ok := l.specs[name]; !ok {
+		l.mu.Unlock()
+		return fmt.Errorf("container %q not loaded", name)
+	}
+	prevReason, already := l.billingFrozen[name]
+	if frozen == already {
+		l.mu.Unlock()
+		return nil // no transition
+	}
+	if frozen {
+		l.billingFrozen[name] = reason
+	} else {
+		delete(l.billingFrozen, name)
+	}
+	mgr := l.mgr
+	l.mu.Unlock()
+
+	if mgr == nil {
+		return fmt.Errorf("container runtime not ready")
+	}
+	var opErr error
+	if frozen {
+		opErr = mgr.Pause(ctx, name)
+	} else {
+		opErr = mgr.Resume(ctx, name)
+	}
+	if opErr != nil {
+		l.mu.Lock()
+		if frozen {
+			delete(l.billingFrozen, name)
+		} else if already {
+			l.billingFrozen[name] = prevReason
+		}
+		l.mu.Unlock()
+	}
+	return opErr
 }
 
 // MarkConfigured flips the in-process freeze flag for the given
