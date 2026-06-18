@@ -146,7 +146,7 @@ var ContainerModelDigest = append(append(asn1.ObjectIdentifier{}, privasysArc...
 // vault key bound to it (MR_APP sealing mode) cannot be unsealed by a same-image
 // peer carrying a different app-id. The platform assigns it; the measured manager
 // stamps it, so a peer cannot forge another app's id. See
-// .operations/enclave-vaults/policies-plan.md.
+// the MR_APP / promote-step-up design.
 var ContainerAppId = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 6)
 
 // ContainerEnvVarArcPrefix is the dot-notation prefix for per-environment-

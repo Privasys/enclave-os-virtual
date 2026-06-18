@@ -198,7 +198,7 @@ type LoadRequest struct {
 	// AppId is the platform-assigned app identity (apps.id, a UUID string). When
 	// set, the manager stamps it (raw 16 bytes) at OID 3.6 on the vault client
 	// identity, so an MR_APP-sealed key is bound to THIS app and a same-image peer
-	// with a different app-id cannot unseal it (policies-plan.md). Empty keeps the
+	// with a different app-id cannot unseal it (the MR_APP / promote-step-up design). Empty keeps the
 	// old MR_ENCLAVE behaviour (enclave + code digest only).
 	AppId string `json:"app_id,omitempty"`
 
@@ -272,7 +272,7 @@ func (r *LoadRequest) toContainerSpec() manifest.Container {
 // bytes for the OID 3.6 app-id attestation extension. Returns nil for empty or
 // malformed input, which leaves the vault identity in MR_ENCLAVE shape (enclave
 // + code digest only) - the backward-compatible default before the platform
-// starts sending app_id. See policies-plan.md.
+// starts sending app_id. See the MR_APP / promote-step-up design.
 func parseAppID(s string) []byte {
 	if s == "" {
 		return nil

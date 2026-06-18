@@ -19,7 +19,7 @@ package bootstrap
 //     a missed callback after approval is recovered by the admin
 //     reset-registration endpoint.
 //
-// Design: .operations/platform/enclave-registration-plan.md
+// Design: the enclave self-registration design
 
 import (
 	"context"

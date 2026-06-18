@@ -1,5 +1,5 @@
 // Package vaultkey resolves per-container volume keys from the Enclave
-// Vaults constellation (enclave-upgrade plan, Phase B).
+// Vaults constellation (the enclave-upgrade design, Phase B).
 //
 // The DEK for a container's LUKS volume never exists outside TEE
 // memory: it is either reconstructed from k-of-n Shamir shares held by

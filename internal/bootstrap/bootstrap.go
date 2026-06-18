@@ -10,7 +10,7 @@
 //
 // (The legacy Phase-B flow — an IdP service-account key delivered out
 // of band redeemed at /api/v1/enclave/bootstrap — was removed
-// 2026-06-11; see .operations/platform/enclave-registration-plan.md.)
+// 2026-06-11; see the enclave self-registration design.)
 //
 // The flow is idempotent: on subsequent boots the systemd unit's
 // ConditionPathExists=!/data/ca.crt skips re-execution. If the unit

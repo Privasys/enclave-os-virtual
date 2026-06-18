@@ -31,7 +31,7 @@ var tdxQuoteOID = asn1.ObjectIdentifier{1, 2, 840, 113741, 1, 5, 5, 1, 6}
 // verify_challenge_binding). The self-signed leaf carries the raw TDX
 // quote plus the container's image digest at OID 3.2 and (for MR_APP keys)
 // its app-id at OID 3.6, which is what the vault's Principal::Tee profile
-// pins (enclave-upgrade plan §4.1/§8.1; policies-plan.md).
+// pins (the enclave-upgrade + MR_APP design).
 func mintIdentity(challenge, imageDigest, appID []byte) (*tls.Certificate, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
