@@ -98,7 +98,8 @@ Root CA (operator-provisioned)
       │        ├── TDX/SGX Quote         (OID 1.2.840.113741.1.5.5.1.6)
       │        ├── Config Merkle Root    (OID 1.3.6.1.4.1.65230.3.1)
       │        ├── Image Digest          (OID 1.3.6.1.4.1.65230.3.2)
-      │        └── Image Ref             (OID 1.3.6.1.4.1.65230.3.3)
+      │        ├── Image Ref             (OID 1.3.6.1.4.1.65230.3.3)
+      │        └── App Id                (OID 1.3.6.1.4.1.65230.3.6)
       │
       └── Container RA-TLS cert: "postgres.prod1.example.com"
                ├── ...
@@ -175,7 +176,8 @@ that encode the VM's attestation data and configuration state.
     ├── 3.1                           Container Config Merkle Root
     ├── 3.2                           Container Image Digest
     ├── 3.3                           Container Image Ref
-    └── 3.4                           Container Volume Encryption
+    ├── 3.4                           Container Volume Encryption
+    └── 3.6                           Container App Id (MR_APP sealing)
 ```
 
 ### Platform-Wide OIDs
@@ -203,6 +205,7 @@ Present in **per-container certificates** (container hostname via SNI).
 | `1.3.6.1.4.1.65230.3.2` | Container Image Digest | SHA-256 of OCI image manifest | 32 bytes |
 | `1.3.6.1.4.1.65230.3.3` | Container Image Ref | Full image reference string | variable |
 | `1.3.6.1.4.1.65230.3.4` | Container Volume Encryption | `"byok:<fingerprint>"` or `"generated"` — omitted when no volume | variable |
+| `1.3.6.1.4.1.65230.3.6` | Container App Id | Platform-assigned app identity (`apps.id`, raw UUID); pins WHICH app for MR_APP vault sealing — omitted when no app-id supplied | 16 bytes |
 
 ---
 
@@ -291,7 +294,7 @@ Clients can choose their verification depth:
 | **TDX measurement only** | Hardware quote → platform matches known value | VM image is correct, but containers unknown |
 | **Measurement + Merkle root** | + OID `1.3.6.1.4.1.65230.1.1` | VM image and full container set verified |
 | **Fast-path module OIDs** | + OIDs `2.4`, `2.5`, `2.6`, `2.7` | Verify runtime version, container set, encryption provenance, and attestation servers without Merkle audit |
-| **Per-container verification** | + OIDs `3.1`, `3.2`, `3.3`, `3.4` (via SNI) | Verify a specific container's image, configuration, and volume encryption |
+| **Per-container verification** | + OIDs `3.1`, `3.2`, `3.3`, `3.4`, `3.6` (via SNI) | Verify a specific container's image, configuration, volume encryption, and app identity |
 | **Full Merkle audit** | Request manifest, recompute root | Complete transparency of all inputs |
 
 ---

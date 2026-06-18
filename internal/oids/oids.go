@@ -18,6 +18,7 @@
 //	  3.3 Container Image Reference (e.g. ghcr.io/example/myapp)
 //	  3.4 Container Volume Encryption
 //	  3.5 Container Model Digest (SHA-256 of AI/ML model weights)
+//	  3.6 Container App Id (apps.id, raw 16-byte UUID; MR_APP vault sealing)
 //
 // The TDX and SGX quote OIDs are defined by Intel:
 //

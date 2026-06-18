@@ -133,6 +133,7 @@ All Privasys OIDs live under the arc `1.3.6.1.4.1.65230`:
 | `1.3.6.1.4.1.65230.3.2` | Container Image Digest | Raw SHA-256 digest of the OCI image |
 | `1.3.6.1.4.1.65230.3.3` | Container Image Ref | Full OCI image reference string |
 | `1.3.6.1.4.1.65230.3.4` | Container Volume Encryption | `"byok:<fingerprint>"` or `"generated"` — present only when encrypted volume is attached |
+| `1.3.6.1.4.1.65230.3.6` | Container App Id | Platform-assigned app identity (`apps.id`, raw 16-byte UUID); pins the app for MR_APP vault sealing — present only when an app-id is supplied |
 
 ## Workload Manifest
 
