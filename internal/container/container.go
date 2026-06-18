@@ -83,6 +83,12 @@ type ManagedContainer struct {
 
 	pullProgress PullProgress
 	mu           sync.RWMutex
+
+	// healthCancel stops this container's health-check goroutine. Set by
+	// StartHealthChecks, fired by Stop — without it the goroutine (started
+	// on a background context) outlives the container and keeps probing a
+	// dead/old port forever after unload or a port-changing reload.
+	healthCancel context.CancelFunc
 }
 
 // SetStatus updates the container status safely.
@@ -526,6 +532,15 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 
 	m.log.Info("stopping container", zap.String("name", name))
 
+	// Stop the health-check goroutine so it doesn't outlive the container
+	// and keep probing a dead/old port (the leak fixed here).
+	mc.mu.Lock()
+	if mc.healthCancel != nil {
+		mc.healthCancel()
+		mc.healthCancel = nil
+	}
+	mc.mu.Unlock()
+
 	if mc.Task != nil {
 		if err := mc.Task.Kill(ctx, 15); err != nil { // SIGTERM
 			m.log.Warn("failed to send SIGTERM", zap.String("name", name), zap.Error(err))
@@ -677,6 +692,17 @@ func (m *Manager) StartHealthChecks(ctx context.Context, mc *ManagedContainer) {
 		retries = healthCheckDefaultRetries
 	}
 
+	// Tie the goroutine to the container lifecycle: a derived cancellable
+	// context, stored so Stop can end it. Cancel any prior goroutine first
+	// (a reload restarts checks against the new spec/port).
+	hctx, cancel := context.WithCancel(ctx)
+	mc.mu.Lock()
+	if mc.healthCancel != nil {
+		mc.healthCancel()
+	}
+	mc.healthCancel = cancel
+	mc.mu.Unlock()
+
 	go func() {
 		failures := 0
 		ticker := time.NewTicker(interval)
@@ -684,10 +710,10 @@ func (m *Manager) StartHealthChecks(ctx context.Context, mc *ManagedContainer) {
 
 		for {
 			select {
-			case <-ctx.Done():
+			case <-hctx.Done():
 				return
 			case <-ticker.C:
-				if err := m.RunHealthCheck(ctx, mc); err != nil {
+				if err := m.RunHealthCheck(hctx, mc); err != nil {
 					failures++
 					m.log.Warn("health check failed",
 						zap.String("name", mc.Name),

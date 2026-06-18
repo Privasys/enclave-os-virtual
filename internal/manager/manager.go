@@ -667,6 +667,20 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		// Use Background ctx: r.Context() is cancelled when this
 		// handler returns, which would abort the pull mid-flight.
+		//
+		// Replace-on-reload: Load rejects an already-loaded name, so a
+		// re-deploy with a new image or port would otherwise be a silent
+		// no-op (the management-service treats "already loaded" as success).
+		// Unload first so the new spec actually applies. This is a no-op when
+		// nothing is loaded, and it PRESERVES vault-keyed volumes (Unload
+		// closes, never removes, them — the new Load re-attaches the data).
+		// Boot replay (replayRegistry) calls launcher.Load directly, so it is
+		// unaffected.
+		if err := s.launcher.Unload(context.Background(), req.Name); err != nil &&
+			!strings.Contains(err.Error(), "not loaded") {
+			s.log.Warn("pre-load unload failed (continuing with load)",
+				zap.String("name", req.Name), zap.Error(err))
+		}
 		if _, err := s.launcher.Load(context.Background(), req); err != nil {
 			s.log.Error("async load failed",
 				zap.String("name", req.Name),
