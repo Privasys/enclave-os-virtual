@@ -140,6 +140,14 @@ var ContainerVolumeEncryption = append(append(asn1.ObjectIdentifier{}, privasysA
 // which covers the code but not the dynamically-loaded model.
 var ContainerModelDigest = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 5)
 
+// ContainerAppId is the platform-assigned app identity (apps.id, the raw
+// 16-byte UUID) for a specific container. It pins WHICH app a container is, so a
+// vault key bound to it (MR_APP sealing mode) cannot be unsealed by a same-image
+// peer carrying a different app-id. The platform assigns it; the measured manager
+// stamps it, so a peer cannot forge another app's id. See
+// .operations/enclave-vaults/policies-plan.md.
+var ContainerAppId = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 6)
+
 // ContainerEnvVarArcPrefix is the dot-notation prefix for per-environment-
 // variable attestation extensions. Each runtime-supplied env var may be
 // pinned at a sub-OID 1.3.6.1.4.1.65230.3.5.<n>[.<n>...]. The extension

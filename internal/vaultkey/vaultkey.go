@@ -133,12 +133,12 @@ func fetchAttestationToken(ctx context.Context, cfg Config) (string, error) {
 // freshly minted challenge-bound client identity carrying the
 // container's image digest (OID 3.2) so the vault's Principal::Tee
 // profile matches.
-func dialOptions(cfg Config, imageDigest []byte, attToken string) (vault.DialOptions, error) {
+func dialOptions(cfg Config, imageDigest, appID []byte, attToken string) (vault.DialOptions, error) {
 	mre, err := hex.DecodeString(cfg.MrenclaveHex)
 	if err != nil {
 		return vault.DialOptions{}, fmt.Errorf("vaultkey: bad mrenclave hex: %w", err)
 	}
-	certFn, err := clientCertificateFn(imageDigest)
+	certFn, err := clientCertificateFn(imageDigest, appID)
 	if err != nil {
 		return vault.DialOptions{}, err
 	}
@@ -214,7 +214,7 @@ func bestGroup(byGen map[string][]*vault.Share, threshold int) []*vault.Share {
 // the DEK here, fills the constellation, and only returns once at
 // least k vaults hold a share of the SAME generation — so a volume is
 // never formatted with a key the constellation cannot give back.
-func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle string, imageDigest []byte) (string, string, error) {
+func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle string, imageDigest, appID []byte) (string, string, error) {
 	if err := cfg.validate(); err != nil {
 		return "", "", err
 	}
@@ -227,7 +227,7 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 	if err != nil {
 		return "", "", fmt.Errorf("vaultkey: %w", err)
 	}
-	opts, err := dialOptions(cfg, imageDigest, attToken)
+	opts, err := dialOptions(cfg, imageDigest, appID, attToken)
 	if err != nil {
 		return "", "", err
 	}

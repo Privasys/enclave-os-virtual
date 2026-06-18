@@ -29,9 +29,10 @@ var tdxQuoteOID = asn1.ObjectIdentifier{1, 2, 840, 113741, 1, 5, 5, 1, 6}
 //
 // (the platform-wide binding formula; the vault recomputes it in
 // verify_challenge_binding). The self-signed leaf carries the raw TDX
-// quote plus the container's image digest at OID 3.2, which is what the
-// vault's Principal::Tee profile pins (enclave-upgrade plan §4.1/§8.1).
-func mintIdentity(challenge, imageDigest []byte) (*tls.Certificate, error) {
+// quote plus the container's image digest at OID 3.2 and (for MR_APP keys)
+// its app-id at OID 3.6, which is what the vault's Principal::Tee profile
+// pins (enclave-upgrade plan §4.1/§8.1; policies-plan.md).
+func mintIdentity(challenge, imageDigest, appID []byte) (*tls.Certificate, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("vaultkey: generate identity key: %w", err)
@@ -68,6 +69,12 @@ func mintIdentity(challenge, imageDigest []byte) (*tls.Certificate, error) {
 			oids.Extension(tdxQuoteOID, quote),
 			oids.Extension(oids.ContainerImageDigest, imageDigest),
 		},
+	}
+	// MR_APP: bind this identity to the specific app. Omitted (MR_ENCLAVE) when
+	// the platform did not supply an app-id, keeping old deployments working.
+	if len(appID) > 0 {
+		tmpl.ExtraExtensions = append(tmpl.ExtraExtensions,
+			oids.Extension(oids.ContainerAppId, appID))
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {

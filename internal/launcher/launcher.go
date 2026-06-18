@@ -195,6 +195,13 @@ type LoadRequest struct {
 	VaultMrenclave          string   `json:"vault_mrenclave,omitempty"`
 	VaultAttestationServer  string   `json:"vault_attestation_server,omitempty"`
 
+	// AppId is the platform-assigned app identity (apps.id, a UUID string). When
+	// set, the manager stamps it (raw 16 bytes) at OID 3.6 on the vault client
+	// identity, so an MR_APP-sealed key is bound to THIS app and a same-image peer
+	// with a different app-id cannot unseal it (policies-plan.md). Empty keeps the
+	// old MR_ENCLAVE behaviour (enclave + code digest only).
+	AppId string `json:"app_id,omitempty"`
+
 	// Hostname is the external FQDN for this container's Caddy route
 	// and extension files. If set, it overrides the auto-derived
 	// <name>.<machine_name>.<hostname> scheme. This should match the
@@ -259,6 +266,22 @@ func (r *LoadRequest) toContainerSpec() manifest.Container {
 		Storage:     r.Storage,
 		Devices:     r.Devices,
 	}
+}
+
+// parseAppID decodes a UUID string (with or without hyphens) into its raw 16
+// bytes for the OID 3.6 app-id attestation extension. Returns nil for empty or
+// malformed input, which leaves the vault identity in MR_ENCLAVE shape (enclave
+// + code digest only) - the backward-compatible default before the platform
+// starts sending app_id. See policies-plan.md.
+func parseAppID(s string) []byte {
+	if s == "" {
+		return nil
+	}
+	b, err := hex.DecodeString(strings.ReplaceAll(s, "-", ""))
+	if err != nil || len(b) != 16 {
+		return nil
+	}
+	return b
 }
 
 // runtimeEnv returns additional environment variables that should be
@@ -820,7 +843,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				MgmtURL:      l.cfg.ToolSpecMgmtURL,
 				EnclaveID:    l.cfg.ToolSpecEnclaveID,
 				EnclaveToken: l.cfg.ToolSpecEnclaveToken,
-			}, req.KeyHandle, digest)
+			}, req.KeyHandle, digest, parseAppID(req.AppId))
 			if err != nil {
 				return nil, fmt.Errorf("launcher: vault volume key: %w", err)
 			}
