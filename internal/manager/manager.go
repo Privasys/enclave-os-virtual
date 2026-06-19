@@ -27,6 +27,7 @@
 // GET    /api/v1/eventlog            - TCG2 event log for RTMR verification (base64)
 // POST   /api/v1/containers          - load a container (JSON body: LoadRequest)
 // DELETE /api/v1/containers/{name}   - unload a container
+// POST   /api/v1/containers/{name}/rotate-key - rotate the volume KEK (one phase)
 // PUT    /api/v1/tls                 - rotate the intermediary CA cert+key
 // PUT    /api/v1/attestation-servers  - update attestation servers and tokens
 // GET    /metrics                    - Prometheus metrics
@@ -294,6 +295,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// Host-driven billing freeze (credits exhausted): pause/resume the
 	// container without tearing it down. Manager-role only.
 	mux.HandleFunc("POST /api/v1/containers/{name}/freeze", s.requireAuth(s.handleFreezeContainer))
+	mux.HandleFunc("POST /api/v1/containers/{name}/rotate-key", s.requireAuth(s.handleRotateKey))
 
 	// SDK setAttestationExtension: container apps call this to install
 	// (or update) a per-app X.509 extension under
@@ -812,6 +814,42 @@ func (s *Server) handleFreezeContainer(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "frozen": req.Frozen})
+}
+
+// handleRotateKey handles POST /api/v1/containers/{name}/rotate-key. The
+// management-service drives one phase of an online vault-key (KEK) rotation:
+// "add" installs the new keyslot (both old and new vault DEKs then open the
+// volume), "retire" kills the old keyslot once the platform has advanced the
+// app's key handle to the new generation. Manager-role only. See the
+// key-rotation design.
+func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
+	result := r.Context().Value(authResultKey).(*auth.AuthResult)
+	if !result.HasManagerAccess() {
+		s.jsonError(w, http.StatusForbidden, "manager role required for container operations")
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" {
+		s.jsonError(w, http.StatusBadRequest, "container name is required")
+		return
+	}
+	var req launcher.RotateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	req.Name = name // the path is authoritative
+	if err := s.launcher.RotateVolumeKey(r.Context(), req); err != nil {
+		s.log.Error("volume key rotation failed",
+			zap.String("name", name), zap.String("phase", string(req.Phase)), zap.Error(err))
+		s.jsonError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	s.log.Info("volume key rotation phase complete",
+		zap.String("name", name), zap.String("phase", string(req.Phase)))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "phase": req.Phase})
 }
 
 // tlsUpdateRequest is the request body for PUT /api/v1/tls.

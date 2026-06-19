@@ -31,8 +31,10 @@
 package volume
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -302,6 +304,72 @@ func (m *Manager) Remove(name string) error {
 }
 
 // ---------------------------------------------------------------------------
+// Key rotation (KEK re-wrap)
+// ---------------------------------------------------------------------------
+//
+// The volume key handed in by the caller is a LUKS2 keyslot passphrase, NOT
+// the cipher key on disk: the data is encrypted under the LUKS2 master key
+// (generated at luksFormat, wrapped in the header). So rotating the key is a
+// re-wrap, not a re-encrypt — add the new passphrase to a free keyslot, then
+// kill the slot holding the old one. The master key, and therefore the data,
+// never moves; the operation is online (it touches the LUKS header on the LV,
+// not the active dm-crypt mapping), so the volume may stay mounted throughout.
+// See the key-rotation design.
+
+// AddKey adds newKey to a free LUKS keyslot on the container's volume,
+// authorising the change with existingKey. After this call BOTH keys unlock
+// the volume — the caller advances any key pointer here, then RemoveKey's the
+// old one, so no single failure can leave the volume unopenable.
+//
+// Both keys are passed to cryptsetup over pipes exposed to the child as
+// /proc/self/fd/3 (existing) and /proc/self/fd/4 (new); key material is never
+// written to a file (even tmpfs). cryptsetup reads each fd as a key file
+// verbatim (no newline stripping — matching how the volume was formatted from
+// stdin in Create).
+func (m *Manager) AddKey(name, existingKey, newKey string) error {
+	lvPath := "/dev/" + VGName + "/vol-" + name
+	if _, err := os.Stat(lvPath); err != nil {
+		return fmt.Errorf("volume: AddKey: LV %s not present: %w", lvPath, err)
+	}
+	m.log.Info("adding LUKS keyslot (key rotation)", zap.String("container", name))
+	return runCryptsetupTwoKeys(existingKey, newKey,
+		"luksAddKey",
+		lvPath,
+		"/proc/self/fd/4",            // new key to add (positional)
+		"--key-file=/proc/self/fd/3", // existing key (authorises the change)
+		"--batch-mode",
+	)
+}
+
+// RemoveKey kills the LUKS keyslot that `key` unlocks on the container's
+// volume. Used to retire the old key after AddKey + the pointer advance.
+func (m *Manager) RemoveKey(name, key string) error {
+	lvPath := "/dev/" + VGName + "/vol-" + name
+	if _, err := os.Stat(lvPath); err != nil {
+		return fmt.Errorf("volume: RemoveKey: LV %s not present: %w", lvPath, err)
+	}
+	m.log.Info("removing LUKS keyslot (key rotation)", zap.String("container", name))
+	return runStdin(key, "cryptsetup", "luksRemoveKey", lvPath, "--key-file=-", "--batch-mode")
+}
+
+// Rekey re-wraps the volume's master key from oldKey to newKey in one call
+// (AddKey then RemoveKey). The live rotation flow does NOT use this — it splits
+// the two halves around the key-pointer advance so a crash mid-rotation always
+// leaves the volume openable (see the key-rotation design). Rekey is the
+// single-call convenience for tests and for callers that own both ends.
+func (m *Manager) Rekey(name, oldKey, newKey string) error {
+	if err := m.AddKey(name, oldKey, newKey); err != nil {
+		return fmt.Errorf("volume: rekey add: %w", err)
+	}
+	if err := m.RemoveKey(name, oldKey); err != nil {
+		// The new slot is in place; the volume still opens with newKey. The
+		// stale old slot is harmless but should be retried.
+		return fmt.Errorf("volume: rekey remove old (new key is live; retry retire): %w", err)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -349,6 +417,63 @@ func runStdin(stdin string, name string, args ...string) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s %s: %w\n%s", name, strings.Join(args, " "), err, string(out))
+	}
+	return nil
+}
+
+// runCryptsetupTwoKeys runs `cryptsetup` with two distinct keys delivered over
+// pipes, never the filesystem. The child receives the read ends as fd 3 (the
+// existing/authorising key) and fd 4 (the new key); the command refers to them
+// as /proc/self/fd/3 and /proc/self/fd/4. cryptsetup treats a non-seekable fd
+// keyfile exactly like stdin (`--key-file=-`): it reads to EOF without newline
+// stripping, so the bytes must match how the slot was originally written.
+func runCryptsetupTwoKeys(existingKey, newKey string, args ...string) error {
+	oldR, oldW, err := os.Pipe()
+	if err != nil {
+		return fmt.Errorf("pipe (existing key): %w", err)
+	}
+	newR, newW, err := os.Pipe()
+	if err != nil {
+		oldR.Close()
+		oldW.Close()
+		return fmt.Errorf("pipe (new key): %w", err)
+	}
+
+	cmd := exec.Command("cryptsetup", args...)
+	cmd.Env = os.Environ()
+	// ExtraFiles[0] -> child fd 3 (existing), ExtraFiles[1] -> child fd 4 (new).
+	cmd.ExtraFiles = []*os.File{oldR, newR}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	if err := cmd.Start(); err != nil {
+		oldR.Close()
+		oldW.Close()
+		newR.Close()
+		newW.Close()
+		return fmt.Errorf("cryptsetup start: %w", err)
+	}
+	// The child holds its own dup'd read ends now; close ours so the writes
+	// below are the only holders and EOF propagates when we finish.
+	oldR.Close()
+	newR.Close()
+
+	// Write each key (no trailing newline) and close the write end to signal
+	// EOF to cryptsetup.
+	_, e1 := io.WriteString(oldW, existingKey)
+	c1 := oldW.Close()
+	_, e2 := io.WriteString(newW, newKey)
+	c2 := newW.Close()
+
+	werr := cmd.Wait()
+	if werr != nil {
+		return fmt.Errorf("cryptsetup %s: %w\n%s", strings.Join(args, " "), werr, out.String())
+	}
+	for _, e := range []error{e1, c1, e2, c2} {
+		if e != nil {
+			return fmt.Errorf("feed key material: %w", e)
+		}
 	}
 	return nil
 }

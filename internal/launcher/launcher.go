@@ -191,9 +191,9 @@ type LoadRequest struct {
 	// by the platform; untrusted (each vault is verified by attestation
 	// at dial time, the MRENCLAVE pin and AS are part of what this VM
 	// will accept, not secrets).
-	VaultEndpoints          []string `json:"vault_endpoints,omitempty"`
-	VaultMrenclave          string   `json:"vault_mrenclave,omitempty"`
-	VaultAttestationServer  string   `json:"vault_attestation_server,omitempty"`
+	VaultEndpoints         []string `json:"vault_endpoints,omitempty"`
+	VaultMrenclave         string   `json:"vault_mrenclave,omitempty"`
+	VaultAttestationServer string   `json:"vault_attestation_server,omitempty"`
 
 	// AppId is the platform-assigned app identity (apps.id, a UUID string). When
 	// set, the manager stamps it (raw 16 bytes) at OID 3.6 on the vault client
@@ -1102,6 +1102,126 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	return nil
 }
 
+// RotatePhase selects which half of an online KEK rotation to run.
+type RotatePhase string
+
+const (
+	// RotatePhaseAdd adds the new key to a free LUKS keyslot. After it, BOTH
+	// the old and new vault DEKs unlock the volume — the caller advances the
+	// app's key-handle pointer here, while either still works.
+	RotatePhaseAdd RotatePhase = "add"
+	// RotatePhaseRetire kills the slot holding the old DEK, after the pointer
+	// has been advanced to the new handle.
+	RotatePhaseRetire RotatePhase = "retire"
+)
+
+// RotateRequest drives one phase of an online volume-key rotation. The vault
+// addressing fields mirror LoadRequest's: deployment plumbing the platform
+// re-supplies, untrusted (each vault is verified by attestation at dial time),
+// never secret. See the key-rotation design.
+type RotateRequest struct {
+	Name      string      `json:"name"`
+	Phase     RotatePhase `json:"phase"`
+	OldHandle string      `json:"old_handle"`
+	NewHandle string      `json:"new_handle"`
+
+	VaultEndpoints         []string `json:"vault_endpoints,omitempty"`
+	VaultMrenclave         string   `json:"vault_mrenclave,omitempty"`
+	VaultAttestationServer string   `json:"vault_attestation_server,omitempty"`
+	AppId                  string   `json:"app_id,omitempty"`
+}
+
+// RotateVolumeKey performs one phase of a vault-key (KEK) rotation on a
+// running, vault-backed container's encrypted volume. It re-wraps the LUKS2
+// master key under a new vault generation; the data on disk never moves and the
+// volume stays mounted (online). The two phases bracket the platform's
+// key-handle pointer advance so a crash mid-rotation always leaves the volume
+// openable (see the key-rotation design):
+//
+//	add    : reconstruct the OLD DEK + provision the NEW DEK from the
+//	         constellation, then luksAddKey the new slot (both keys now open).
+//	retire : reconstruct the OLD DEK and luksRemoveKey its slot (new only).
+//
+// The container must be loaded: rotation needs its live image digest to stamp
+// the vault client identity (OID 3.2/3.6) so the constellation authorises this
+// measurement to export the DEK.
+func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error {
+	if l.volMgr == nil {
+		return fmt.Errorf("launcher: rotate: no 'containers' VG; volume key rotation unavailable")
+	}
+	if req.Name == "" {
+		return fmt.Errorf("launcher: rotate: name is required")
+	}
+	if req.OldHandle == "" {
+		return fmt.Errorf("launcher: rotate: old_handle is required")
+	}
+	if req.Phase == RotatePhaseAdd && req.NewHandle == "" {
+		return fmt.Errorf("launcher: rotate: new_handle is required for the add phase")
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if !l.persistentVolume[req.Name] {
+		return fmt.Errorf("launcher: rotate: %q is not a loaded vault-backed app", req.Name)
+	}
+	digest := l.imageDigests[req.Name]
+	if len(digest) == 0 {
+		return fmt.Errorf("launcher: rotate: no image digest recorded for %q", req.Name)
+	}
+	appID := parseAppID(req.AppId)
+	mkCfg := func() vaultkey.Config {
+		return vaultkey.Config{
+			Endpoints:            req.VaultEndpoints,
+			MrenclaveHex:         req.VaultMrenclave,
+			AttestationServerURL: req.VaultAttestationServer,
+			MgmtURL:              l.cfg.ToolSpecMgmtURL,
+			EnclaveID:            l.cfg.ToolSpecEnclaveID,
+			EnclaveToken:         l.cfg.ToolSpecEnclaveToken,
+		}
+	}
+
+	switch req.Phase {
+	case RotatePhaseAdd:
+		oldDEK, _, err := vaultkey.ResolveOrProvision(ctx, l.log, mkCfg(), req.OldHandle, digest, appID)
+		if err != nil {
+			return fmt.Errorf("launcher: rotate add: reconstruct old key: %w", err)
+		}
+		newDEK, newOrigin, err := vaultkey.ResolveOrProvision(ctx, l.log, mkCfg(), req.NewHandle, digest, appID)
+		if err != nil {
+			return fmt.Errorf("launcher: rotate add: provision new key: %w", err)
+		}
+		if err := l.volMgr.AddKey(req.Name, oldDEK, newDEK); err != nil {
+			return fmt.Errorf("launcher: rotate add: %w", err)
+		}
+		// The new handle is now a live keyslot; reflect it as the volume's
+		// attested key origin (OID 3.4) for the running app.
+		l.volumeEncryption[req.Name] = newOrigin
+		l.recomputeAttestation()
+		if spec, ok := l.specs[req.Name]; ok && l.caddyClient != nil && spec.Hostname != "" && !spec.Internal {
+			if err := l.writeContainerExtensions(req.Name, spec.Hostname, spec.Port); err != nil {
+				l.log.Warn("rotate add: rewrite extensions failed", zap.String("name", req.Name), zap.Error(err))
+			}
+		}
+		l.log.Info("volume key rotation: new slot added", zap.String("name", req.Name), zap.String("new_handle", req.NewHandle))
+		return nil
+
+	case RotatePhaseRetire:
+		oldDEK, _, err := vaultkey.ResolveOrProvision(ctx, l.log, mkCfg(), req.OldHandle, digest, appID)
+		if err != nil {
+			return fmt.Errorf("launcher: rotate retire: reconstruct old key: %w", err)
+		}
+		if err := l.volMgr.RemoveKey(req.Name, oldDEK); err != nil {
+			return fmt.Errorf("launcher: rotate retire: %w", err)
+		}
+		l.log.Info("volume key rotation: old slot retired", zap.String("name", req.Name), zap.String("old_handle", req.OldHandle))
+		return nil
+
+	default:
+		return fmt.Errorf("launcher: rotate: unknown phase %q", req.Phase)
+	}
+}
+
 // recomputeAttestation rebuilds all Merkle trees from current state.
 // Must be called with l.mu held.
 func (l *Launcher) recomputeAttestation() {
@@ -1241,9 +1361,9 @@ func (l *Launcher) StatusReport() []ContainerStatus {
 
 // ContainerStatus is a JSON-serializable container status summary.
 type ContainerStatus struct {
-	Name         string                 `json:"name"`
-	Image        string                 `json:"image"`
-	Status       string                 `json:"status"`
+	Name         string                  `json:"name"`
+	Image        string                  `json:"image"`
+	Status       string                  `json:"status"`
 	PullProgress *container.PullProgress `json:"pull_progress,omitempty"`
 }
 
