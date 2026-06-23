@@ -1125,10 +1125,24 @@ type RotateRequest struct {
 	OldHandle string      `json:"old_handle"`
 	NewHandle string      `json:"new_handle"`
 
+	// Vault addressing for the OLD handle (the constellation the volume's
+	// current DEK lives on).
 	VaultEndpoints         []string `json:"vault_endpoints,omitempty"`
 	VaultMrenclave         string   `json:"vault_mrenclave,omitempty"`
 	VaultAttestationServer string   `json:"vault_attestation_server,omitempty"`
-	AppId                  string   `json:"app_id,omitempty"`
+
+	// Vault addressing for the NEW handle. Empty = same constellation as the old
+	// (intra-constellation KEK rotation). Set to a DIFFERENT constellation to
+	// migrate the volume key across constellations without re-encrypting data
+	// (graceful vault rotation): the add phase reconstructs the old DEK from the
+	// old constellation and provisions the new DEK on the new one, so both open
+	// the volume across the pointer flip. See the enclave-upgrade plan, OPEN
+	// DESIGN — graceful constellation migration.
+	NewVaultEndpoints         []string `json:"new_vault_endpoints,omitempty"`
+	NewVaultMrenclave         string   `json:"new_vault_mrenclave,omitempty"`
+	NewVaultAttestationServer string   `json:"new_vault_attestation_server,omitempty"`
+
+	AppId string `json:"app_id,omitempty"`
 }
 
 // RotateVolumeKey performs one phase of a vault-key (KEK) rotation on a
@@ -1170,24 +1184,32 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 		return fmt.Errorf("launcher: rotate: no image digest recorded for %q", req.Name)
 	}
 	appID := parseAppID(req.AppId)
-	mkCfg := func() vaultkey.Config {
+	mkCfg := func(endpoints []string, mrenclave, attServer string) vaultkey.Config {
 		return vaultkey.Config{
-			Endpoints:            req.VaultEndpoints,
-			MrenclaveHex:         req.VaultMrenclave,
-			AttestationServerURL: req.VaultAttestationServer,
+			Endpoints:            endpoints,
+			MrenclaveHex:         mrenclave,
+			AttestationServerURL: attServer,
 			MgmtURL:              l.cfg.ToolSpecMgmtURL,
 			EnclaveID:            l.cfg.ToolSpecEnclaveID,
 			EnclaveToken:         l.cfg.ToolSpecEnclaveToken,
 		}
 	}
+	oldCfg := mkCfg(req.VaultEndpoints, req.VaultMrenclave, req.VaultAttestationServer)
+	// The new handle's constellation: distinct fields when migrating across
+	// constellations, else the same set as the old (intra-constellation rotate).
+	newEndpoints, newMre, newAtt := req.NewVaultEndpoints, req.NewVaultMrenclave, req.NewVaultAttestationServer
+	if len(newEndpoints) == 0 {
+		newEndpoints, newMre, newAtt = req.VaultEndpoints, req.VaultMrenclave, req.VaultAttestationServer
+	}
+	newCfg := mkCfg(newEndpoints, newMre, newAtt)
 
 	switch req.Phase {
 	case RotatePhaseAdd:
-		oldDEK, _, err := vaultkey.ResolveOrProvision(ctx, l.log, mkCfg(), req.OldHandle, digest, appID)
+		oldDEK, _, err := vaultkey.ResolveOrProvision(ctx, l.log, oldCfg, req.OldHandle, digest, appID)
 		if err != nil {
 			return fmt.Errorf("launcher: rotate add: reconstruct old key: %w", err)
 		}
-		newDEK, newOrigin, err := vaultkey.ResolveOrProvision(ctx, l.log, mkCfg(), req.NewHandle, digest, appID)
+		newDEK, newOrigin, err := vaultkey.ResolveOrProvision(ctx, l.log, newCfg, req.NewHandle, digest, appID)
 		if err != nil {
 			return fmt.Errorf("launcher: rotate add: provision new key: %w", err)
 		}
@@ -1207,7 +1229,7 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 		return nil
 
 	case RotatePhaseRetire:
-		oldDEK, _, err := vaultkey.ResolveOrProvision(ctx, l.log, mkCfg(), req.OldHandle, digest, appID)
+		oldDEK, _, err := vaultkey.ResolveOrProvision(ctx, l.log, oldCfg, req.OldHandle, digest, appID)
 		if err != nil {
 			return fmt.Errorf("launcher: rotate retire: reconstruct old key: %w", err)
 		}
