@@ -1054,6 +1054,11 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 		}
 	}
 
+	// Capture the image before clearing state so we can reclaim its disk once
+	// it is no longer referenced (unload = delete intent; this also frees the
+	// previous version's image on every upgrade).
+	unloadedImg := l.pulledImages[name]
+
 	// Clean up state.
 	delete(l.specs, name)
 	delete(l.pulledImages, name)
@@ -1065,6 +1070,26 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	delete(l.configAPI, name)
 	delete(l.configured, name)
 	delete(l.containerTokens, name)
+
+	// Garbage-collect the image if no other loaded container references it.
+	// Frees disk on the enclave so old/abandoned images do not accumulate.
+	if unloadedImg != nil && l.mgr != nil {
+		ref := unloadedImg.Name()
+		stillUsed := false
+		for _, img := range l.pulledImages {
+			if img != nil && img.Name() == ref {
+				stillUsed = true
+				break
+			}
+		}
+		if !stillUsed {
+			if err := l.mgr.RemoveImage(ctx, ref); err != nil {
+				l.log.Warn("failed to remove unreferenced image", zap.String("image", ref), zap.Error(err))
+			} else {
+				l.log.Info("removed unreferenced image after unload", zap.String("container", name), zap.String("image", ref))
+			}
+		}
+	}
 
 	// Recompute attestation.
 	l.recomputeAttestation()

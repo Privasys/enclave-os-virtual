@@ -153,6 +153,23 @@ func (m *Manager) ctx(parent context.Context) context.Context {
 	return namespaces.WithNamespace(parent, Namespace)
 }
 
+// RemoveImage deletes an image reference and synchronously garbage-collects its
+// content + snapshots, reclaiming disk. Callers must ensure no container still
+// references the image. A not-found image is treated as success (idempotent).
+func (m *Manager) RemoveImage(ctx context.Context, ref string) error {
+	if ref == "" {
+		return nil
+	}
+	ctx = m.ctx(ctx)
+	if err := m.client.ImageService().Delete(ctx, ref, images.SynchronousDelete()); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil
+		}
+		return fmt.Errorf("delete image %s: %w", ref, err)
+	}
+	return nil
+}
+
 // Pull downloads an OCI image and verifies its digest matches the manifest.
 // Returns the resolved image descriptor and the raw digest bytes.
 // Registers a pulling container in the manager so pull progress is visible
