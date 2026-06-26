@@ -175,16 +175,20 @@ type LoadRequest struct {
 	// the storage size changes the attested container identity.
 	Storage string `json:"storage,omitempty"`
 
-	// KeyHandle names the vault key holding (or reserved for) this
-	// container's volume DEK, e.g.
-	// "vault:apps.privasys.org/<app-id>/storage-kek/v1". When set, the
-	// DEK is reconstructed from (or, on first boot, generated in-enclave
-	// and filled into) the vault constellation — see internal/vaultkey.
-	// The handle is not a secret; the platform never sees the DEK.
-	// When empty and Storage is set, a throwaway DEK is generated
-	// in-enclave (key_origin "generated"): the volume does not survive a
-	// host reboot.
+	// KeyHandle names the vault key holding this container's volume DEK,
+	// e.g. "apps.privasys.org/<app-id>/storage-kek/v1". When set, the DEK is
+	// reconstructed from (or, on first boot, generated in-enclave and created
+	// on) the vault constellation — see internal/vaultkey. The handle is not a
+	// secret; the platform never sees the DEK. When empty and Storage is set, a
+	// throwaway DEK is generated in-enclave (key_origin "generated"): the volume
+	// does not survive a host reboot.
 	KeyHandle string `json:"key_handle,omitempty"`
+
+	// KeyCreationGrant is the platform-minted grant (JWT) the TEE presents to
+	// create the key on first boot (scoped to apps.privasys.org/<app-id>, bound
+	// to this TEE's attested app-id). Only needed on first boot; ignored once
+	// the key exists.
+	KeyCreationGrant string `json:"key_creation_grant,omitempty"`
 
 	// VaultEndpoints, VaultMrenclave and VaultAttestationServer address
 	// and pin the vault constellation for KeyHandle resolution. Supplied
@@ -843,7 +847,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				MgmtURL:      l.cfg.ToolSpecMgmtURL,
 				EnclaveID:    l.cfg.ToolSpecEnclaveID,
 				EnclaveToken: l.cfg.ToolSpecEnclaveToken,
-			}, req.KeyHandle, digest, parseAppID(req.AppId))
+			}, req.KeyHandle, req.KeyCreationGrant, digest, parseAppID(req.AppId))
 			if err != nil {
 				return nil, fmt.Errorf("launcher: vault volume key: %w", err)
 			}
@@ -1167,6 +1171,10 @@ type RotateRequest struct {
 	NewVaultMrenclave         string   `json:"new_vault_mrenclave,omitempty"`
 	NewVaultAttestationServer string   `json:"new_vault_attestation_server,omitempty"`
 
+	// NewKeyCreationGrant is the grant the TEE presents to create the NEW
+	// generation's key during the "add" phase.
+	NewKeyCreationGrant string `json:"new_key_creation_grant,omitempty"`
+
 	AppId string `json:"app_id,omitempty"`
 }
 
@@ -1230,11 +1238,11 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 
 	switch req.Phase {
 	case RotatePhaseAdd:
-		oldDEK, _, err := vaultkey.ResolveOrProvision(ctx, l.log, oldCfg, req.OldHandle, digest, appID)
+		oldDEK, _, err := vaultkey.ResolveOrProvision(ctx, l.log, oldCfg, req.OldHandle, "", digest, appID)
 		if err != nil {
 			return fmt.Errorf("launcher: rotate add: reconstruct old key: %w", err)
 		}
-		newDEK, newOrigin, err := vaultkey.ResolveOrProvision(ctx, l.log, newCfg, req.NewHandle, digest, appID)
+		newDEK, newOrigin, err := vaultkey.ResolveOrProvision(ctx, l.log, newCfg, req.NewHandle, req.NewKeyCreationGrant, digest, appID)
 		if err != nil {
 			return fmt.Errorf("launcher: rotate add: provision new key: %w", err)
 		}
@@ -1254,7 +1262,7 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 		return nil
 
 	case RotatePhaseRetire:
-		oldDEK, _, err := vaultkey.ResolveOrProvision(ctx, l.log, oldCfg, req.OldHandle, digest, appID)
+		oldDEK, _, err := vaultkey.ResolveOrProvision(ctx, l.log, oldCfg, req.OldHandle, "", digest, appID)
 		if err != nil {
 			return fmt.Errorf("launcher: rotate retire: reconstruct old key: %w", err)
 		}

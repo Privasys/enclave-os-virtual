@@ -3,19 +3,19 @@
 //
 // The DEK for a container's LUKS volume never exists outside TEE
 // memory: it is either reconstructed from k-of-n Shamir shares held by
-// the vault constellation, or — on the very first boot of a freshly
-// reserved key handle — generated here and pushed to the constellation
-// as shares via the one-shot ProvideMaterial fill (two-phase create,
-// vault-v0.20.x). The platform only ever supplies the handle and the
-// constellation endpoints; it never sees key material.
+// the vault constellation, or — on the very first boot of a key handle —
+// generated here and created on the constellation as shares in a single
+// CreateKey call per vault, presenting a platform-minted key-creation
+// grant. The platform supplies the handle, the constellation endpoints
+// and the grant; it never sees key material.
 //
 // # Share payload format
 //
-// ProvideMaterial is one-shot per vault, so a partially failed fill
-// followed by a retry would leave vaults holding shares of DIFFERENT
-// DEK generations — and Shamir reconstruction over mixed generations
-// yields garbage silently. Each vault's share payload is therefore
-// prefixed with a random 16-byte generation id:
+// CreateKey is one-shot per vault (it rejects a duplicate handle), so a
+// partially failed create followed by a retry would leave vaults holding
+// shares of DIFFERENT DEK generations — and Shamir reconstruction over
+// mixed generations yields garbage silently. Each vault's share payload
+// is therefore prefixed with a random 16-byte generation id:
 //
 //	payload = generation(16) || X(1) || data(len(secret))
 //
@@ -174,7 +174,7 @@ func dialOptions(cfg Config, imageDigest, appID []byte, attToken string) (vault.
 	}, nil
 }
 
-// encodeShare builds the per-vault ProvideMaterial payload.
+// encodeShare builds the per-vault CreateKey material payload.
 func encodeShare(generation []byte, s *vault.Share) []byte {
 	out := make([]byte, 0, generationSize+1+len(s.Data))
 	out = append(out, generation...)
@@ -209,12 +209,13 @@ func bestGroup(byGen map[string][]*vault.Share, threshold int) []*vault.Share {
 // ResolveOrProvision returns the LUKS passphrase (hex of the 32-byte
 // DEK) and the attested key-origin string for the given handle.
 //
-// It first tries to reconstruct the DEK from the constellation. When
-// the handle is reserved but unfilled (two-phase create), it generates
-// the DEK here, fills the constellation, and only returns once at
-// least k vaults hold a share of the SAME generation — so a volume is
-// never formatted with a key the constellation cannot give back.
-func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle string, imageDigest, appID []byte) (string, string, error) {
+// It first tries to reconstruct the DEK from the constellation. When the
+// handle does not exist yet (first boot), it generates the DEK here and
+// creates the key on each vault with a share as material, presenting the
+// platform-minted grant, and only returns once at least k vaults hold a
+// share of the SAME generation — so a volume is never formatted with a
+// key the constellation cannot give back. A grant is required to create.
+func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle, grant string, imageDigest, appID []byte) (string, string, error) {
 	if err := cfg.validate(); err != nil {
 		return "", "", err
 	}
@@ -234,7 +235,6 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 
 	// ---- Phase 1: try to collect existing shares -----------------------
 	byGen := make(map[string][]*vault.Share)
-	pending := 0
 	notFound := 0
 	denied := 0
 	var lastErr error
@@ -248,14 +248,12 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 				continue
 			}
 			byGen[gen] = append(byGen[gen], share)
-		case strings.Contains(err.Error(), "not yet provided"):
-			pending++
 		case strings.Contains(err.Error(), "key not found"):
 			notFound++
 		case strings.Contains(err.Error(), "policy.principals"):
 			// The key EXISTS on this vault but our TEE is not in its policy
-			// (the upgrade gate). Crucially this is NOT "pending" — the vault
-			// holds material we are simply not authorised to export.
+			// (the upgrade gate). The vault holds material we are simply not
+			// authorised to export.
 			denied++
 		default:
 			lastErr = err
@@ -279,22 +277,28 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 	// The key EXISTS (some vault denied our export on policy grounds) but we
 	// could not assemble a quorum we are authorised to read. This is the
 	// upgrade gate, NOT a first boot. Fail CLOSED — never fall through to
-	// Phase 2: generating a new DEK and filling the still-pending vaults would
-	// split the key's generations and permanently corrupt it (the volume was
-	// formatted with the original DEK). The app/data owner must promote this
-	// measurement first.
+	// create: a fresh DEK created onto the absent vaults would split the key's
+	// generations and permanently corrupt it (the volume was formatted with the
+	// original DEK). The app/data owner must promote this measurement first.
 	if denied > 0 {
 		return "", "", fmt.Errorf("vaultkey: key %q exists but this measurement is not authorised to reconstruct it (%d/%d vaults denied on policy) — the owner must approve (promote) this version before it can run", handle, denied, len(cfg.Endpoints))
 	}
 
-	if pending == 0 {
-		if notFound == len(cfg.Endpoints) {
-			return "", "", fmt.Errorf("vaultkey: handle %q is not reserved on any vault (the platform must CreateKeyPending it before deploy)", handle)
+	// First boot requires a clean slate: every vault must agree the handle is
+	// absent. A partial set (some shares present below quorum, or an unreachable
+	// vault) is NOT a first boot — creating a fresh generation could split the
+	// key — so fail and let the reconciler retry.
+	if notFound != len(cfg.Endpoints) {
+		if len(byGen) > 0 {
+			return "", "", fmt.Errorf("vaultkey: key %q exists on some vaults but no share group meets threshold %d — refusing to create a new generation", handle, cfg.threshold())
 		}
-		return "", "", fmt.Errorf("vaultkey: cannot reconstruct (no share group meets threshold %d) and no vault reports pending material; last error: %v", cfg.threshold(), lastErr)
+		return "", "", fmt.Errorf("vaultkey: cannot reconstruct (no share group meets threshold %d) and not every vault reports the handle absent; last error: %v", cfg.threshold(), lastErr)
+	}
+	if grant == "" {
+		return "", "", fmt.Errorf("vaultkey: handle %q does not exist and no key-creation grant was supplied (the platform must mint one at deploy)", handle)
 	}
 
-	// ---- Phase 2: first boot — generate + fill -------------------------
+	// ---- Phase 2: first boot — generate + create -----------------------
 	dek := make([]byte, dekSize)
 	if _, err := rand.Read(dek); err != nil {
 		return "", "", fmt.Errorf("vaultkey: generate DEK: %w", err)
@@ -314,21 +318,21 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 		// One retry per vault: transient dial failures are common right
 		// after a vault restart. The payload is identical, so a retry
 		// can never split generations.
-		var perr error
+		var cerr error
 		for attempt := 0; attempt < 2; attempt++ {
-			perr = provideTo(ctx, ep, opts, handle, payload)
-			if perr == nil {
+			cerr = createOn(ctx, ep, opts, handle, payload, grant)
+			if cerr == nil {
 				acks++
 				break
 			}
-			if strings.Contains(perr.Error(), "already provided") {
-				// Holds a share of an older generation (earlier partial
-				// fill). Not part of this generation's quorum.
+			if strings.Contains(cerr.Error(), "already exists") {
+				// Holds a share from an earlier partial create. Not counted
+				// toward this generation's quorum.
 				break
 			}
 		}
-		if perr != nil {
-			log.Warn("share fill failed", zap.String("vault", ep), zap.Error(perr))
+		if cerr != nil {
+			log.Warn("share create failed", zap.String("vault", ep), zap.Error(cerr))
 		}
 	}
 	if acks < cfg.threshold() {
@@ -337,7 +341,7 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 		// resolution with a fresh generation.
 		return "", "", fmt.Errorf("vaultkey: only %d of %d vaults accepted a share (threshold %d) — refusing to use an unrecoverable DEK", acks, len(cfg.Endpoints), cfg.threshold())
 	}
-	log.Info("volume DEK generated in-enclave and filled into constellation",
+	log.Info("volume DEK generated in-enclave and created on constellation",
 		zap.Int("acks", acks), zap.Int("threshold", cfg.threshold()))
 	return hex.EncodeToString(dek), "vault:" + handle, nil
 }
@@ -351,12 +355,12 @@ func exportFrom(ctx context.Context, endpoint string, opts vault.DialOptions, ha
 	return c.ExportKey(ctx, handle)
 }
 
-func provideTo(ctx context.Context, endpoint string, opts vault.DialOptions, handle string, material []byte) error {
+func createOn(ctx context.Context, endpoint string, opts vault.DialOptions, handle string, material []byte, grant string) error {
 	c, err := vault.Dial(ctx, vault.VaultRegistration{ID: endpoint, Endpoint: endpoint, Status: "static"}, opts)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
-	_, err = c.ProvideMaterial(ctx, handle, material)
+	_, err = c.CreateKey(ctx, handle, material, grant)
 	return err
 }
