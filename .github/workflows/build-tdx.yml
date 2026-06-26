@@ -8,12 +8,17 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 on:
-  # Releases (GitHub Release + GCP image) come only from version tags; dev
-  # images come from a manual workflow_dispatch (publish_gcp / dev_profile).
-  # We deliberately do NOT build on every main push: those runs produced no
-  # consumable artifact (publish + release are tag-gated) yet cost 25+
-  # GPU-runner minutes each. Validate a main commit on demand by dispatching
-  # this workflow.
+  # Releases (GitHub Release + GCP image) come from version tags:
+  #   tdx-vX.Y.Z       → prod-profile image (gcp)
+  #   tdx-vX.Y.Z-dev   → dev-profile image (SSH + debug tools), released as a
+  #                      prerelease with its OWN Predicted RTMRs so dev-env
+  #                      attestation (e.g. m1-dev) can be pinned the same way
+  #                      prod is. The `-dev` suffix is what selects --profile dev.
+  # An unreleased dev image for quick iteration still comes from a manual
+  # workflow_dispatch (publish_gcp / dev_profile). We deliberately do NOT build
+  # on every main push: those runs produced no consumable artifact (publish +
+  # release are tag-gated) yet cost 25+ GPU-runner minutes each. Validate a main
+  # commit on demand by dispatching this workflow.
   push:
     tags: ['tdx-v*']
   pull_request:
@@ -220,7 +225,11 @@ jobs:
           cd build/image
           mkdir -p mkosi.cache
           PROFILES="--profile gcp"
-          if [[ "${{ github.event.inputs.dev_profile }}" == "true" ]]; then
+          # Dev-profile (SSH + debug tools, distinct ImageId/measurements) is
+          # selected by the workflow_dispatch input OR by a tag ending in `-dev`
+          # (tdx-vX.Y.Z-dev). The tag path produces a released dev image whose
+          # Predicted RTMRs match the dev-profile VMs.
+          if [[ "${{ github.event.inputs.dev_profile }}" == "true" || "${{ github.ref_name }}" == *-dev ]]; then
             PROFILES="$PROFILES --profile dev"
           fi
           sudo mkosi $PROFILES --cache-dir mkosi.cache build
@@ -355,6 +364,9 @@ jobs:
         with:
           files: enclave-os-virtual-*.tar.gz
           generate_release_notes: true
+          # `-dev` tags are dev-profile images — publish as a prerelease so they
+          # never show up as "latest" / get mistaken for a prod release.
+          prerelease: ${{ endsWith(github.ref_name, '-dev') }}
           body: |
             ## Measurements
 
