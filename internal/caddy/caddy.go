@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"sort"
 	"sync"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -177,6 +178,15 @@ func (c *Client) Reload() error {
 
 // reload posts the full Caddy config to the admin API.  Must be called
 // with c.mu held.
+//
+// Transport errors (admin endpoint not yet listening on :2019) are
+// retried for a bounded window: caddy.service and manager.service start
+// concurrently, and the systemd "started" state does not guarantee the
+// admin socket is already bound. Without this, the manager's first route
+// registration at boot loses the race and returns a fatal error, killing
+// the manager (it self-heals on the systemd restart, but with a multi-
+// second gap that flakes e2e runs and drops runtime-status pushes). A
+// non-200 response is a real config error and is returned immediately.
 func (c *Client) reload() error {
 	cfg := c.buildConfig()
 
@@ -186,21 +196,42 @@ func (c *Client) reload() error {
 	}
 
 	url := c.adminURL("/load")
-	resp, err := c.client.Post(url, "application/json", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("caddy: failed to POST /load: %w", err)
+
+	const (
+		adminReadyTimeout = 30 * time.Second
+		retryInterval     = 500 * time.Millisecond
+	)
+	deadline := time.Now().Add(adminReadyTimeout)
+
+	for attempt := 1; ; attempt++ {
+		resp, err := c.client.Post(url, "application/json", bytes.NewReader(body))
+		if err != nil {
+			// A transport error means the admin endpoint isn't reachable
+			// yet (boot ordering race, or Caddy mid-restart). Retry until
+			// the deadline before treating it as fatal.
+			if time.Now().Before(deadline) {
+				c.log.Debug("Caddy admin not ready, retrying /load",
+					zap.Int("attempt", attempt),
+					zap.Error(err))
+				time.Sleep(retryInterval)
+				continue
+			}
+			return fmt.Errorf("caddy: failed to POST /load after %s: %w", adminReadyTimeout, err)
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			respBody, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return fmt.Errorf("caddy: /load returned %d: %s", resp.StatusCode, string(respBody))
+		}
+		resp.Body.Close()
+
+		c.log.Debug("Caddy config reloaded",
+			zap.Int("routes", len(c.routes)),
+			zap.Int("attempts", attempt))
+
+		return nil
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("caddy: /load returned %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	c.log.Debug("Caddy config reloaded",
-		zap.Int("routes", len(c.routes)))
-
-	return nil
 }
 
 // buildConfig generates the full Caddy JSON config from the current routes.
@@ -251,8 +282,8 @@ func (c *Client) buildConfig() map[string]any {
 		routes = append(routes, map[string]any{
 			"handle": []map[string]any{
 				{
-					"handler":   "reverse_proxy",
-					"upstreams": []map[string]any{{"dial": c.fallback}},
+					"handler":        "reverse_proxy",
+					"upstreams":      []map[string]any{{"dial": c.fallback}},
 					"flush_interval": -1,
 					"transport": map[string]any{
 						"protocol":                "http",
