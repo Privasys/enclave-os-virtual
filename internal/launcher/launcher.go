@@ -577,6 +577,20 @@ func (l *Launcher) WaitReady(ctx context.Context) error {
 	}
 }
 
+// MarkFailed sets a container's status to "failed". Load registers a
+// "pulling" stub before the network pull; if Load later errors (e.g. the
+// vault DEK reconstruction fails), the stub would otherwise stay "pulling"
+// forever and status queries would never reflect the failure. Safe to call
+// when the container is unknown (no-op).
+func (l *Launcher) MarkFailed(name string) {
+	if l.mgr == nil {
+		return
+	}
+	if mc, ok := l.mgr.Get(name); ok {
+		mc.SetStatus(container.StatusFailed)
+	}
+}
+
 // ContainerCount returns the number of running containers.
 func (l *Launcher) ContainerCount() int {
 	l.mu.RLock()
