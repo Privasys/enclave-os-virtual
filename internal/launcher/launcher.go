@@ -21,6 +21,7 @@
 package launcher
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -28,6 +29,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
@@ -198,6 +200,16 @@ type LoadRequest struct {
 	VaultEndpoints         []string `json:"vault_endpoints,omitempty"`
 	VaultMrenclave         string   `json:"vault_mrenclave,omitempty"`
 	VaultAttestationServer string   `json:"vault_attestation_server,omitempty"`
+
+	// RegistrySecretHandle names a vault key holding the pull credential for a
+	// PRIVATE image, e.g. "users/<sub>/registry-creds/<name>". When set, the
+	// manager exports the credential from the constellation (the owner's key
+	// policy must grant THIS manager measurement ExportKey) and uses it to pull
+	// the image — so a customer's private image bytes and its pull token never
+	// leave the TEE. Resolved against the same Vault* addressing above. Empty =
+	// an anonymous (public) pull, the existing behaviour. Not a secret; never
+	// measured (deployment plumbing, like the other vault addressing).
+	RegistrySecretHandle string `json:"registry_secret_handle,omitempty"`
 
 	// AppId is the platform-assigned app identity (apps.id, a UUID string). When
 	// set, the manager stamps it (raw 16 bytes) at OID 3.6 on the vault client
@@ -816,13 +828,43 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		}
 	}
 
+	// For a private image, export the pull credential from the owner's vault
+	// FIRST (the requested digest is known from the pinned ref, so we can stamp
+	// this TEE's vault identity before the pull). The credential is reconstructed
+	// in-TEE and used only to authenticate the pull; the host and the platform
+	// never see it.
+	var regAuth *container.RegistryAuth
+	if req.RegistrySecretHandle != "" {
+		reqDigest, derr := pinnedDigestBytes(req.Image)
+		if derr != nil {
+			return nil, fmt.Errorf("launcher: %w", derr)
+		}
+		credBytes, err := vaultkey.Export(ctx, l.log, vaultkey.Config{
+			Endpoints:            req.VaultEndpoints,
+			MrenclaveHex:         req.VaultMrenclave,
+			AttestationServerURL: req.VaultAttestationServer,
+			MgmtURL:              l.cfg.ToolSpecMgmtURL,
+			EnclaveID:            l.cfg.ToolSpecEnclaveID,
+			EnclaveToken:         l.cfg.ToolSpecEnclaveToken,
+		}, req.RegistrySecretHandle, reqDigest, parseAppID(req.AppId))
+		if err != nil {
+			return nil, fmt.Errorf("launcher: registry credential: %w", err)
+		}
+		regAuth, err = parseRegistryAuth(credBytes)
+		if err != nil {
+			return nil, fmt.Errorf("launcher: registry credential: %w", err)
+		}
+		l.log.Info("private image: pull credential fetched from vault",
+			zap.String("name", req.Name), zap.String("handle", req.RegistrySecretHandle))
+	}
+
 	// Pull image.
 	l.log.Info("pulling image",
 		zap.String("name", req.Name),
 		zap.String("image", req.Image),
 		zap.String("hostname", spec.Hostname),
 	)
-	img, digest, err := l.mgr.Pull(ctx, spec)
+	img, digest, err := l.mgr.Pull(ctx, spec, regAuth)
 	if err != nil {
 		return nil, err
 	}
@@ -1734,33 +1776,63 @@ func (l *Launcher) waitForShutdown(ctx context.Context) error {
 	return nil
 }
 
+// pinnedDigestBytes extracts the 32-byte SHA-256 from a digest-pinned image
+// reference ("...@sha256:<64hex>"). It is the requested digest, known before the
+// pull, used both to verify the pull and to stamp this TEE's vault identity when
+// fetching a private-registry credential.
+func pinnedDigestBytes(imageRef string) ([]byte, error) {
+	idx := strings.Index(imageRef, "@sha256:")
+	if idx < 0 {
+		return nil, fmt.Errorf("image %q is not digest-pinned (must contain @sha256:...)", imageRef)
+	}
+	pinnedBytes, err := hex.DecodeString(imageRef[idx+8:])
+	if err != nil {
+		return nil, fmt.Errorf("image %q has invalid digest hex: %w", imageRef, err)
+	}
+	if len(pinnedBytes) != sha256.Size {
+		return nil, fmt.Errorf("image %q digest is not SHA-256 (got %d bytes)", imageRef, len(pinnedBytes))
+	}
+	return pinnedBytes, nil
+}
+
 // verifyPinnedDigest checks that the image reference includes a @sha256:
 // digest pin and that the resolved digest matches.
 func verifyPinnedDigest(imageRef string, resolvedDigest []byte) error {
-	idx := -1
-	for i := 0; i < len(imageRef); i++ {
-		if imageRef[i] == '@' {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 || len(imageRef) < idx+8 || imageRef[idx:idx+8] != "@sha256:" {
-		return fmt.Errorf("image %q is not digest-pinned (must contain @sha256:...)", imageRef)
-	}
-	pinnedHex := imageRef[idx+8:]
-	pinnedBytes, err := hex.DecodeString(pinnedHex)
+	pinnedBytes, err := pinnedDigestBytes(imageRef)
 	if err != nil {
-		return fmt.Errorf("image %q has invalid digest hex: %w", imageRef, err)
+		return err
 	}
-	if len(pinnedBytes) != sha256.Size {
-		return fmt.Errorf("image %q digest is not SHA-256 (got %d bytes)", imageRef, len(pinnedBytes))
-	}
-
 	if hex.EncodeToString(resolvedDigest) != hex.EncodeToString(pinnedBytes) {
 		return fmt.Errorf("image %q: resolved digest %x does not match pinned %x",
 			imageRef, resolvedDigest, pinnedBytes)
 	}
 	return nil
+}
+
+// parseRegistryAuth decodes a pull credential exported from the vault. The
+// canonical shape is JSON {"username":"...","password":"..."} (the CLI's
+// `registry add` writes this). For convenience a bare, non-JSON token is taken
+// as the password with a conventional username, so a raw PAT also works.
+func parseRegistryAuth(cred []byte) (*container.RegistryAuth, error) {
+	cred = bytes.TrimSpace(cred)
+	if len(cred) == 0 {
+		return nil, fmt.Errorf("empty credential")
+	}
+	if cred[0] == '{' {
+		var j struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if err := json.Unmarshal(cred, &j); err != nil {
+			return nil, fmt.Errorf("credential is not valid JSON: %w", err)
+		}
+		if j.Password == "" {
+			return nil, fmt.Errorf("credential JSON has no password")
+		}
+		return &container.RegistryAuth{Username: j.Username, Password: j.Password}, nil
+	}
+	// Bare token: registries that take an identity token accept any username.
+	return &container.RegistryAuth{Username: "x-access-token", Password: string(cred)}, nil
 }
 
 // detectTEEBackend auto-detects the Trusted Execution Environment from

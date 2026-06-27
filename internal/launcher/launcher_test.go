@@ -85,3 +85,41 @@ func TestValidateLoadRequest(t *testing.T) {
 		})
 	}
 }
+
+func TestParseRegistryAuth(t *testing.T) {
+	// Canonical JSON shape.
+	a, err := parseRegistryAuth([]byte(`{"username":"u","password":"p"}`))
+	if err != nil || a.Username != "u" || a.Password != "p" {
+		t.Fatalf("json cred: got %+v err=%v", a, err)
+	}
+	// Surrounding whitespace is tolerated.
+	if a, err := parseRegistryAuth([]byte("  {\"password\":\"p\"}\n")); err != nil || a.Password != "p" {
+		t.Fatalf("whitespace json cred: got %+v err=%v", a, err)
+	}
+	// Bare token becomes the password.
+	b, err := parseRegistryAuth([]byte("ghp_rawtoken"))
+	if err != nil || b.Password != "ghp_rawtoken" || b.Username == "" {
+		t.Fatalf("bare token: got %+v err=%v", b, err)
+	}
+	// Empty / no-password are rejected.
+	if _, err := parseRegistryAuth([]byte("   ")); err == nil {
+		t.Fatal("expected error for empty credential")
+	}
+	if _, err := parseRegistryAuth([]byte(`{"username":"u"}`)); err == nil {
+		t.Fatal("expected error for credential with no password")
+	}
+}
+
+func TestPinnedDigestBytes(t *testing.T) {
+	hexDigest := "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+	got, err := pinnedDigestBytes("registry.example.com/app@sha256:" + hexDigest)
+	if err != nil || len(got) != 32 {
+		t.Fatalf("valid pinned ref: got %x err=%v", got, err)
+	}
+	if _, err := pinnedDigestBytes("registry.example.com/app:latest"); err == nil {
+		t.Fatal("expected error for unpinned ref")
+	}
+	if _, err := pinnedDigestBytes("app@sha256:zzzz"); err == nil {
+		t.Fatal("expected error for invalid digest hex")
+	}
+}

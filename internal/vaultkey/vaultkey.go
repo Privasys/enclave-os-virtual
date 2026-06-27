@@ -346,6 +346,75 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 	return hex.EncodeToString(dek), "vault:" + handle, nil
 }
 
+// Export reconstructs an opaque secret (e.g. a private-registry pull
+// credential) the app owner created on the constellation, presenting this TEE's
+// attested identity so a vault whose key policy grants THIS measurement
+// ExportKey will release its share. Unlike a volume DEK the material is plain
+// raw shares (no generation prefix, arbitrary length) — the layout the owner's
+// CreateKeyShares writes — so this exports k shares and Shamir-reconstructs. It
+// never creates: the key must already exist (the owner registered it).
+//
+// imageDigest/appID stamp this TEE's vault-client identity exactly as for a DEK
+// resolution; the credential's policy gates release on the manager measurement.
+func Export(ctx context.Context, log *zap.Logger, cfg Config, handle string, imageDigest, appID []byte) ([]byte, error) {
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	if handle == "" {
+		return nil, errors.New("vaultkey: empty key handle")
+	}
+	log = log.Named("vaultkey").With(zap.String("handle", handle))
+
+	attToken, err := fetchAttestationToken(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("vaultkey: %w", err)
+	}
+	opts, err := dialOptions(cfg, imageDigest, appID, attToken)
+	if err != nil {
+		return nil, err
+	}
+
+	var shares []*vault.Share
+	denied, notFound := 0, 0
+	var lastErr error
+	for _, ep := range cfg.Endpoints {
+		material, err := exportFrom(ctx, ep, opts, handle)
+		switch {
+		case err == nil:
+			s, derr := vault.ShareFromBytes(material)
+			if derr != nil {
+				log.Warn("undecodable share", zap.String("vault", ep), zap.Error(derr))
+				continue
+			}
+			shares = append(shares, s)
+		case strings.Contains(err.Error(), "key not found"):
+			notFound++
+		case strings.Contains(err.Error(), "policy.principals"):
+			// The key exists but this measurement is not in its policy.
+			denied++
+		default:
+			lastErr = err
+			log.Warn("vault unavailable", zap.String("vault", ep), zap.Error(err))
+		}
+	}
+
+	if len(shares) >= cfg.threshold() {
+		secret, err := vault.ShamirReconstruct(shares[:cfg.threshold()])
+		if err != nil {
+			return nil, fmt.Errorf("vaultkey: reconstruct: %w", err)
+		}
+		log.Info("secret reconstructed from constellation", zap.Int("shares", len(shares)))
+		return secret, nil
+	}
+	if denied > 0 {
+		return nil, fmt.Errorf("vaultkey: key %q exists but this measurement is not authorised to export it (%d/%d vaults denied on policy) — the owner must grant this manager measurement ExportKey on the credential", handle, denied, len(cfg.Endpoints))
+	}
+	if notFound == len(cfg.Endpoints) {
+		return nil, fmt.Errorf("vaultkey: credential %q does not exist on the constellation — register it before deploying", handle)
+	}
+	return nil, fmt.Errorf("vaultkey: only %d of %d usable shares (threshold %d); last error: %v", len(shares), len(cfg.Endpoints), cfg.threshold(), lastErr)
+}
+
 func exportFrom(ctx context.Context, endpoint string, opts vault.DialOptions, handle string) ([]byte, error) {
 	c, err := vault.Dial(ctx, vault.VaultRegistration{ID: endpoint, Endpoint: endpoint, Status: "static"}, opts)
 	if err != nil {

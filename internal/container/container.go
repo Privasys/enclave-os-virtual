@@ -174,7 +174,17 @@ func (m *Manager) RemoveImage(ctx context.Context, ref string) error {
 // Returns the resolved image descriptor and the raw digest bytes.
 // Registers a pulling container in the manager so pull progress is visible
 // via List()/StatusReport().
-func (m *Manager) Pull(ctx context.Context, spec manifest.Container) (client.Image, []byte, error) {
+// RegistryAuth carries optional pull credentials for a private registry. The
+// manager fetches these from the app owner's vault (never from the control
+// plane) immediately before pulling, so a private image's bytes AND its pull
+// token stay inside the TEE — the host and the platform see neither. Nil (or
+// empty fields) means an anonymous pull, the public-image path.
+type RegistryAuth struct {
+	Username string
+	Password string
+}
+
+func (m *Manager) Pull(ctx context.Context, spec manifest.Container, auth *RegistryAuth) (client.Image, []byte, error) {
 	ctx = m.ctx(ctx)
 	m.log.Info("pulling image", zap.String("name", spec.Name), zap.String("image", spec.Image))
 
@@ -237,7 +247,25 @@ func (m *Manager) Pull(ctx context.Context, spec manifest.Container) (client.Ima
 		TLSClientConfig:     &tls.Config{NextProtos: []string{"http/1.1"}},
 	}
 	httpClient := &http.Client{Transport: httpTransport}
-	resolver := docker.NewResolver(docker.ResolverOptions{Client: httpClient})
+	resOpts := docker.ResolverOptions{Client: httpClient}
+	if auth != nil && (auth.Username != "" || auth.Password != "") {
+		// Private registry: attach a bearer/basic authorizer. Route through the
+		// same HTTP/1.1-only client (WithClient) so the auth path keeps the
+		// large-pull workaround above. Credentials came from the vault and are
+		// never logged.
+		authorizer := docker.NewDockerAuthorizer(
+			docker.WithAuthClient(httpClient),
+			docker.WithAuthCreds(func(string) (string, string, error) {
+				return auth.Username, auth.Password, nil
+			}),
+		)
+		resOpts.Hosts = docker.ConfigureDefaultRegistries(
+			docker.WithClient(httpClient),
+			docker.WithAuthorizer(authorizer),
+		)
+		m.log.Info("private registry pull (vault-sourced credentials)", zap.String("name", spec.Name))
+	}
+	resolver := docker.NewResolver(resOpts)
 
 	pullOnce := func() (client.Image, error) {
 		// Reset progress trackers per attempt so that retries don't
