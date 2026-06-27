@@ -214,10 +214,10 @@ func (m *Manager) Pull(ctx context.Context, spec manifest.Container) (client.Ima
 
 	// Track pull progress per-descriptor using the image handler wrapper.
 	var (
-		progressMu sync.Mutex
-		totalSize  int64
+		progressMu  sync.Mutex
+		totalSize   int64
 		fetchedSize int64
-		seen       = make(map[godigest.Digest]bool) // true = fetched
+		seen        = make(map[godigest.Digest]bool) // true = fetched
 	)
 
 	// Use an HTTP/1.1-only resolver. ghcr.io's HTTP/2 endpoint intermittently
@@ -694,7 +694,13 @@ func (m *Manager) RunHealthCheck(ctx context.Context, mc *ManagedContainer) erro
 
 // StartHealthChecks starts a background goroutine that periodically runs
 // health checks for the given container.
-func (m *Manager) StartHealthChecks(ctx context.Context, mc *ManagedContainer) {
+//
+// onReadinessTimeout, if non-nil, is invoked when a freshly started container
+// never passes a single health check within HealthCheck.ReadinessTimeoutSeconds
+// (the launcher wires this to a full Unload). It frees the container's host
+// port so a misbehaving app — e.g. one that ignores the injected $PORT — cannot
+// linger and collide with co-located apps.
+func (m *Manager) StartHealthChecks(ctx context.Context, mc *ManagedContainer, onReadinessTimeout func()) {
 	hc := mc.Spec.HealthCheck
 	if hc == nil {
 		return
@@ -708,6 +714,7 @@ func (m *Manager) StartHealthChecks(ctx context.Context, mc *ManagedContainer) {
 	if retries == 0 {
 		retries = healthCheckDefaultRetries
 	}
+	readiness := time.Duration(hc.ReadinessTimeoutSeconds) * time.Second
 
 	// Tie the goroutine to the container lifecycle: a derived cancellable
 	// context, stored so Stop can end it. Cancel any prior goroutine first
@@ -722,6 +729,8 @@ func (m *Manager) StartHealthChecks(ctx context.Context, mc *ManagedContainer) {
 
 	go func() {
 		failures := 0
+		everHealthy := false
+		started := time.Now()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 
@@ -740,6 +749,24 @@ func (m *Manager) StartHealthChecks(ctx context.Context, mc *ManagedContainer) {
 					if failures >= retries {
 						mc.SetStatus(StatusUnhealthy)
 					}
+					// Readiness deadline: a container that has not passed a
+					// single health check within the window never bound its
+					// allocated port. Tear it down so it can't sit on a wrong
+					// port and collide with co-located apps. Only applies before
+					// the first success — once healthy, transient failures are
+					// handled by the unhealthy path above.
+					if !everHealthy && readiness > 0 && time.Since(started) > readiness {
+						m.log.Error("container failed readiness deadline; tearing down",
+							zap.String("name", mc.Name),
+							zap.Duration("readiness_timeout", readiness),
+							zap.Int("failures", failures),
+						)
+						mc.SetStatus(StatusFailed)
+						if onReadinessTimeout != nil {
+							go onReadinessTimeout()
+						}
+						return
+					}
 				} else {
 					if failures > 0 {
 						m.log.Info("health check recovered",
@@ -747,6 +774,7 @@ func (m *Manager) StartHealthChecks(ctx context.Context, mc *ManagedContainer) {
 						)
 					}
 					failures = 0
+					everHealthy = true
 					mc.SetStatus(StatusHealthy)
 				}
 			}

@@ -125,6 +125,16 @@ type HealthCheck struct {
 
 	// Retries is the number of consecutive failures before unhealthy.
 	Retries int `yaml:"retries,omitempty" json:"retries,omitempty"`
+
+	// ReadinessTimeoutSeconds bounds how long a freshly started container may
+	// take to pass its FIRST health check. A container that never becomes
+	// healthy within this window is stopped and removed, rather than being left
+	// running while it probes a closed/wrong port forever — e.g. an app that
+	// ignores the injected $PORT and binds a different one, which then collides
+	// with co-located apps under host networking. Zero disables the deadline
+	// (probe indefinitely; the prior behaviour). Not part of the measured
+	// config (see ContainerMerkleTree), so it never changes attestation.
+	ReadinessTimeoutSeconds int `yaml:"readiness_timeout_seconds,omitempty" json:"readiness_timeout_seconds,omitempty"`
 }
 
 // Load reads and parses a manifest from the given YAML file path.

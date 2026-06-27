@@ -964,7 +964,17 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// HTTP handler returns, which would terminate the goroutine before
 	// the first interval tick and leave the container stuck in "running"
 	// state forever.
-	l.mgr.StartHealthChecks(context.Background(), mc)
+	//
+	// The readiness-timeout callback fully unloads a container that never
+	// becomes healthy (frees its host port, drops its Caddy route + registry
+	// entry), so an app that ignores $PORT can't linger and collide.
+	name := req.Name
+	l.mgr.StartHealthChecks(context.Background(), mc, func() {
+		if err := l.Unload(context.Background(), name); err != nil {
+			l.log.Warn("readiness-timeout unload failed",
+				zap.String("name", name), zap.Error(err))
+		}
+	})
 
 	// Record state.
 	l.specs[req.Name] = spec
