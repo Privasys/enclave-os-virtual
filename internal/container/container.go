@@ -424,14 +424,34 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		opts = append(opts, oci.WithProcessArgs(spec.Command...))
 	}
 
-	// Host device passthrough (e.g. /dev/nvidia0).
-	for _, devPath := range spec.Devices {
+	// Read the image spec once; it drives both image-declared devices and
+	// the image-declared volume below.
+	imgSpec, err := img.Spec(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("container: failed to read image spec for %s: %w", spec.Name, err)
+	}
+
+	// Host device passthrough (e.g. /dev/nvidia0). Devices come from the
+	// deploy request (spec.Devices) and/or the image's own
+	// "ai.privasys.devices" label (comma-separated host paths), so a GPU
+	// image declares the hardware it needs the same way it declares its
+	// volume mount ("ai.privasys.volume"). This lets a plain deploy of a GPU
+	// image get passthrough with no per-deploy input.
+	devices := append([]string(nil), spec.Devices...)
+	if v, ok := imgSpec.Config.Labels["ai.privasys.devices"]; ok {
+		for _, d := range strings.Split(v, ",") {
+			if d = strings.TrimSpace(d); d != "" {
+				devices = append(devices, d)
+			}
+		}
+	}
+	for _, devPath := range devices {
 		opts = append(opts, oci.WithDevices(devPath, "", "rwm"))
 	}
 
 	// When GPU devices are requested, ensure NVIDIA_VISIBLE_DEVICES=all
 	// so that the nvidia-container-runtime injects driver libraries.
-	if len(spec.Devices) > 0 {
+	if len(devices) > 0 {
 		opts = append(opts, oci.WithEnv([]string{"NVIDIA_VISIBLE_DEVICES=all"}))
 		// Inject NVIDIA driver libraries via CDI. The CDI spec is
 		// generated at boot by `nvidia-ctk cdi generate` into
@@ -444,10 +464,6 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	// Image-declared volumes via the "ai.privasys.volume" label.
 	// This lets each container image declare its own disk mount
 	// (e.g. LABEL ai.privasys.volume="/mnt/model-gemma4-31b:/models:ro").
-	imgSpec, err := img.Spec(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("container: failed to read image spec for %s: %w", spec.Name, err)
-	}
 	if v, ok := imgSpec.Config.Labels["ai.privasys.volume"]; ok {
 		parts := strings.SplitN(v, ":", 3)
 		if len(parts) < 2 {
