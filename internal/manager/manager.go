@@ -313,6 +313,15 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("POST /api/v1/containers/{name}/config-complete",
 		s.requireContainerSelf(s.handleSetConfigComplete))
 
+	// Vault identity minting: a container app calls this over loopback to have
+	// the manager mint a one-shot RA-TLS client identity for the vault, bound to
+	// the vault's per-connection challenge and stamped with the caller's app id
+	// (OID 3.6) — the same identity used for the per-app data key. The app never
+	// mints its own identity, so the measured manager stays the sole minter and
+	// the stamped app id is trustworthy. Authenticated by the per-container
+	// token (loopback only); the caller can only mint its OWN identity.
+	mux.HandleFunc("POST /api/v1/vault-identity", s.handleMintVaultIdentity)
+
 	// TLS certificate rotation (require manager role).
 	mux.HandleFunc("PUT /api/v1/tls", s.requireAuth(s.handleUpdateTLS))
 
@@ -1024,6 +1033,54 @@ func (s *Server) handleSetConfigComplete(w http.ResponseWriter, r *http.Request)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleMintVaultIdentity mints a one-shot RA-TLS vault client identity for the
+// calling container, bound to the vault's per-connection challenge. The caller
+// authenticates with its launcher-minted container token over loopback, and the
+// manager only ever stamps the app id the token maps to — so a container cannot
+// obtain another app's identity. The manager is the platform's sole minter,
+// which is what makes the stamped app id (OID 3.6) trustworthy to the vault.
+func (s *Server) handleMintVaultIdentity(w http.ResponseWriter, r *http.Request) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || !isLoopbackHost(host) {
+		s.jsonError(w, http.StatusForbidden, "this endpoint is reachable only from inside the enclave")
+		return
+	}
+	authHeader := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		s.jsonError(w, http.StatusUnauthorized, "expected Bearer PRIVASYS_CONTAINER_TOKEN")
+		return
+	}
+	name := s.launcher.LookupContainerByToken(strings.TrimPrefix(authHeader, "Bearer "))
+	if name == "" {
+		s.jsonError(w, http.StatusUnauthorized, "invalid container token")
+		return
+	}
+	var body struct {
+		ChallengeB64 string `json:"challenge_b64"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	challenge, err := base64.StdEncoding.DecodeString(body.ChallengeB64)
+	if err != nil || len(challenge) == 0 {
+		s.jsonError(w, http.StatusBadRequest, "challenge_b64 must be non-empty base64")
+		return
+	}
+	certPEM, keyPEM, err := s.launcher.MintVaultIdentity(name, challenge)
+	if err != nil {
+		s.log.Warn("mint vault identity failed", zap.String("container", name), zap.Error(err))
+		s.jsonError(w, http.StatusInternalServerError, "failed to mint vault identity")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"cert_pem": string(certPEM),
+		"key_pem":  string(keyPEM),
+	})
 }
 
 // handleSetAttestationServers handles PUT /api/v1/attestation-servers.

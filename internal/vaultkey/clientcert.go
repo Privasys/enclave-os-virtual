@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/pem"
 	"fmt"
 	"math/big"
 	"time"
@@ -17,6 +18,32 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/oids"
 	"github.com/Privasys/enclave-os-virtual/internal/tdx"
 )
+
+// MintIdentity mints a one-shot RA-TLS vault client certificate bound to the
+// vault's challenge, carrying a fresh TDX quote plus the container's image
+// digest (OID 3.2) and app id (OID 3.6). This is the exported entry point the
+// manager uses to mint an identity for a calling container on demand: an app
+// never mints its own identity, so the measured manager remains the sole minter
+// and the app id it stamps is trustworthy. It is the same identity minted for
+// the per-app data key.
+func MintIdentity(challenge, imageDigest, appID []byte) (*tls.Certificate, error) {
+	return mintIdentity(challenge, imageDigest, appID)
+}
+
+// EncodeIdentityPEM PEM-encodes a minted identity's certificate and private key
+// so it can be handed to the calling container (over loopback, inside the TD).
+func EncodeIdentityPEM(cert *tls.Certificate) (certPEM, keyPEM []byte, err error) {
+	if cert == nil || len(cert.Certificate) == 0 {
+		return nil, nil, fmt.Errorf("vaultkey: empty identity certificate")
+	}
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]})
+	keyDER, err := x509.MarshalPKCS8PrivateKey(cert.PrivateKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("vaultkey: marshal identity key: %w", err)
+	}
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM, nil
+}
 
 // tdxQuoteOID is the Intel-standard X.509 extension OID carrying a raw
 // TDX quote (same arc the Caddy RA-TLS issuer uses on serving certs).

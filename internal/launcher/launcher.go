@@ -329,6 +329,7 @@ type Launcher struct {
 	platformTree    *merkle.Tree
 	containerTrees  map[string]*merkle.Tree
 	imageDigests    map[string][]byte
+	appIDs          map[string][]byte // container name → raw 16-byte app id (OID 3.6)
 	containerdHash  []byte
 	combinedImgHash [32]byte
 
@@ -425,6 +426,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		log:               log.Named("launcher"),
 		containerTrees:    make(map[string]*merkle.Tree),
 		imageDigests:      make(map[string][]byte),
+		appIDs:            make(map[string][]byte),
 		pulledImages:      make(map[string]client.Image),
 		specs:             make(map[string]manifest.Container),
 		volumeEncryption:  make(map[string]string),
@@ -1022,6 +1024,9 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	l.specs[req.Name] = spec
 	l.pulledImages[req.Name] = img
 	l.imageDigests[req.Name] = digest
+	if appID := parseAppID(req.AppId); appID != nil {
+		l.appIDs[req.Name] = appID
+	}
 	if volEncryption != "" {
 		l.volumeEncryption[req.Name] = volEncryption
 	}
@@ -1133,6 +1138,7 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	delete(l.specs, name)
 	delete(l.pulledImages, name)
 	delete(l.imageDigests, name)
+	delete(l.appIDs, name)
 	delete(l.containerTrees, name)
 	delete(l.volumeEncryption, name)
 	delete(l.persistentVolume, name)
@@ -1714,6 +1720,27 @@ func (l *Launcher) LookupContainerByToken(token string) string {
 		}
 	}
 	return ""
+}
+
+// MintVaultIdentity mints a one-shot RA-TLS vault client identity for the named
+// container, bound to the vault's challenge nonce, and returns it PEM-encoded
+// (cert + key). The manager calls this after authenticating the caller's
+// container token, so the app id stamped is the one the platform assigned to
+// that container — an app cannot mint another app's identity. This is the same
+// identity the launcher mints for the per-app data key.
+func (l *Launcher) MintVaultIdentity(name string, challenge []byte) (certPEM, keyPEM []byte, err error) {
+	l.mu.RLock()
+	digest := l.imageDigests[name]
+	appID := l.appIDs[name]
+	l.mu.RUnlock()
+	if len(digest) == 0 {
+		return nil, nil, fmt.Errorf("launcher: unknown container %q", name)
+	}
+	cert, err := vaultkey.MintIdentity(challenge, digest, appID)
+	if err != nil {
+		return nil, nil, err
+	}
+	return vaultkey.EncodeIdentityPEM(cert)
 }
 
 // mintContainerToken returns a fresh 32-byte hex-encoded random token.
