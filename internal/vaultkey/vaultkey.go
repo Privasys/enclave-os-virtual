@@ -215,22 +215,25 @@ func bestGroup(byGen map[string][]*vault.Share, threshold int) []*vault.Share {
 // platform-minted grant, and only returns once at least k vaults hold a
 // share of the SAME generation — so a volume is never formatted with a
 // key the constellation cannot give back. A grant is required to create.
-func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle, grant string, imageDigest, appID []byte) (string, string, error) {
+// The third return is reconstructed: true when the DEK was rebuilt from an
+// existing key on the constellation (so an on-disk volume MUST exist), false
+// when the key was freshly created (first deploy — a fresh volume is correct).
+func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle, grant string, imageDigest, appID []byte) (string, string, bool, error) {
 	if err := cfg.validate(); err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 	if handle == "" {
-		return "", "", errors.New("vaultkey: empty key handle")
+		return "", "", false, errors.New("vaultkey: empty key handle")
 	}
 	log = log.Named("vaultkey").With(zap.String("handle", handle))
 
 	attToken, err := fetchAttestationToken(ctx, cfg)
 	if err != nil {
-		return "", "", fmt.Errorf("vaultkey: %w", err)
+		return "", "", false, fmt.Errorf("vaultkey: %w", err)
 	}
 	opts, err := dialOptions(cfg, imageDigest, appID, attToken)
 	if err != nil {
-		return "", "", err
+		return "", "", false, err
 	}
 
 	// ---- Phase 1: try to collect existing shares -----------------------
@@ -264,14 +267,14 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 	if best := bestGroup(byGen, cfg.threshold()); best != nil {
 		dek, err := vault.ShamirReconstruct(best)
 		if err != nil {
-			return "", "", fmt.Errorf("vaultkey: reconstruct: %w", err)
+			return "", "", false, fmt.Errorf("vaultkey: reconstruct: %w", err)
 		}
 		if len(dek) != dekSize {
-			return "", "", fmt.Errorf("vaultkey: reconstructed DEK has %d bytes, want %d", len(dek), dekSize)
+			return "", "", false, fmt.Errorf("vaultkey: reconstructed DEK has %d bytes, want %d", len(dek), dekSize)
 		}
 		log.Info("volume DEK reconstructed from constellation",
 			zap.Int("shares", len(best)))
-		return hex.EncodeToString(dek), "vault:" + handle, nil
+		return hex.EncodeToString(dek), "vault:" + handle, true, nil
 	}
 
 	// The key EXISTS (some vault denied our export on policy grounds) but we
@@ -281,7 +284,7 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 	// generations and permanently corrupt it (the volume was formatted with the
 	// original DEK). The app/data owner must promote this measurement first.
 	if denied > 0 {
-		return "", "", fmt.Errorf("vaultkey: key %q exists but this measurement is not authorised to reconstruct it (%d/%d vaults denied on policy) — the owner must approve (promote) this version before it can run", handle, denied, len(cfg.Endpoints))
+		return "", "", false, fmt.Errorf("vaultkey: key %q exists but this measurement is not authorised to reconstruct it (%d/%d vaults denied on policy) — the owner must approve (promote) this version before it can run", handle, denied, len(cfg.Endpoints))
 	}
 
 	// First boot requires a clean slate: every vault must agree the handle is
@@ -290,26 +293,26 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 	// key — so fail and let the reconciler retry.
 	if notFound != len(cfg.Endpoints) {
 		if len(byGen) > 0 {
-			return "", "", fmt.Errorf("vaultkey: key %q exists on some vaults but no share group meets threshold %d — refusing to create a new generation", handle, cfg.threshold())
+			return "", "", false, fmt.Errorf("vaultkey: key %q exists on some vaults but no share group meets threshold %d — refusing to create a new generation", handle, cfg.threshold())
 		}
-		return "", "", fmt.Errorf("vaultkey: cannot reconstruct (no share group meets threshold %d) and not every vault reports the handle absent; last error: %v", cfg.threshold(), lastErr)
+		return "", "", false, fmt.Errorf("vaultkey: cannot reconstruct (no share group meets threshold %d) and not every vault reports the handle absent; last error: %v", cfg.threshold(), lastErr)
 	}
 	if grant == "" {
-		return "", "", fmt.Errorf("vaultkey: handle %q does not exist and no key-creation grant was supplied (the platform must mint one at deploy)", handle)
+		return "", "", false, fmt.Errorf("vaultkey: handle %q does not exist and no key-creation grant was supplied (the platform must mint one at deploy)", handle)
 	}
 
 	// ---- Phase 2: first boot — generate + create -----------------------
 	dek := make([]byte, dekSize)
 	if _, err := rand.Read(dek); err != nil {
-		return "", "", fmt.Errorf("vaultkey: generate DEK: %w", err)
+		return "", "", false, fmt.Errorf("vaultkey: generate DEK: %w", err)
 	}
 	generation := make([]byte, generationSize)
 	if _, err := rand.Read(generation); err != nil {
-		return "", "", fmt.Errorf("vaultkey: generate generation id: %w", err)
+		return "", "", false, fmt.Errorf("vaultkey: generate generation id: %w", err)
 	}
 	shares, err := vault.ShamirSplit(dek, cfg.threshold(), len(cfg.Endpoints))
 	if err != nil {
-		return "", "", fmt.Errorf("vaultkey: shamir split: %w", err)
+		return "", "", false, fmt.Errorf("vaultkey: shamir split: %w", err)
 	}
 
 	acks := 0
@@ -339,11 +342,11 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 		// The volume has NOT been formatted with this DEK; failing the
 		// load here is safe and the reconciler will retry the whole
 		// resolution with a fresh generation.
-		return "", "", fmt.Errorf("vaultkey: only %d of %d vaults accepted a share (threshold %d) — refusing to use an unrecoverable DEK", acks, len(cfg.Endpoints), cfg.threshold())
+		return "", "", false, fmt.Errorf("vaultkey: only %d of %d vaults accepted a share (threshold %d) — refusing to use an unrecoverable DEK", acks, len(cfg.Endpoints), cfg.threshold())
 	}
 	log.Info("volume DEK generated in-enclave and created on constellation",
 		zap.Int("acks", acks), zap.Int("threshold", cfg.threshold()))
-	return hex.EncodeToString(dek), "vault:" + handle, nil
+	return hex.EncodeToString(dek), "vault:" + handle, false, nil
 }
 
 // Export reconstructs an opaque secret (e.g. a private-registry pull

@@ -109,7 +109,21 @@ func (m *Manager) IsVGReady() bool {
 //
 // If key is empty, a random 256-bit key is generated (enclave-generated).
 // Returns VolumeInfo describing the (re)attached volume.
-func (m *Manager) Create(name, size, key string) (*VolumeInfo, error) {
+// lvremoveAudit removes a per-container LV, loudly. Every per-container volume
+// deletion is logged at WARN so accidental data loss is always traceable in the
+// journal (these calls are rollbacks after a volume-creation step failed).
+func (m *Manager) lvremoveAudit(lvPath string) {
+	m.log.Warn("removing per-container LV (rollback after volume-creation failure)",
+		zap.String("lv", lvPath))
+	_ = run("lvremove", "-f", lvPath)
+}
+
+// expectExisting=true means the DEK was reconstructed from the constellation
+// (the key already existed), so an on-disk LV MUST be present to reattach. If it
+// is absent, Create refuses rather than mkfs'ing a fresh empty volume — that
+// would silently mask data loss. Pass false on a first deploy (key freshly
+// created), where a fresh volume is correct.
+func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeInfo, error) {
 	if size == "" {
 		size = DefaultSize
 	}
@@ -147,6 +161,14 @@ func (m *Manager) Create(name, size, key string) (*VolumeInfo, error) {
 		lvExisted = true
 		m.log.Info("LV already exists — reattaching", zap.String("lv", lvName))
 	} else {
+		// Data-loss guard (fail closed): the key was reconstructed, so data was
+		// expected here, but the LV is gone. Do NOT create a fresh empty volume
+		// — that would silently mask the loss. Surface it loudly instead.
+		if expectExisting {
+			m.log.Error("vault-backed volume expected existing data but its LV is absent — refusing to create an empty volume",
+				zap.String("container", name), zap.String("lv", lvName))
+			return nil, fmt.Errorf("volume: %q expects existing data (key reconstructed) but LV %s is absent — refusing to create an empty volume that would mask data loss", name, lvName)
+		}
 		if err := run("lvcreate", "-L", size, "-n", lvName, VGName, "-y"); err != nil {
 			return nil, fmt.Errorf("volume: lvcreate failed: %w", err)
 		}
@@ -172,7 +194,7 @@ func (m *Manager) Create(name, size, key string) (*VolumeInfo, error) {
 			lvPath,
 		); err != nil {
 			// Clean up the LV on failure.
-			_ = run("lvremove", "-f", lvPath)
+			m.lvremoveAudit(lvPath)
 			return nil, fmt.Errorf("volume: luksFormat failed: %w", err)
 		}
 	}
@@ -187,7 +209,7 @@ func (m *Manager) Create(name, size, key string) (*VolumeInfo, error) {
 			lvPath, mapperName, "--key-file=-",
 		); err != nil {
 			if !lvExisted {
-				_ = run("lvremove", "-f", lvPath)
+				m.lvremoveAudit(lvPath)
 			}
 			return nil, fmt.Errorf("volume: luksOpen failed: %w", err)
 		}
@@ -199,7 +221,7 @@ func (m *Manager) Create(name, size, key string) (*VolumeInfo, error) {
 			if !mapperExisted {
 				_ = run("cryptsetup", "luksClose", mapperName)
 			}
-			_ = run("lvremove", "-f", lvPath)
+			m.lvremoveAudit(lvPath)
 			return nil, fmt.Errorf("volume: mkfs.ext4 failed: %w", err)
 		}
 	}
@@ -210,7 +232,7 @@ func (m *Manager) Create(name, size, key string) (*VolumeInfo, error) {
 			_ = run("cryptsetup", "luksClose", mapperName)
 		}
 		if !lvExisted {
-			_ = run("lvremove", "-f", lvPath)
+			m.lvremoveAudit(lvPath)
 		}
 		return nil, fmt.Errorf("volume: failed to create mount point: %w", err)
 	}
@@ -220,7 +242,7 @@ func (m *Manager) Create(name, size, key string) (*VolumeInfo, error) {
 				_ = run("cryptsetup", "luksClose", mapperName)
 			}
 			if !lvExisted {
-				_ = run("lvremove", "-f", lvPath)
+				m.lvremoveAudit(lvPath)
 			}
 			return nil, fmt.Errorf("volume: mount failed: %w", err)
 		}

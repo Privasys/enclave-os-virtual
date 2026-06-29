@@ -734,7 +734,7 @@ func (l *Launcher) resolveSessionRelayKey(ctx context.Context, req LoadRequest, 
 		return
 	}
 
-	seedHex, _, err := vaultkey.ResolveOrProvision(ctx, l.log, vaultkey.Config{
+	seedHex, _, _, err := vaultkey.ResolveOrProvision(ctx, l.log, vaultkey.Config{
 		Endpoints:            req.VaultEndpoints,
 		MrenclaveHex:         req.VaultMrenclave,
 		AttestationServerURL: req.VaultAttestationServer,
@@ -976,8 +976,9 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		}
 		volumeKey := ""
 		volOrigin := ""
+		volReconstructed := false
 		if req.KeyHandle != "" {
-			keyHex, origin, err := vaultkey.ResolveOrProvision(ctx, l.log, vaultkey.Config{
+			keyHex, origin, reconstructed, err := vaultkey.ResolveOrProvision(ctx, l.log, vaultkey.Config{
 				Endpoints:            req.VaultEndpoints,
 				MrenclaveHex:         req.VaultMrenclave,
 				AttestationServerURL: req.VaultAttestationServer,
@@ -994,8 +995,9 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 			}
 			volumeKey = keyHex
 			volOrigin = origin
+			volReconstructed = reconstructed
 		}
-		vi, err := l.volMgr.Create(req.Name, req.Storage, volumeKey)
+		vi, err := l.volMgr.Create(req.Name, req.Storage, volumeKey, volReconstructed)
 		if err != nil {
 			return nil, fmt.Errorf("launcher: failed to create encrypted volume: %w", err)
 		}
@@ -1402,11 +1404,11 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 
 	switch req.Phase {
 	case RotatePhaseAdd:
-		oldDEK, _, err := vaultkey.ResolveOrProvision(ctx, l.log, oldCfg, req.OldHandle, "", digest, appID)
+		oldDEK, _, _, err := vaultkey.ResolveOrProvision(ctx, l.log, oldCfg, req.OldHandle, "", digest, appID)
 		if err != nil {
 			return fmt.Errorf("launcher: rotate add: reconstruct old key: %w", err)
 		}
-		newDEK, newOrigin, err := vaultkey.ResolveOrProvision(ctx, l.log, newCfg, req.NewHandle, req.NewKeyCreationGrant, digest, appID)
+		newDEK, newOrigin, _, err := vaultkey.ResolveOrProvision(ctx, l.log, newCfg, req.NewHandle, req.NewKeyCreationGrant, digest, appID)
 		if err != nil {
 			return fmt.Errorf("launcher: rotate add: provision new key: %w", err)
 		}
@@ -1426,7 +1428,7 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 		return nil
 
 	case RotatePhaseRetire:
-		oldDEK, _, err := vaultkey.ResolveOrProvision(ctx, l.log, oldCfg, req.OldHandle, "", digest, appID)
+		oldDEK, _, _, err := vaultkey.ResolveOrProvision(ctx, l.log, oldCfg, req.OldHandle, "", digest, appID)
 		if err != nil {
 			return fmt.Errorf("launcher: rotate retire: reconstruct old key: %w", err)
 		}
