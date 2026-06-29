@@ -229,26 +229,26 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 }
 
 // SetSessionRelayIdentityKeySeed installs the vault-resolved session-relay
-// identity key (enc_pub) from its 32-byte seed (the private scalar the
-// launcher reconstructed from the non-promotable, measurement-pinned vault
-// key — enc-pub-plan.md, Sc 2). Implements launcher.AppHostRouter so the
-// container Load path, which already does the vault round-trip for the
-// volume DEK, can hand the platform identity key to the session-relay
-// Manager.
+// identity key (enc_pub) for an app's Host from its 32-byte seed (the
+// private scalar the launcher reconstructed from THAT app's non-promotable,
+// measurement-pinned vault key — enc-pub-plan.md, Sc 2). Implements
+// launcher.AppHostRouter so the container Load path, which already does the
+// vault round-trip for the volume DEK, can hand each app's identity key to
+// the session-relay Manager. Each app gets its own enc_pub (keyed by Host).
 //
-// Idempotent and fail-safe: the first successful install wins (enc_pub is
-// platform-scoped, shared across the manager's apps); a bad seed is
-// rejected and the manager keeps its ephemeral key, so the worst case is
-// today's behaviour (a restart forces a re-auth), never a failure.
-func (s *Server) SetSessionRelayIdentityKeySeed(seed []byte) error {
+// Fail-safe: a bad seed is rejected and the manager keeps the host's
+// ephemeral key, so the worst case is today's behaviour (a restart forces a
+// re-auth for that app), never a failure.
+func (s *Server) SetSessionRelayIdentityKeySeed(host string, seed []byte) error {
 	k, err := sessionrelay.EncStaticKeyFromSeed(seed)
 	if err != nil {
 		return fmt.Errorf("session-relay identity seed: %w", err)
 	}
-	if err := s.sessionRelay.SetEncStaticKey(k); err != nil {
+	if err := s.sessionRelay.SetEncStaticKeyForHost(host, k); err != nil {
 		return err
 	}
-	s.log.Info("session-relay identity key installed from vault (stable enc_pub across same-measurement restarts)")
+	s.log.Info("session-relay identity key installed from vault",
+		zap.String("host", host))
 	return nil
 }
 

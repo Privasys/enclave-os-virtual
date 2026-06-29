@@ -72,11 +72,15 @@ type Manager struct {
 	ttl      time.Duration
 	now      func() time.Time
 
-	// Long-lived enclave identity key. Used for ECDH on every
-	// bootstrap. Stable across SDK sessions for the lifetime of the
-	// enclave process so wallet-issued EncAuth vouchers can pin enc_pub.
-	encStaticPriv *ecdh.PrivateKey
-	encStaticPub  []byte // SEC1 uncompressed (65 B)
+	// Per-app session-relay identity keys (enc_pub), keyed by hostKey(Host).
+	// Each app fronted by the manager gets its OWN enc_pub — vault-backed
+	// (installed via SetEncStaticKeyForHost from the app's non-promotable,
+	// measurement-pinned vault key) or, for a host with no vault key yet,
+	// a lazily generated ephemeral key. Per-app (not one shared key) so
+	// enc_pub is deterministic and stable per app across restarts and is
+	// unaffected by other apps churning on the same enclave
+	// (enc-pub-plan.md, Sc 2).
+	encKeys map[string]*ecdh.PrivateKey
 
 	// Optional EncAuth verifier. When non-nil, handleInit accepts an
 	// `encauth` field in the request body and uses it to short-circuit
@@ -141,39 +145,42 @@ func NewManager() *Manager {
 		sessions:               make(map[string]*Session),
 		rebinds:                make(map[string]*rebindWindow),
 		expectedWorkloadDigest: make(map[string][32]byte),
+		encKeys:                make(map[string]*ecdh.PrivateKey),
 		ttl:                    defaultTTL,
 		now:                    time.Now,
 	}
 }
 
-// EnsureEncStaticKey generates the long-lived enclave identity key if
-// it hasn't been created yet. Safe to call multiple times.
-func (m *Manager) EnsureEncStaticKey() error {
+// encKeyForHost returns the session-relay identity key for a Host,
+// lazily generating an ephemeral one if no vault-backed key has been
+// installed for it yet (SetEncStaticKeyForHost replaces it later). Each
+// app's Host gets its own key.
+func (m *Manager) encKeyForHost(host string) (*ecdh.PrivateKey, []byte, error) {
+	h := hostKey(host)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.ensureEncStaticKeyLocked()
-}
-
-func (m *Manager) ensureEncStaticKeyLocked() error {
-	if m.encStaticPriv != nil {
-		return nil
+	if k := m.encKeys[h]; k != nil {
+		return k, k.PublicKey().Bytes(), nil
 	}
 	k, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
-		return fmt.Errorf("ecdh keygen: %w", err)
+		return nil, nil, fmt.Errorf("ecdh keygen: %w", err)
 	}
-	m.encStaticPriv = k
-	m.encStaticPub = k.PublicKey().Bytes()
-	return nil
+	m.encKeys[h] = k
+	return k, k.PublicKey().Bytes(), nil
 }
 
-// EncStaticPub returns the SEC1 uncompressed bytes of the enclave's
-// long-lived identity key. The wallet binds these into EncAuth
-// vouchers so silent rebinds across sessions can pin the same key.
-func (m *Manager) EncStaticPub() []byte {
+// EncStaticPubForHost returns the SEC1 uncompressed bytes of a Host's
+// session-relay identity key, or nil if none has been generated/installed
+// yet. The wallet binds these into EncAuth vouchers so silent rebinds for
+// that app can pin the same key.
+func (m *Manager) EncStaticPubForHost(host string) []byte {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return append([]byte(nil), m.encStaticPub...)
+	if k := m.encKeys[hostKey(host)]; k != nil {
+		return append([]byte(nil), k.PublicKey().Bytes()...)
+	}
+	return nil
 }
 
 // SetEncAuthVerifier installs an EncAuth verifier. Pass nil to
@@ -220,21 +227,19 @@ func (m *Manager) ClearExpectedWorkloadDigest(host string) {
 	delete(m.expectedWorkloadDigest, hostKey(host))
 }
 
-// SetEncStaticKey installs an externally-resolved identity key (Sc 2,
-// enc-pub-plan.md): the boot path hands the manager the P-256 key it
-// reconstructed from the non-promotable, measurement-pinned vault key, so
-// enc_pub is stable across same-measurement restarts and rotates only
-// when the platform measurement changes (a different measurement cannot
-// reconstruct it). Call once at startup before serving. Replaces any
-// lazily-generated key.
-func (m *Manager) SetEncStaticKey(k *ecdh.PrivateKey) error {
+// SetEncStaticKeyForHost installs an externally-resolved identity key for
+// an app's Host (Sc 2, enc-pub-plan.md): the Load path hands the manager
+// the P-256 key it reconstructed from THAT app's non-promotable,
+// measurement-pinned vault key, so the app's enc_pub is stable across
+// same-measurement restarts and rotates only when the platform measurement
+// changes. Replaces any lazily-generated ephemeral key for the Host.
+func (m *Manager) SetEncStaticKeyForHost(host string, k *ecdh.PrivateKey) error {
 	if k == nil {
 		return errors.New("sessionrelay: nil identity key")
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.encStaticPriv = k
-	m.encStaticPub = k.PublicKey().Bytes()
+	m.encKeys[hostKey(host)] = k
 	return nil
 }
 
@@ -348,13 +353,15 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := m.EnsureEncStaticKey(); err != nil {
+	// Per-app identity key: the bootstrap arrives at the app's Host, so the
+	// enc_pub it derives K against (and that the voucher pins) is THIS app's
+	// key — vault-backed once the app's Load installed it, else ephemeral.
+	encPriv, encPubBytes, err := m.encKeyForHost(r.Host)
+	if err != nil {
 		http.Error(w, "ecdh keygen: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	m.mu.RLock()
-	encPriv := m.encStaticPriv
-	encPubBytes := m.encStaticPub
 	verifier := m.encAuthVerifier
 	hasQuoteDigest := m.hasExpectedQuoteDigest
 	quoteDigest := m.expectedQuoteDigest

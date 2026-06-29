@@ -168,13 +168,18 @@ func TestEncStaticKeyFromSeed_Deterministic(t *testing.T) {
 	}
 
 	m := NewManager()
-	if err := m.SetEncStaticKey(k1); err != nil {
+	const host = "app-a.apps-test.privasys.org"
+	if err := m.SetEncStaticKeyForHost(host, k1); err != nil {
 		t.Fatalf("install key: %v", err)
 	}
-	if !bytesEq(m.EncStaticPub(), k1.PublicKey().Bytes()) {
-		t.Fatal("installed key must drive enc_pub")
+	if !bytesEq(m.EncStaticPubForHost(host), k1.PublicKey().Bytes()) {
+		t.Fatal("installed key must drive that host's enc_pub")
 	}
-	if err := m.SetEncStaticKey(nil); err == nil {
+	// A different host is unaffected by host A's install (no key → nil).
+	if bytesEq(m.EncStaticPubForHost("app-b.apps-test.privasys.org"), k1.PublicKey().Bytes()) {
+		t.Fatal("enc_pub must be per-host")
+	}
+	if err := m.SetEncStaticKeyForHost(host, nil); err == nil {
 		t.Fatal("nil key must be rejected")
 	}
 	if _, err := EncStaticKeyFromSeed([]byte{1, 2, 3}); err == nil {

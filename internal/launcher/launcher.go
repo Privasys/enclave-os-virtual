@@ -373,13 +373,13 @@ type Launcher struct {
 	// traffic through the session-relay middleware.
 	appHostRouter AppHostRouter
 
-	// srKeyMu guards srKeyResolved, the once-guard for resolving the
-	// platform session-relay identity key (enc_pub) on the first container
-	// Load that carries a SessionRelayKeyHandle. It is set only on a
-	// successful install, so a transient vault failure retries on the next
-	// Load (enc-pub-plan.md, Sc 2).
+	// srKeyMu guards srKeyResolved, the set of Hosts whose session-relay
+	// identity key (enc_pub) has been resolved + installed from the vault.
+	// Keyed by Host so each app is resolved independently; an entry is added
+	// only on a successful install, so a transient vault failure retries on
+	// the next Load (enc-pub-plan.md, Sc 2).
 	srKeyMu       sync.Mutex
-	srKeyResolved bool
+	srKeyResolved map[string]bool
 
 	// dekOrigin is the data-encryption key origin string
 	// ("byok:<fingerprint>").  Empty when the data partition is not
@@ -696,11 +696,12 @@ type AppHostRouter interface {
 	RegisterAppHost(hostname, upstream string)
 	UnregisterAppHost(hostname string)
 	// SetSessionRelayIdentityKeySeed installs the vault-resolved
-	// session-relay identity key (enc_pub) from its 32-byte seed, so it is
-	// stable across same-measurement restarts (enc-pub-plan.md, Sc 2). The
-	// launcher resolves the key on the first container Load that carries a
-	// session-relay handle and hands the seed to the manager.
-	SetSessionRelayIdentityKeySeed(seed []byte) error
+	// session-relay identity key (enc_pub) for an app's Host from its
+	// 32-byte seed, so that app's enc_pub is stable across same-measurement
+	// restarts (enc-pub-plan.md, Sc 2). The launcher resolves it on the
+	// container Load that carries a session-relay handle and hands the
+	// (host, seed) to the manager. Each app has its own enc_pub.
+	SetSessionRelayIdentityKeySeed(host string, seed []byte) error
 }
 
 // SetAppHostRouter wires the manager API server's host router. When set,
@@ -712,23 +713,27 @@ func (l *Launcher) SetAppHostRouter(r AppHostRouter) {
 	l.appHostRouter = r
 }
 
-// resolveSessionRelayKey reconstructs (or, on first boot, provisions) the
-// platform session-relay identity key (enc_pub) from the constellation and
-// installs it on the manager, so enc_pub is stable across same-measurement
-// restarts and rotates only on a platform upgrade (enc-pub-plan.md, Sc 2).
+// resolveSessionRelayKey reconstructs (or, on first boot, provisions) THIS
+// app's session-relay identity key (enc_pub) from the constellation and
+// installs it on the manager under the app's Host, so the app's enc_pub is
+// stable across same-measurement restarts and rotates only on a platform
+// upgrade (enc-pub-plan.md, Sc 2).
 //
 // It reuses req's vault addressing + this app's attested identity (image
 // digest + app-id): the key's policy pins the platform measurement and the
 // app-id but OMITS the image digest, so it survives app-code upgrades.
-// Runs at most once per process (first Load with a handle wins — enc_pub is
-// platform-scoped); best-effort, so any failure keeps the ephemeral key and
-// the worst case is today's behaviour (a restart forces a re-auth).
-func (l *Launcher) resolveSessionRelayKey(ctx context.Context, req LoadRequest, imageDigest []byte) {
-	if req.SessionRelayKeyHandle == "" || l.appHostRouter == nil {
+// Resolved once per Host (each app independently); best-effort, so any
+// failure keeps the host's ephemeral key and the worst case is today's
+// behaviour (a restart forces a re-auth for that app).
+func (l *Launcher) resolveSessionRelayKey(ctx context.Context, req LoadRequest, host string, imageDigest []byte) {
+	if req.SessionRelayKeyHandle == "" || l.appHostRouter == nil || host == "" {
 		return
 	}
 	l.srKeyMu.Lock()
-	done := l.srKeyResolved
+	if l.srKeyResolved == nil {
+		l.srKeyResolved = make(map[string]bool)
+	}
+	done := l.srKeyResolved[host]
 	l.srKeyMu.Unlock()
 	if done {
 		return
@@ -744,7 +749,7 @@ func (l *Launcher) resolveSessionRelayKey(ctx context.Context, req LoadRequest, 
 	}, req.SessionRelayKeyHandle, req.SessionRelayKeyGrant, imageDigest, parseAppID(req.AppId))
 	if err != nil {
 		l.log.Warn("session-relay identity key: vault resolve failed; keeping ephemeral key (restarts force re-auth)",
-			zap.String("handle", req.SessionRelayKeyHandle), zap.Error(err))
+			zap.String("host", host), zap.String("handle", req.SessionRelayKeyHandle), zap.Error(err))
 		return
 	}
 	seed, err := hex.DecodeString(seedHex)
@@ -752,12 +757,12 @@ func (l *Launcher) resolveSessionRelayKey(ctx context.Context, req LoadRequest, 
 		l.log.Warn("session-relay identity key: bad seed encoding; keeping ephemeral key", zap.Error(err))
 		return
 	}
-	if err := l.appHostRouter.SetSessionRelayIdentityKeySeed(seed); err != nil {
+	if err := l.appHostRouter.SetSessionRelayIdentityKeySeed(host, seed); err != nil {
 		l.log.Warn("session-relay identity key: install failed; keeping ephemeral key", zap.Error(err))
 		return
 	}
 	l.srKeyMu.Lock()
-	l.srKeyResolved = true
+	l.srKeyResolved[host] = true
 	l.srKeyMu.Unlock()
 }
 
@@ -1161,10 +1166,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				}
 				caddyUpstream = "localhost:" + mgmtPort
 				l.appHostRouter.RegisterAppHost(spec.Hostname, containerUpstream)
-				// Resolve the platform session-relay identity key (enc_pub) once,
-				// reusing this app's vault addressing + attested identity. Best-
-				// effort: a failure keeps the ephemeral key (enc-pub-plan.md, Sc 2).
-				l.resolveSessionRelayKey(ctx, req, digest)
+				// Resolve THIS app's session-relay identity key (enc_pub) and
+				// install it under its Host, reusing the app's vault addressing +
+				// attested identity. Best-effort: a failure keeps the host's
+				// ephemeral key (enc-pub-plan.md, Sc 2).
+				l.resolveSessionRelayKey(ctx, req, spec.Hostname, digest)
 			}
 			if err := l.caddyClient.AddRoute(spec.Hostname, caddyUpstream); err != nil {
 				l.log.Warn("failed to add Caddy route",
