@@ -184,7 +184,7 @@ func TestEncAuthFixtureKAT(t *testing.T) {
 		func(_ context.Context, _ string) (*ecdsa.PublicKey, error) { return idpPub, nil },
 	)}
 
-	got, err := v.Verify(env, encPubRaw, [32]byte{}, false, time.Unix(katEncAuthNow, 0))
+	got, err := v.Verify(env, VerifyContext{EncStaticPub: encPubRaw, Now: time.Unix(katEncAuthNow, 0)})
 	if err != nil {
 		t.Fatalf("pinned fixture rejected: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestEncAuthFixtureKAT(t *testing.T) {
 	bad[len(bad)-1] ^= 0x01
 	env2 := *env
 	env2.Payload = base64.RawURLEncoding.EncodeToString(bad)
-	if _, err := v.Verify(&env2, encPubRaw, [32]byte{}, false, time.Unix(katEncAuthNow, 0)); err == nil {
+	if _, err := v.Verify(&env2, VerifyContext{EncStaticPub: encPubRaw, Now: time.Unix(katEncAuthNow, 0)}); err == nil {
 		t.Fatal("tampered payload accepted")
 	}
 }
@@ -215,7 +215,7 @@ func generateEncAuthFixture(t *testing.T) {
 
 	payload := EncAuthPayload{
 		V: 1, Sub: "kat-user", SID: "kat-sid",
-		AppID: bytes32(0xa1), EncMeas: bytes32(0xe1),
+		WorkloadDigest: bytes32(0xa1), EncMeas: bytes32(0xe1),
 		EncPub: encPubRaw, QuoteHash: bytes32(0xb2),
 		NotBefore: 1_700_000_000,
 		NotAfter:  4_000_000_000, // far future so the pinned fixture stays valid

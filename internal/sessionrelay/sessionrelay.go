@@ -53,8 +53,8 @@ const (
 	// authenticated sealed request extends the session by this much.
 	// Aligned with the IdP's 15-minute access-token cadence; idle
 	// sessions are GC'd and silently re-bootstrapped via EncAuth.
-	defaultTTL              = 15 * time.Minute
-	initPath                = "/__privasys/session-bootstrap"
+	defaultTTL = 15 * time.Minute
+	initPath   = "/__privasys/session-bootstrap"
 
 	// EncAuth rebind rate limit: at most rebindRateLimit voucher-backed
 	// bootstrap attempts (accepted or rejected) per sid per window. A
@@ -95,6 +95,16 @@ type Manager struct {
 	expectedQuoteDigest    [32]byte
 	hasExpectedQuoteDigest bool
 
+	// Per-app expected workload digest (Sc 1, enc-pub-plan.md), keyed by
+	// the container Host the bootstrap is routed to. When an entry exists
+	// for the request Host, the EncAuth voucher's field 4 (the workload
+	// digest — named `app_id` in the wire format but NOT the static OID
+	// 3.6 app-id; see EncAuthPayload.WorkloadDigest) must match it, so an
+	// app code/config change (OID 3.2 moves) wakes the user. Hosts with no
+	// entry are not workload-checked (back-compat: instance pinning still
+	// rests on enc_pub equality).
+	expectedWorkloadDigest map[string][32]byte
+
 	// Fixed-window EncAuth rebind counters keyed by voucher sid.
 	rebinds map[string]*rebindWindow
 
@@ -113,13 +123,13 @@ type rebindWindow struct {
 
 // Session holds derived keys and counters for a single SDK ↔ enclave pairing.
 type Session struct {
-	ID          string
-	Aead        cipher.AEAD
-	C2SPrefix   [4]byte
-	S2CPrefix   [4]byte
-	S2CCtr      uint64
-	C2SNext     uint64 // smallest acceptable c2s ctr; rejects replay incl. the last frame
-	ExpiresAt   time.Time
+	ID        string
+	Aead      cipher.AEAD
+	C2SPrefix [4]byte
+	S2CPrefix [4]byte
+	S2CCtr    uint64
+	C2SNext   uint64 // smallest acceptable c2s ctr; rejects replay incl. the last frame
+	ExpiresAt time.Time
 }
 
 // NewManager creates a session manager. The enclave identity key is
@@ -128,10 +138,11 @@ type Session struct {
 // the bootstrap path keep working without ECDH setup.
 func NewManager() *Manager {
 	return &Manager{
-		sessions: make(map[string]*Session),
-		rebinds:  make(map[string]*rebindWindow),
-		ttl:      defaultTTL,
-		now:      time.Now,
+		sessions:               make(map[string]*Session),
+		rebinds:                make(map[string]*rebindWindow),
+		expectedWorkloadDigest: make(map[string][32]byte),
+		ttl:                    defaultTTL,
+		now:                    time.Now,
 	}
 }
 
@@ -184,6 +195,73 @@ func (m *Manager) SetExpectedQuoteDigest(h [32]byte) {
 	defer m.mu.Unlock()
 	m.expectedQuoteDigest = h
 	m.hasExpectedQuoteDigest = true
+}
+
+// SetExpectedWorkloadDigest arms the per-app workload-measurement
+// binding (Sc 1, enc-pub-plan.md) for a container Host. The digest MUST
+// equal the wallet's field-4 value (auth/wallet .../encauth.ts::workloadDigestHash
+// — SHA-256 over the workload OID set: 3.1 config-merkle, 3.2 code hash,
+// 3.3 image-ref, 3.4 key-source), computed by the manager from the OID
+// values it stamps into the container leaf. This is NOT the static OID
+// 3.6 app-id. When set, an EncAuth voucher for this Host whose workload
+// digest differs is rejected, so an app code/config change wakes the
+// user. host is matched case-insensitively without a port (see hostKey).
+func (m *Manager) SetExpectedWorkloadDigest(host string, digest [32]byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.expectedWorkloadDigest[hostKey(host)] = digest
+}
+
+// ClearExpectedWorkloadDigest disarms the per-app binding for a Host
+// (e.g. when a container is unloaded).
+func (m *Manager) ClearExpectedWorkloadDigest(host string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.expectedWorkloadDigest, hostKey(host))
+}
+
+// SetEncStaticKey installs an externally-resolved identity key (Sc 2,
+// enc-pub-plan.md): the boot path hands the manager the P-256 key it
+// reconstructed from the non-promotable, measurement-pinned vault key, so
+// enc_pub is stable across same-measurement restarts and rotates only
+// when the platform measurement changes (a different measurement cannot
+// reconstruct it). Call once at startup before serving. Replaces any
+// lazily-generated key.
+func (m *Manager) SetEncStaticKey(k *ecdh.PrivateKey) error {
+	if k == nil {
+		return errors.New("sessionrelay: nil identity key")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.encStaticPriv = k
+	m.encStaticPub = k.PublicKey().Bytes()
+	return nil
+}
+
+// EncStaticKeyFromSeed deterministically rebuilds the P-256 identity key
+// from 32 bytes of vault material (the private scalar stored at first
+// boot), so the same vault secret yields the same enc_pub across
+// restarts. seed must be a valid P-256 scalar (NewPrivateKey rejects
+// out-of-range values).
+func EncStaticKeyFromSeed(seed []byte) (*ecdh.PrivateKey, error) {
+	if len(seed) != 32 {
+		return nil, fmt.Errorf("sessionrelay: identity seed must be 32 bytes, got %d", len(seed))
+	}
+	return ecdh.P256().NewPrivateKey(seed)
+}
+
+// hostKey normalises a request Host for app_id lookup: lower-cased and
+// without any :port suffix.
+func hostKey(host string) string {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if i := strings.LastIndexByte(h, ':'); i >= 0 {
+		// Only strip when the tail is a port (no ']' after, i.e. not an
+		// unbracketed IPv6 — Host headers bracket IPv6 literals).
+		if !strings.Contains(h[i:], "]") {
+			h = h[:i]
+		}
+	}
+	return h
 }
 
 // SetTTL overrides the default session lifetime.
@@ -280,6 +358,7 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 	verifier := m.encAuthVerifier
 	hasQuoteDigest := m.hasExpectedQuoteDigest
 	quoteDigest := m.expectedQuoteDigest
+	expectedWorkloadDigest, hasExpectedWorkloadDigest := m.expectedWorkloadDigest[hostKey(r.Host)]
 	m.mu.RUnlock()
 
 	shared, err := encPriv.ECDH(sdkPub)
@@ -306,7 +385,14 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "encauth rate-limited", http.StatusTooManyRequests)
 			return
 		}
-		payload, vErr := verifier.Verify(req.EncAuth, encPubBytes, quoteDigest, hasQuoteDigest, m.now())
+		payload, vErr := verifier.Verify(req.EncAuth, VerifyContext{
+			EncStaticPub:              encPubBytes,
+			QuoteDigest:               quoteDigest,
+			HasQuoteDigest:            hasQuoteDigest,
+			ExpectedWorkloadDigest:    expectedWorkloadDigest,
+			HasExpectedWorkloadDigest: hasExpectedWorkloadDigest,
+			Now:                       m.now(),
+		})
 		if vErr != nil {
 			// Fall through to legacy bootstrap path so the SDK can
 			// retry with a fresh FIDO2 ceremony. Surface the reason

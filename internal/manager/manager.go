@@ -228,6 +228,30 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 	return s
 }
 
+// SetSessionRelayIdentityKeySeed installs the vault-resolved session-relay
+// identity key (enc_pub) from its 32-byte seed (the private scalar the
+// launcher reconstructed from the non-promotable, measurement-pinned vault
+// key — enc-pub-plan.md, Sc 2). Implements launcher.AppHostRouter so the
+// container Load path, which already does the vault round-trip for the
+// volume DEK, can hand the platform identity key to the session-relay
+// Manager.
+//
+// Idempotent and fail-safe: the first successful install wins (enc_pub is
+// platform-scoped, shared across the manager's apps); a bad seed is
+// rejected and the manager keeps its ephemeral key, so the worst case is
+// today's behaviour (a restart forces a re-auth), never a failure.
+func (s *Server) SetSessionRelayIdentityKeySeed(seed []byte) error {
+	k, err := sessionrelay.EncStaticKeyFromSeed(seed)
+	if err != nil {
+		return fmt.Errorf("session-relay identity seed: %w", err)
+	}
+	if err := s.sessionRelay.SetEncStaticKey(k); err != nil {
+		return err
+	}
+	s.log.Info("session-relay identity key installed from vault (stable enc_pub across same-measurement restarts)")
+	return nil
+}
+
 // RegisterAppHost wires a container hostname to its loopback upstream
 // (e.g. "localhost:8080"). Subsequent requests reaching the manager with
 // Host == hostname are reverse-proxied there, after passing through the

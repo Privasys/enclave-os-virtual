@@ -37,16 +37,62 @@ type EncAuthEnvelope struct {
 // canonical CBOR encoding emitted by the wallet and the IdP (integer
 // keys 1..10 in ascending order).
 type EncAuthPayload struct {
-	V         uint64 `cbor:"1,keyasint"`
-	Sub       string `cbor:"2,keyasint"`
-	SID       string `cbor:"3,keyasint"`
-	AppID     []byte `cbor:"4,keyasint"`
-	EncMeas   []byte `cbor:"5,keyasint"`
-	EncPub    []byte `cbor:"6,keyasint"`
-	QuoteHash []byte `cbor:"7,keyasint"`
-	NotBefore uint64 `cbor:"8,keyasint"`
-	NotAfter  uint64 `cbor:"9,keyasint"`
-	HwPub     []byte `cbor:"10,keyasint"`
+	V   uint64 `cbor:"1,keyasint"`
+	Sub string `cbor:"2,keyasint"`
+	SID string `cbor:"3,keyasint"`
+	// WorkloadDigest is CBOR key 4, named `app_id` in the wire format
+	// (crypto-contract §8.1) and `workloadDigestHash` in the wallet. It is NOT the
+	// static OID 3.6 app-id; it is SHA-256 over the workload measurement
+	// OIDs (3.1/3.2/3.3/3.4), so it moves with the OID 3.2 code hash.
+	WorkloadDigest []byte `cbor:"4,keyasint"`
+	EncMeas        []byte `cbor:"5,keyasint"`
+	EncPub         []byte `cbor:"6,keyasint"`
+	QuoteHash      []byte `cbor:"7,keyasint"`
+	NotBefore      uint64 `cbor:"8,keyasint"`
+	NotAfter       uint64 `cbor:"9,keyasint"`
+	HwPub          []byte `cbor:"10,keyasint"`
+}
+
+// VerifyContext carries the per-bootstrap inputs the verifier checks a
+// voucher against. It groups what used to be positional args so the
+// app_id binding (Sc 1) could be added without an ever-growing
+// signature.
+type VerifyContext struct {
+	// EncStaticPub is the SEC1 uncompressed bytes of the enclave's
+	// identity key; payload.EncPub must equal it byte for byte. This is
+	// the instance pin and (with a stable, vault-backed key) the
+	// platform-measurement rotation signal — see enc-pub-plan.md.
+	EncStaticPub []byte
+
+	// QuoteDigest + HasQuoteDigest control the optional quote_hash
+	// binding: when armed, the voucher's quote_hash must byte-equal the
+	// wallet attestation digest (crypto-contract §4.1 — SHA-256 over the
+	// canonical attestation field list, NOT a hash of the RA-TLS leaf).
+	QuoteDigest    [32]byte
+	HasQuoteDigest bool
+
+	// ExpectedWorkloadDigest + HasExpectedWorkloadDigest arm the per-app
+	// workload-measurement binding (Sc 1). When armed, the voucher's
+	// field 4 must byte-equal the expected workload digest for the app
+	// this bootstrap is routed to.
+	//
+	// NOTE ON NAMING: the wire field is unfortunately named `app_id`
+	// (crypto-contract §8.1; wallet `workloadDigestHash`), but it is NOT the
+	// static OID 3.6 app-id (`apps.id`, which never changes on an
+	// upgrade). It is SHA-256 over the *workload measurement* OIDs —
+	// 3.1 config-merkle, 3.2 code hash, 3.3 image-ref, 3.4 key-source —
+	// so it moves when the code (OID 3.2) or config changes. That move
+	// is exactly the wake we want: a mismatch means the app code/config
+	// changed since the voucher was issued, so the manager rejects the
+	// voucher, the SDK falls back to a fresh ceremony, and the user
+	// re-approves. The check is performed by the trusted, attested
+	// manager — never by the app container — so the gated app cannot
+	// subvert it.
+	ExpectedWorkloadDigest    [32]byte
+	HasExpectedWorkloadDigest bool
+
+	// Now is the reference time for the not_before/not_after window.
+	Now time.Time
 }
 
 // EncAuthVerifier validates a voucher and decides whether to accept
@@ -54,14 +100,8 @@ type EncAuthPayload struct {
 // caching the IdP JWKS.
 type EncAuthVerifier interface {
 	// Verify returns the decoded payload if the envelope is valid for
-	// this enclave. encStaticPub is the SEC1 uncompressed bytes of
-	// the enclave's identity key; payload.EncPub must equal it byte
-	// for byte. quoteDigest + hasQuoteDigest control the optional
-	// quote_hash binding: when armed, the voucher's quote_hash must
-	// byte-equal the wallet attestation digest (crypto-contract §4.1
-	// — SHA-256 over the canonical attestation field list, NOT a hash
-	// of the RA-TLS leaf certificate).
-	Verify(env *EncAuthEnvelope, encStaticPub []byte, quoteDigest [32]byte, hasQuoteDigest bool, now time.Time) (*EncAuthPayload, error)
+	// this enclave under vc.
+	Verify(env *EncAuthEnvelope, vc VerifyContext) (*EncAuthPayload, error)
 }
 
 // JWKSResolver fetches the IdP's signing key by kid. Implementations
@@ -89,7 +129,7 @@ type DefaultEncAuthVerifier struct {
 }
 
 // Verify implements EncAuthVerifier.
-func (v *DefaultEncAuthVerifier) Verify(env *EncAuthEnvelope, encStaticPub []byte, quoteDigest [32]byte, hasQuoteDigest bool, now time.Time) (*EncAuthPayload, error) {
+func (v *DefaultEncAuthVerifier) Verify(env *EncAuthEnvelope, vc VerifyContext) (*EncAuthPayload, error) {
 	if env == nil {
 		return nil, errors.New("encauth: nil envelope")
 	}
@@ -146,17 +186,26 @@ func (v *DefaultEncAuthVerifier) Verify(env *EncAuthEnvelope, encStaticPub []byt
 	}
 
 	// enc_pub must match this enclave's identity key byte-for-byte.
-	if !bytes.Equal(payload.EncPub, encStaticPub) {
+	if !bytes.Equal(payload.EncPub, vc.EncStaticPub) {
 		return nil, errors.New("encauth: enc_pub does not match this enclave")
 	}
 
+	// Optional per-app workload-measurement binding (Sc 1,
+	// enc-pub-plan.md). When armed, the voucher's field 4 (the workload
+	// digest — see VerifyContext, NOT the static OID 3.6 app-id) must
+	// match the app this bootstrap is routed to; a mismatch means the app
+	// code/config changed (OID 3.2 moved) and the user must re-approve.
+	if vc.HasExpectedWorkloadDigest && !bytes.Equal(payload.WorkloadDigest, vc.ExpectedWorkloadDigest[:]) {
+		return nil, errors.New("encauth: workload digest does not match this app (code/config changed)")
+	}
+
 	// Optional attestation-digest binding (crypto-contract §4.1).
-	if hasQuoteDigest && !bytes.Equal(payload.QuoteHash, quoteDigest[:]) {
+	if vc.HasQuoteDigest && !bytes.Equal(payload.QuoteHash, vc.QuoteDigest[:]) {
 		return nil, errors.New("encauth: quote_hash does not match expected attestation digest")
 	}
 
 	// Time window.
-	nowSec := uint64(now.Unix())
+	nowSec := uint64(vc.Now.Unix())
 	if nowSec+30 < payload.NotBefore { // 30s skew
 		return nil, errors.New("encauth: not yet valid")
 	}

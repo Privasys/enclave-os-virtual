@@ -211,6 +211,26 @@ type LoadRequest struct {
 	// measured (deployment plumbing, like the other vault addressing).
 	RegistrySecretHandle string `json:"registry_secret_handle,omitempty"`
 
+	// SessionRelayKeyHandle names the vault key holding the platform
+	// session-relay identity key (enc_pub), e.g.
+	// "apps.privasys.org/<app-id>/session-encpub/<meas>". When set, the
+	// manager reconstructs it from (or, on first boot, generates + creates
+	// on) the constellation under a NON-PROMOTABLE, platform-measurement-
+	// pinned policy and installs it as the session-relay identity key, so
+	// enc_pub is stable across same-measurement restarts and rotates only
+	// on a platform upgrade (enc-pub-plan.md, Sc 2). Resolved against the
+	// same Vault* addressing above, presenting this app's id (OID 3.6) and
+	// image digest; the policy omits the image digest, so it survives app
+	// upgrades. Empty keeps the legacy ephemeral key (restart forces
+	// re-auth). Fail-safe: a resolve error keeps the ephemeral key.
+	SessionRelayKeyHandle string `json:"session_relay_key_handle,omitempty"`
+
+	// SessionRelayKeyGrant is the platform-minted grant (JWT) for creating
+	// SessionRelayKeyHandle on first boot (non-promotable policy; scoped to
+	// apps.privasys.org/<app-id>). Only needed on first boot; ignored once
+	// the key exists.
+	SessionRelayKeyGrant string `json:"session_relay_key_grant,omitempty"`
+
 	// AppId is the platform-assigned app identity (apps.id, a UUID string). When
 	// set, the manager stamps it (raw 16 bytes) at OID 3.6 on the vault client
 	// identity, so an MR_APP-sealed key is bound to THIS app and a same-image peer
@@ -352,6 +372,14 @@ type Launcher struct {
 	// registrations so the manager API server can reverse-proxy app
 	// traffic through the session-relay middleware.
 	appHostRouter AppHostRouter
+
+	// srKeyMu guards srKeyResolved, the once-guard for resolving the
+	// platform session-relay identity key (enc_pub) on the first container
+	// Load that carries a SessionRelayKeyHandle. It is set only on a
+	// successful install, so a transient vault failure retries on the next
+	// Load (enc-pub-plan.md, Sc 2).
+	srKeyMu       sync.Mutex
+	srKeyResolved bool
 
 	// dekOrigin is the data-encryption key origin string
 	// ("byok:<fingerprint>").  Empty when the data partition is not
@@ -667,6 +695,12 @@ type TokenSource interface {
 type AppHostRouter interface {
 	RegisterAppHost(hostname, upstream string)
 	UnregisterAppHost(hostname string)
+	// SetSessionRelayIdentityKeySeed installs the vault-resolved
+	// session-relay identity key (enc_pub) from its 32-byte seed, so it is
+	// stable across same-measurement restarts (enc-pub-plan.md, Sc 2). The
+	// launcher resolves the key on the first container Load that carries a
+	// session-relay handle and hands the seed to the manager.
+	SetSessionRelayIdentityKeySeed(seed []byte) error
 }
 
 // SetAppHostRouter wires the manager API server's host router. When set,
@@ -676,6 +710,55 @@ func (l *Launcher) SetAppHostRouter(r AppHostRouter) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.appHostRouter = r
+}
+
+// resolveSessionRelayKey reconstructs (or, on first boot, provisions) the
+// platform session-relay identity key (enc_pub) from the constellation and
+// installs it on the manager, so enc_pub is stable across same-measurement
+// restarts and rotates only on a platform upgrade (enc-pub-plan.md, Sc 2).
+//
+// It reuses req's vault addressing + this app's attested identity (image
+// digest + app-id): the key's policy pins the platform measurement and the
+// app-id but OMITS the image digest, so it survives app-code upgrades.
+// Runs at most once per process (first Load with a handle wins — enc_pub is
+// platform-scoped); best-effort, so any failure keeps the ephemeral key and
+// the worst case is today's behaviour (a restart forces a re-auth).
+func (l *Launcher) resolveSessionRelayKey(ctx context.Context, req LoadRequest, imageDigest []byte) {
+	if req.SessionRelayKeyHandle == "" || l.appHostRouter == nil {
+		return
+	}
+	l.srKeyMu.Lock()
+	done := l.srKeyResolved
+	l.srKeyMu.Unlock()
+	if done {
+		return
+	}
+
+	seedHex, _, err := vaultkey.ResolveOrProvision(ctx, l.log, vaultkey.Config{
+		Endpoints:            req.VaultEndpoints,
+		MrenclaveHex:         req.VaultMrenclave,
+		AttestationServerURL: req.VaultAttestationServer,
+		MgmtURL:              l.cfg.ToolSpecMgmtURL,
+		EnclaveID:            l.cfg.ToolSpecEnclaveID,
+		EnclaveToken:         l.cfg.ToolSpecEnclaveToken,
+	}, req.SessionRelayKeyHandle, req.SessionRelayKeyGrant, imageDigest, parseAppID(req.AppId))
+	if err != nil {
+		l.log.Warn("session-relay identity key: vault resolve failed; keeping ephemeral key (restarts force re-auth)",
+			zap.String("handle", req.SessionRelayKeyHandle), zap.Error(err))
+		return
+	}
+	seed, err := hex.DecodeString(seedHex)
+	if err != nil {
+		l.log.Warn("session-relay identity key: bad seed encoding; keeping ephemeral key", zap.Error(err))
+		return
+	}
+	if err := l.appHostRouter.SetSessionRelayIdentityKeySeed(seed); err != nil {
+		l.log.Warn("session-relay identity key: install failed; keeping ephemeral key", zap.Error(err))
+		return
+	}
+	l.srKeyMu.Lock()
+	l.srKeyResolved = true
+	l.srKeyMu.Unlock()
 }
 
 // SetTokenSource sets a dynamic token source that takes precedence over
@@ -1076,6 +1159,10 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				}
 				caddyUpstream = "localhost:" + mgmtPort
 				l.appHostRouter.RegisterAppHost(spec.Hostname, containerUpstream)
+				// Resolve the platform session-relay identity key (enc_pub) once,
+				// reusing this app's vault addressing + attested identity. Best-
+				// effort: a failure keeps the ephemeral key (enc-pub-plan.md, Sc 2).
+				l.resolveSessionRelayKey(ctx, req, digest)
 			}
 			if err := l.caddyClient.AddRoute(spec.Hostname, caddyUpstream); err != nil {
 				l.log.Warn("failed to add Caddy route",
