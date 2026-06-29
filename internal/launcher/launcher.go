@@ -951,6 +951,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	}
 	runtimeEnv["PRIVASYS_CONTAINER_NAME"] = req.Name
 	runtimeEnv["PRIVASYS_CONTAINER_TOKEN"] = containerToken
+	// The platform-assigned app id (apps.id). Apps that authenticate to the vault
+	// as themselves use it to ask the platform to delegate key ops to their TEE.
+	if req.AppId != "" {
+		runtimeEnv["PRIVASYS_APP_ID"] = req.AppId
+	}
 
 	// PaaS port contract (12-factor): the management-service allocates a
 	// unique port per app and routes Caddy -> localhost:req.Port. With host
