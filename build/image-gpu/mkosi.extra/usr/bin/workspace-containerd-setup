@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Back /data/containerd with the local workspace NVMe SSD BEFORE containerd
+# starts. The encrypted /data PD is small (~2 GB); cloud-image layers are
+# several GB, so containerd's content store must live on the large local SSD.
+# Doing this in a unit ordered Before=containerd.service avoids the boot race
+# where the manager imported onto the small PD before the GCE startup-script's
+# late bind-mount ran, failing with "no space left on device".
+#
+# GPU image only. The SSD is wiped on Spot stop/start; format on first boot.
+# Idempotent.
+set -eu
+
+WORKSPACE_DEV=/dev/nvme1n1
+[ -b "$WORKSPACE_DEV" ] || { echo "workspace-containerd: no ${WORKSPACE_DEV}; skipping"; exit 0; }
+mountpoint -q /data || { echo "workspace-containerd: /data not mounted; skipping"; exit 0; }
+
+if ! blkid "$WORKSPACE_DEV" >/dev/null 2>&1; then
+  echo "workspace-containerd: formatting ${WORKSPACE_DEV}"
+  mkfs.ext4 -F -m 0 -L workspace "$WORKSPACE_DEV" >/dev/null 2>&1 || true
+fi
+
+mkdir -p /run/workspace
+mountpoint -q /run/workspace || mount "$WORKSPACE_DEV" /run/workspace
+
+mkdir -p /run/workspace/containerd /data/containerd
+mountpoint -q /data/containerd || mount --bind /run/workspace/containerd /data/containerd
+echo "workspace-containerd: /data/containerd backed by workspace SSD"

@@ -1,0 +1,20 @@
+[Unit]
+Description=Back /data/containerd with the local workspace SSD (image-gpu)
+DefaultDependencies=no
+# Must run before containerd so the manager imports cloud-image layers onto
+# the SSD-backed /data/containerd from first boot, not the small encrypted
+# /data PD. Ordered after /data and the disk/runtime init, like disk-mounter.
+After=local-fs.target data.mount cvm-runtime-init.service
+Before=containerd.service manager.service multi-user.target
+ConditionPathExists=/dev/nvme1n1
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /usr/bin/workspace-containerd-setup
+RemainAfterExit=yes
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
