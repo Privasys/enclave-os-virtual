@@ -1,8 +1,58 @@
 package launcher
 
 import (
+	"bytes"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/Privasys/enclave-os-virtual/internal/manifest"
+	"github.com/Privasys/enclave-os-virtual/internal/merkle"
+	"go.uber.org/zap"
 )
+
+// fakeAppHostRouter satisfies AppHostRouter for tests. The methods are no-ops:
+// the behaviour under test is the LOCKING, not the routing side effects.
+type fakeAppHostRouter struct{}
+
+func (fakeAppHostRouter) RegisterAppHost(string, string)                      {}
+func (fakeAppHostRouter) UnregisterAppHost(string)                            {}
+func (fakeAppHostRouter) SetSessionRelayIdentityKeySeed(string, []byte) error { return nil }
+func (fakeAppHostRouter) SetExpectedWorkloadDigest(string, [32]byte)          {}
+
+// TestArmSessionRelayWorkloadDigestNoSelfDeadlock pins the regression where
+// Load (holding l.mu for writing) called armSessionRelayWorkloadDigest, which
+// re-acquired l.mu.RLock(). sync.RWMutex is not reentrant, so the writer
+// blocked forever on its own read lock — wedging every subsequent Load/Unload
+// behind the held write lock and silently preventing any public-hostname app
+// from coming up on the host. armSessionRelayWorkloadDigest must read the
+// launcher maps WITHOUT re-locking, since its sole caller already holds the
+// write lock.
+func TestArmSessionRelayWorkloadDigestNoSelfDeadlock(t *testing.T) {
+	const name, host = "app1", "app1.apps.privasys.org"
+	l := &Launcher{
+		log:              zap.NewNop(),
+		appHostRouter:    fakeAppHostRouter{},
+		containerTrees:   map[string]*merkle.Tree{name: merkle.New(nil)},
+		specs:            map[string]manifest.Container{name: {Image: "ghcr.io/privasys/apps/app1@sha256:" + strings.Repeat("a", 64)}},
+		imageDigests:     map[string][]byte{name: bytes.Repeat([]byte{1}, 32)},
+		volumeEncryption: map[string]string{name: "ephemeral"},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		l.mu.Lock()
+		l.armSessionRelayWorkloadDigest(name, host) // must not re-lock l.mu
+		l.mu.Unlock()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("armSessionRelayWorkloadDigest self-deadlocked while its caller held l.mu (write)")
+	}
+}
 
 func TestLoadRequestRuntimeEnv(t *testing.T) {
 	req := LoadRequest{

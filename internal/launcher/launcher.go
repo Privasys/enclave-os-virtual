@@ -794,16 +794,21 @@ func (l *Launcher) resolveSessionRelayKey(ctx context.Context, req LoadRequest, 
 // parser byte-for-byte (auth/wallet .../oid-digest.ts, native parser uses
 // hex::encode for 3.1/3.2 and the raw UTF-8 string for 3.3/3.4), and the KAT
 // (sessionrelay/workload_digest_test.go ↔ wallet jest) pins the serialisation.
+//
+// LOCKING: the caller (Load) already holds l.mu for writing. This reads the
+// launcher maps directly and MUST NOT re-acquire l.mu — sync.RWMutex is not
+// reentrant, so a writer taking the read lock blocks forever, wedging every
+// subsequent Load/Unload behind the held write lock (it presents as the host
+// silently refusing to bring up any app with a public hostname).
 func (l *Launcher) armSessionRelayWorkloadDigest(containerName, host string) {
 	if l.appHostRouter == nil || host == "" {
 		return
 	}
-	l.mu.RLock()
+	// NB: l.mu is held for writing by the caller — do not RLock here.
 	tree, ok1 := l.containerTrees[containerName]
 	spec, ok2 := l.specs[containerName]
 	imageDigest := l.imageDigests[containerName]
 	volEnc := l.volumeEncryption[containerName]
-	l.mu.RUnlock()
 	if !ok1 || !ok2 {
 		return
 	}
