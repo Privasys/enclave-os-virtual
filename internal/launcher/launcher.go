@@ -46,6 +46,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/manifest"
 	"github.com/Privasys/enclave-os-virtual/internal/merkle"
 	"github.com/Privasys/enclave-os-virtual/internal/oids"
+	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
 	"github.com/Privasys/enclave-os-virtual/internal/tpm"
 	"github.com/Privasys/enclave-os-virtual/internal/vaultkey"
 	"github.com/Privasys/enclave-os-virtual/internal/volume"
@@ -702,6 +703,13 @@ type AppHostRouter interface {
 	// container Load that carries a session-relay handle and hands the
 	// (host, seed) to the manager. Each app has its own enc_pub.
 	SetSessionRelayIdentityKeySeed(host string, seed []byte) error
+
+	// SetExpectedWorkloadDigest arms the per-app workload-digest wake for a
+	// Host (enc-pub-plan.md, Sc 1): a silent-rebind voucher whose field-4
+	// digest doesn't match this app's measurement is rejected, so an app
+	// code/config change wakes the user. The launcher computes the digest
+	// from the container's stamped OID values on Load.
+	SetExpectedWorkloadDigest(host string, digest [32]byte)
 }
 
 // SetAppHostRouter wires the manager API server's host router. When set,
@@ -764,6 +772,44 @@ func (l *Launcher) resolveSessionRelayKey(ctx context.Context, req LoadRequest, 
 	l.srKeyMu.Lock()
 	l.srKeyResolved[host] = true
 	l.srKeyMu.Unlock()
+}
+
+// armSessionRelayWorkloadDigest computes this container's workload digest
+// (voucher field 4) from the SAME OID values stamped into its RA-TLS leaf and
+// arms the manager's per-app check, so an app code/config change wakes the
+// user (enc-pub-plan.md, Sc 1). The value encodings match the wallet's RA-TLS
+// parser byte-for-byte (auth/wallet .../oid-digest.ts, native parser uses
+// hex::encode for 3.1/3.2 and the raw UTF-8 string for 3.3/3.4), and the KAT
+// (sessionrelay/workload_digest_test.go ↔ wallet jest) pins the serialisation.
+func (l *Launcher) armSessionRelayWorkloadDigest(containerName, host string) {
+	if l.appHostRouter == nil || host == "" {
+		return
+	}
+	l.mu.RLock()
+	tree, ok1 := l.containerTrees[containerName]
+	spec, ok2 := l.specs[containerName]
+	imageDigest := l.imageDigests[containerName]
+	volEnc := l.volumeEncryption[containerName]
+	l.mu.RUnlock()
+	if !ok1 || !ok2 {
+		return
+	}
+	root := tree.Root()
+	// Match oids.ContainerExtensions: the leaf carries the image ref with any
+	// @sha256:… suffix stripped (the digest is at OID 3.2).
+	imageRef := spec.Image
+	if i := strings.Index(imageRef, "@"); i >= 0 {
+		imageRef = imageRef[:i]
+	}
+	digest := sessionrelay.WorkloadDigest(map[string]string{
+		sessionrelay.WorkloadConfigMerkleRoot: hex.EncodeToString(root[:]),
+		sessionrelay.WorkloadCodeHash:         hex.EncodeToString(imageDigest),
+		sessionrelay.WorkloadImageRef:         imageRef,
+		sessionrelay.WorkloadKeySource:        volEnc,
+	})
+	l.appHostRouter.SetExpectedWorkloadDigest(host, digest)
+	l.log.Info("session-relay workload-digest wake armed",
+		zap.String("host", host), zap.String("workload_digest", hex.EncodeToString(digest[:])))
 }
 
 // SetTokenSource sets a dynamic token source that takes precedence over
@@ -1171,6 +1217,10 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				// attested identity. Best-effort: a failure keeps the host's
 				// ephemeral key (enc-pub-plan.md, Sc 2).
 				l.resolveSessionRelayKey(ctx, req, spec.Hostname, digest)
+				// Arm the per-app workload-digest wake (Sc 1): a voucher whose
+				// field-4 digest no longer matches this app's measurement is
+				// rejected, so an app code/config change re-prompts the user.
+				l.armSessionRelayWorkloadDigest(req.Name, spec.Hostname)
 			}
 			if err := l.caddyClient.AddRoute(spec.Hostname, caddyUpstream); err != nil {
 				l.log.Warn("failed to add Caddy route",

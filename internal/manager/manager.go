@@ -269,7 +269,17 @@ func (s *Server) RegisterAppHost(hostname, upstream string) {
 func (s *Server) UnregisterAppHost(hostname string) {
 	hostname = strings.ToLower(hostname)
 	s.appHosts.Delete(hostname)
+	s.sessionRelay.ClearExpectedWorkloadDigest(hostname)
 	s.log.Info("app host unregistered", zap.String("hostname", hostname))
+}
+
+// SetExpectedWorkloadDigest arms the session-relay per-app workload-digest
+// check for a Host (Sc 1, enc-pub-plan.md): a silent-rebind voucher whose
+// field-4 workload digest does not match is rejected, so an app code/config
+// change (OID 3.2 moving) wakes the user. Implements launcher.AppHostRouter so
+// the Load path can arm it from the container's stamped OID values.
+func (s *Server) SetExpectedWorkloadDigest(host string, digest [32]byte) {
+	s.sessionRelay.SetExpectedWorkloadDigest(host, digest)
 }
 
 func (s *Server) lookupAppHost(hostname string) (string, bool) {
