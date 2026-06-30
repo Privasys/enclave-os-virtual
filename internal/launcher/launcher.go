@@ -805,14 +805,18 @@ func (l *Launcher) armSessionRelayWorkloadDigest(containerName, host string) {
 		return
 	}
 	// NB: l.mu is held for writing by the caller — do not RLock here.
-	tree, ok1 := l.containerTrees[containerName]
-	spec, ok2 := l.specs[containerName]
+	spec, ok := l.specs[containerName]
 	imageDigest := l.imageDigests[containerName]
 	volEnc := l.volumeEncryption[containerName]
-	if !ok1 || !ok2 {
+	if !ok || len(imageDigest) == 0 {
 		return
 	}
-	root := tree.Root()
+	// Compute the config-merkle root (OID 3.1) directly from the spec — the
+	// SAME computation oids.ContainerExtensions / recomputeAttestation use
+	// (Container.ContainerMerkleTree). Do NOT read l.containerTrees here: on
+	// Load it is only populated by recomputeAttestation, which runs before this
+	// container is in containerList(), so the lookup misses and Sc 1 never arms.
+	root := spec.ContainerMerkleTree(imageDigest).Root()
 	// Match oids.ContainerExtensions: the leaf carries the image ref with any
 	// @sha256:… suffix stripped (the digest is at OID 3.2).
 	imageRef := spec.Image

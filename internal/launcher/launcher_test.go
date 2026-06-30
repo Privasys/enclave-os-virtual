@@ -2,23 +2,31 @@ package launcher
 
 import (
 	"bytes"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Privasys/enclave-os-virtual/internal/manifest"
-	"github.com/Privasys/enclave-os-virtual/internal/merkle"
+	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
 	"go.uber.org/zap"
 )
 
-// fakeAppHostRouter satisfies AppHostRouter for tests. The methods are no-ops:
-// the behaviour under test is the LOCKING, not the routing side effects.
-type fakeAppHostRouter struct{}
+// fakeAppHostRouter satisfies AppHostRouter for tests. The no-op methods cover
+// routing side effects; SetExpectedWorkloadDigest records its argument so tests
+// can assert the arm actually fired (not silently skipped).
+type fakeAppHostRouter struct {
+	gotDigest    [32]byte
+	gotDigestSet bool
+}
 
-func (fakeAppHostRouter) RegisterAppHost(string, string)                      {}
-func (fakeAppHostRouter) UnregisterAppHost(string)                            {}
-func (fakeAppHostRouter) SetSessionRelayIdentityKeySeed(string, []byte) error { return nil }
-func (fakeAppHostRouter) SetExpectedWorkloadDigest(string, [32]byte)          {}
+func (*fakeAppHostRouter) RegisterAppHost(string, string)                      {}
+func (*fakeAppHostRouter) UnregisterAppHost(string)                            {}
+func (*fakeAppHostRouter) SetSessionRelayIdentityKeySeed(string, []byte) error { return nil }
+func (f *fakeAppHostRouter) SetExpectedWorkloadDigest(_ string, d [32]byte) {
+	f.gotDigest = d
+	f.gotDigestSet = true
+}
 
 // TestArmSessionRelayWorkloadDigestNoSelfDeadlock pins the regression where
 // Load (holding l.mu for writing) called armSessionRelayWorkloadDigest, which
@@ -30,10 +38,11 @@ func (fakeAppHostRouter) SetExpectedWorkloadDigest(string, [32]byte)          {}
 // write lock.
 func TestArmSessionRelayWorkloadDigestNoSelfDeadlock(t *testing.T) {
 	const name, host = "app1", "app1.apps.privasys.org"
+	// NB: no containerTrees seeded — the arm must compute the root from the
+	// spec, not depend on recomputeAttestation having populated the tree.
 	l := &Launcher{
 		log:              zap.NewNop(),
-		appHostRouter:    fakeAppHostRouter{},
-		containerTrees:   map[string]*merkle.Tree{name: merkle.New(nil)},
+		appHostRouter:    &fakeAppHostRouter{},
 		specs:            map[string]manifest.Container{name: {Image: "ghcr.io/privasys/apps/app1@sha256:" + strings.Repeat("a", 64)}},
 		imageDigests:     map[string][]byte{name: bytes.Repeat([]byte{1}, 32)},
 		volumeEncryption: map[string]string{name: "ephemeral"},
@@ -51,6 +60,44 @@ func TestArmSessionRelayWorkloadDigestNoSelfDeadlock(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("armSessionRelayWorkloadDigest self-deadlocked while its caller held l.mu (write)")
+	}
+}
+
+// TestArmSessionRelayWorkloadDigestFires pins the SECOND regression: the arm
+// read l.containerTrees, which on Load is only populated AFTER this point, so
+// it silently returned without ever calling SetExpectedWorkloadDigest — Sc 1
+// (wake on a code/config change) never armed live. The arm must compute the
+// config-merkle root from the spec and set the digest, with the same value the
+// attested leaf carries (image ref stripped of any @sha256:… suffix).
+func TestArmSessionRelayWorkloadDigestFires(t *testing.T) {
+	const name, host = "app1", "app1.apps.privasys.org"
+	imageDigest := bytes.Repeat([]byte{1}, 32)
+	spec := manifest.Container{Image: "ghcr.io/privasys/apps/app1@sha256:" + strings.Repeat("a", 64)}
+	r := &fakeAppHostRouter{}
+	l := &Launcher{
+		log:              zap.NewNop(),
+		appHostRouter:    r,
+		specs:            map[string]manifest.Container{name: spec},
+		imageDigests:     map[string][]byte{name: imageDigest},
+		volumeEncryption: map[string]string{name: "ephemeral"},
+	}
+
+	l.mu.Lock()
+	l.armSessionRelayWorkloadDigest(name, host)
+	l.mu.Unlock()
+
+	if !r.gotDigestSet {
+		t.Fatal("arm silently skipped: SetExpectedWorkloadDigest was never called")
+	}
+	root := spec.ContainerMerkleTree(imageDigest).Root()
+	want := sessionrelay.WorkloadDigest(map[string]string{
+		sessionrelay.WorkloadConfigMerkleRoot: hex.EncodeToString(root[:]),
+		sessionrelay.WorkloadCodeHash:         hex.EncodeToString(imageDigest),
+		sessionrelay.WorkloadImageRef:         "ghcr.io/privasys/apps/app1", // @sha256:… stripped
+		sessionrelay.WorkloadKeySource:        "ephemeral",
+	})
+	if r.gotDigest != want {
+		t.Fatalf("armed digest mismatch:\n got %x\nwant %x", r.gotDigest, want)
 	}
 }
 
