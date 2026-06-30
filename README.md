@@ -157,9 +157,9 @@ containers:
       tcp: "127.0.0.1:5432"
   - name: myapp
     image: "ghcr.io/example/myapp@sha256:..."
-    port: 8080
+    port: 8000   # 8080 is reserved for the platform; apps listen on $PORT
     health_check:
-      http: "http://127.0.0.1:8080/healthz"
+      http: "http://127.0.0.1:8000/healthz"
 ```
 
 Hostnames are derived automatically from the machine name and hostname:

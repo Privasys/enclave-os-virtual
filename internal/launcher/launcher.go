@@ -265,6 +265,15 @@ type LoadRequest struct {
 	ConfigAPI *ConfigAPISpec `json:"config_api,omitempty"`
 }
 
+// reservedHostPort is the platform's own host port (the management proxy /
+// runtime-status feed). Containers run with host networking, so a container's
+// listen port IS the host port; an app that binds 8080 collides with the
+// platform and crash-loops co-located apps (this is what took down the KYC
+// enclave). The management-service allocates a unique port per app from the
+// 10000-32000 range and injects it as $PORT — apps must listen on that, never
+// a fixed 8080.
+const reservedHostPort = 8080
+
 // Validate checks the load request for required fields.
 func (r *LoadRequest) Validate() error {
 	if r.Name == "" {
@@ -275,6 +284,10 @@ func (r *LoadRequest) Validate() error {
 	}
 	if r.Port <= 0 || r.Port > 65535 {
 		return fmt.Errorf("port must be 1-65535, got %d", r.Port)
+	}
+	if r.Port == reservedHostPort {
+		return fmt.Errorf("port %d is reserved for the platform; the app must "+
+			"listen on the injected $PORT (allocated from 10000-32000), not a fixed 8080", r.Port)
 	}
 	if r.ConfigAPI != nil {
 		if r.ConfigAPI.Path == "" {

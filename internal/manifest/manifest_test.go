@@ -19,7 +19,7 @@ func sampleManifest() *Manifest {
 				Name:     "myapp",
 				Image:    "ghcr.io/example/myapp@sha256:abcdef1234567890",
 				Hostname: "myapp.prod1.example.com",
-				Port:     8080,
+				Port:     8000,
 				Env: map[string]string{
 					"DATABASE_HOST": "localhost",
 					"DATABASE_PORT": "5432",
@@ -49,7 +49,7 @@ containers:
   - name: web
     image: "registry.example.com/web@sha256:aabbccdd"
     hostname: web.prod1.example.com
-    port: 8080
+    port: 8000
     env:
       APP_MODE: production
 `

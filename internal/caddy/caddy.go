@@ -104,7 +104,7 @@ func NewClient(cfg Config, log *zap.Logger) *Client {
 }
 
 // AddRoute registers a reverse-proxy route for the given hostname,
-// forwarding traffic to the upstream address (e.g. "localhost:8080").
+// forwarding traffic to the upstream address (e.g. "localhost:8000").
 // The route is protected by RA-TLS via the ra_tls issuer.
 func (c *Client) AddRoute(hostname, upstream string) error {
 	c.mu.Lock()

@@ -152,7 +152,7 @@ type Server struct {
 	sessionRelay *sessionrelay.Manager
 
 	// appHosts maps container Hostname → loopback upstream (e.g.
-	// "localhost:8080"). Populated by the launcher via RegisterAppHost.
+	// "localhost:8000"). Populated by the launcher via RegisterAppHost.
 	appHosts sync.Map // map[string]string
 
 	// appProxy reverse-proxies non-platform Host requests to the upstream
@@ -253,7 +253,7 @@ func (s *Server) SetSessionRelayIdentityKeySeed(host string, seed []byte) error 
 }
 
 // RegisterAppHost wires a container hostname to its loopback upstream
-// (e.g. "localhost:8080"). Subsequent requests reaching the manager with
+// (e.g. "localhost:8000"). Subsequent requests reaching the manager with
 // Host == hostname are reverse-proxied there, after passing through the
 // session-relay middleware. Idempotent.
 func (s *Server) RegisterAppHost(hostname, upstream string) {

@@ -105,7 +105,7 @@ a permitted entry.
 {
   "name": "myapp",
   "image": "ghcr.io/example/myapp@sha256:abc123...",
-  "port": 8080,
+  "port": 8000,
   "env": {
     "DATABASE_HOST": "localhost"
   },
@@ -114,7 +114,7 @@ a permitted entry.
   "internal": false,
   "storage": "2G",
   "health_check": {
-    "http": "http://127.0.0.1:8080/healthz",
+    "http": "http://127.0.0.1:8000/healthz",
     "interval_seconds": 10,
     "timeout_seconds": 5,
     "retries": 3
@@ -126,7 +126,7 @@ a permitted entry.
 |-------|------|----------|-------------|
 | `name` | string | yes | Unique container identifier |
 | `image` | string | yes | OCI image reference with digest |
-| `port` | int | yes | Container listening port |
+| `port` | int | yes | Container listening port. Must NOT be `8080` (reserved for the platform) — apps listen on the management-service-allocated `$PORT`. |
 | `env` | object | no | Environment variables |
 | `volumes` | string[] | no | Host:container mount paths |
 | `command` | string[] | no | Override default entrypoint |

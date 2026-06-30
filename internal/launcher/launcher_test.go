@@ -8,7 +8,7 @@ func TestLoadRequestRuntimeEnv(t *testing.T) {
 	req := LoadRequest{
 		Name:  "test",
 		Image: "example.com/img@sha256:abcd",
-		Port:  8080,
+		Port:  8000,
 	}
 	if env := req.runtimeEnv(); len(env) != 0 {
 		t.Fatalf("expected empty runtime env, got %v", env)
@@ -19,7 +19,7 @@ func TestVaultFieldsNotInSpec(t *testing.T) {
 	req := LoadRequest{
 		Name:                   "test",
 		Image:                  "example.com/img@sha256:abcd",
-		Port:                   8080,
+		Port:                   8000,
 		KeyHandle:              "apps.privasys.org/app/storage-kek/v1",
 		VaultEndpoints:         []string{"141.94.219.130:8443"},
 		VaultMrenclave:         "015ff920efbe97be7593a657169d10fb9f7ab285805c7b02d81a807431c427ae",
@@ -69,6 +69,11 @@ func TestValidateLoadRequest(t *testing.T) {
 		{
 			name:    "bad port",
 			req:     LoadRequest{Name: "a", Image: "img", Port: 0},
+			wantErr: true,
+		},
+		{
+			name:    "reserved platform port 8080",
+			req:     LoadRequest{Name: "a", Image: "img@sha256:abc", Port: 8080},
 			wantErr: true,
 		},
 	}

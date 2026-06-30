@@ -9,7 +9,7 @@
 //	     {"oid": "1.3.6.1.4.1.65230.1.1", "value": "<base64>"},
 //	     ...
 //	   ],
-//	   "upstream": "http://127.0.0.1:8080"
+//	   "upstream": "http://127.0.0.1:8000"
 //	}
 //
 // The manager writes these files to the extensions directory (e.g.

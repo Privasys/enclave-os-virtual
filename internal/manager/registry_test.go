@@ -37,7 +37,7 @@ func TestRegistry_SaveReplaceRemove(t *testing.T) {
 		t.Fatalf("expected empty, got %d", len(got))
 	}
 
-	a := launcher.LoadRequest{Name: "alpha", Image: "img@sha256:aaa", Port: 8080}
+	a := launcher.LoadRequest{Name: "alpha", Image: "img@sha256:aaa", Port: 8000}
 	b := launcher.LoadRequest{Name: "beta", Image: "img@sha256:bbb", Port: 9090}
 	if err := r.Save(a); err != nil {
 		t.Fatalf("Save a: %v", err)
@@ -51,7 +51,7 @@ func TestRegistry_SaveReplaceRemove(t *testing.T) {
 	}
 
 	// Replace existing entry (new image digest, same name).
-	a2 := launcher.LoadRequest{Name: "alpha", Image: "img@sha256:zzz", Port: 8080}
+	a2 := launcher.LoadRequest{Name: "alpha", Image: "img@sha256:zzz", Port: 8000}
 	if err := r.Save(a2); err != nil {
 		t.Fatalf("Save a2: %v", err)
 	}

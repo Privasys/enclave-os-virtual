@@ -47,7 +47,7 @@ or an untrusted runtime — without trusting the server operator.
 │       ▼                                      ▼         │
 │  ┌─────────────┐              ┌─────────────────────┐  │
 │  │ Manager API │              │  Container (myapp)  │  │
-│  │ (localhost: │              │  (localhost:8080)   │  │
+│  │ (localhost: │              │  (localhost:8000)   │  │
 │  │  9443)      │              │                     │  │
 │  └─────────────┘              └─────────────────────┘  │
 │                                                        │
@@ -368,7 +368,7 @@ The Caddy reverse proxy uses **SNI-based routing**:
    (`localhost:9443`), not directly to the container
 7. The manager dispatches by `Host`: the platform hostname hits the
    management API mux; every other host is reverse-proxied to its
-   registered container loopback (e.g. `localhost:8080`)
+   registered container loopback (e.g. `localhost:8000`)
 
 Routing through the manager lets the **session-relay middleware**
 (`internal/sessionrelay`) intercept SDK traffic uniformly: any host can
@@ -388,7 +388,7 @@ POST /api/v1/containers
 {
   "name": "myapp",
   "image": "ghcr.io/example/myapp@sha256:abc123...",
-  "port": 8080
+  "port": 8000
 }
 ```
 
@@ -401,7 +401,7 @@ The launcher:
 5. Writes OID extensions to `/run/manager/extensions/myapp.<machine-name>.<hostname>.json`
 6. Registers a Caddy route: `myapp.<machine-name>.<hostname>` → `localhost:9443` (manager)
 7. Registers the container upstream with the manager's host router
-   (`Host` → `localhost:8080`) so the manager can reverse-proxy after
+   (`Host` → `localhost:8000`) so the manager can reverse-proxy after
    running the session-relay middleware
 8. Updates the platform extensions (combined workloads hash changed)
 
