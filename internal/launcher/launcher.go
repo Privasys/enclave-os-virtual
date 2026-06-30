@@ -1639,12 +1639,17 @@ func (l *Launcher) StatusReport() []ContainerStatus {
 		return nil
 	}
 	containers := mgr.List()
+	// Read the per-container freeze maps under the lock so the report can tell
+	// the control plane which containers are still behind the configure gate.
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	result := make([]ContainerStatus, 0, len(containers))
 	for _, mc := range containers {
 		cs := ContainerStatus{
-			Name:   mc.Name,
-			Image:  mc.Spec.Image,
-			Status: string(mc.GetStatus()),
+			Name:           mc.Name,
+			Image:          mc.Spec.Image,
+			Status:         string(mc.GetStatus()),
+			AwaitingConfig: l.configAPI[mc.Name] != nil && !l.configured[mc.Name],
 		}
 		progress := mc.GetPullProgress()
 		if progress.TotalBytes > 0 {
@@ -1664,6 +1669,10 @@ type ContainerStatus struct {
 	Image        string                  `json:"image"`
 	Status       string                  `json:"status"`
 	PullProgress *container.PullProgress `json:"pull_progress,omitempty"`
+	// AwaitingConfig is true when the container declares a configure gate and
+	// has not yet been configured (the freeze gate returns 503 for all
+	// non-configure traffic). Lets the control plane surface a "Frozen" state.
+	AwaitingConfig bool `json:"awaiting_config,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
