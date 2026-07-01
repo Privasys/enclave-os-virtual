@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,16 @@ const (
 
 	// healthCheckDefaultRetries is the default number of retries before unhealthy.
 	healthCheckDefaultRetries = 3
+
+	// RoothashRegistryHostDir is where disk-mounter records the dm-verity
+	// root hash of each verified model disk (/run because /var/lib sits on
+	// the read-only erofs root). RoothashRegistryContainerDir is the
+	// canonical path workloads read it from (e.g. confidential-ai's
+	// ROOTHASH_DIR default): Create bind-mounts host→container read-only
+	// whenever the host dir exists, so the AI workload can publish the
+	// root hash as attestation OID 3.5 without hashing the weights itself.
+	RoothashRegistryHostDir      = "/run/enclave-os/model-roothashes"
+	RoothashRegistryContainerDir = "/var/lib/enclave-os/model-roothashes"
 )
 
 // Status represents the status of a managed container.
@@ -485,6 +496,19 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 			zap.String("destination", parts[1]),
 			zap.String("options", mountOpts),
 		)
+	}
+
+	// Model roothash registry: expose disk-mounter's verified dm-verity
+	// root hashes read-only at the canonical container path (see the
+	// RoothashRegistry* consts). Skipped when the host has no registry
+	// (no verity model disks mounted, or a non-GPU image).
+	if st, err := os.Stat(RoothashRegistryHostDir); err == nil && st.IsDir() {
+		opts = append(opts, oci.WithMounts([]specs.Mount{{
+			Destination: RoothashRegistryContainerDir,
+			Source:      RoothashRegistryHostDir,
+			Type:        "bind",
+			Options:     []string{"rbind", "ro"},
+		}}))
 	}
 
 	// Volume bind mounts (format: "host:container[:ro|rw]").

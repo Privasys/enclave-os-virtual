@@ -29,19 +29,26 @@
 # then opens the data disk via `veritysetup open --hash-offset=4096`.
 #
 # The trust anchor is NOT the on-disk header: it is the attestation
-# OID 3.5 (MODEL_DIGEST), which the manager folds in from
-# /var/lib/enclave-os/model-roothashes/<name>.roothash (written by
-# disk-mounter on success). A remote verifier rejects any quote whose
-# MODEL_DIGEST does not match the published model. Tampering with the
-# verity header on disk therefore breaks attestation, not silently the
-# data path.
+# OID 3.5 (MODEL_DIGEST). disk-mounter records the verified root hash in
+# $ROOTHASH_REGISTRY/<name>.roothash; the manager bind-mounts that
+# registry read-only into every container at
+# /var/lib/enclave-os/model-roothashes, where the AI workload picks it
+# up and publishes it as OID 3.5 instead of hashing the weights itself.
+# A remote verifier rejects any quote whose MODEL_DIGEST does not match
+# the published model. Tampering with the verity header on disk
+# therefore breaks attestation, not silently the data path.
 #
 # Skips disks that have no filesystem (must be pre-formatted by the
 # publisher workflow). Logs to journal.
 
 set -uo pipefail
 
-ROOTHASH_REGISTRY=/var/lib/enclave-os/model-roothashes
+# Written to /run: /var/lib sits on the read-only erofs root, so the
+# historic /var/lib/enclave-os path could never be created on the host
+# (the mkdir below failed silently and no roothash was ever recorded).
+# Containers still see the canonical /var/lib/enclave-os/model-roothashes
+# path via the manager's read-only bind mount.
+ROOTHASH_REGISTRY=/run/enclave-os/model-roothashes
 mkdir -p "$ROOTHASH_REGISTRY"
 
 # read_verity_header <verity-dev>
