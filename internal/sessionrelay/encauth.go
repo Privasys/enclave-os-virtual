@@ -104,6 +104,55 @@ type EncAuthVerifier interface {
 	Verify(env *EncAuthEnvelope, vc VerifyContext) (*EncAuthPayload, error)
 }
 
+// Sentinel rejection causes with a distinct client-facing meaning. Wrapped
+// (errors.Is) so RejectReason can classify without string matching.
+var (
+	// ErrEncPubMismatch: the voucher pins a different identity key — the
+	// platform measurement rotated (enc_pub is vault-backed and stable
+	// across same-measurement restarts, crypto-contract §8.7).
+	ErrEncPubMismatch = errors.New("encauth: enc_pub does not match this enclave")
+	// ErrWorkloadDigestMismatch: the routed app's code/config changed
+	// (workload OIDs 3.1–3.4 moved) since the voucher was issued.
+	ErrWorkloadDigestMismatch = errors.New("encauth: workload digest does not match this app (code/config changed)")
+	// ErrQuoteDigestMismatch: the enclave's own attestation digest moved.
+	ErrQuoteDigestMismatch = errors.New("encauth: quote_hash does not match expected attestation digest")
+	// ErrNotYetValid / ErrExpired: outside the voucher validity window.
+	ErrNotYetValid = errors.New("encauth: not yet valid")
+	ErrExpired     = errors.New("encauth: expired")
+)
+
+// Stable, machine-readable rejection reasons for the `X-Privasys-Reason`
+// header and the bootstrap response's `encauth_reject` field. The browser
+// SDK branches on these (values are wire contract — crypto-contract §8.4):
+//
+//   - enc-changed:      platform identity/measurement changed → wallet must
+//     re-verify the enclave.
+//   - workload-changed: the app's code or configuration changed → wallet
+//     must re-verify the app.
+//   - voucher-expired:  validity window elapsed → fresh ceremony, nothing
+//     changed on the enclave side.
+//   - voucher-invalid:  malformed or bad signature (also the catch-all).
+const (
+	RejectEncChanged      = "enc-changed"
+	RejectWorkloadChanged = "workload-changed"
+	RejectVoucherExpired  = "voucher-expired"
+	RejectVoucherInvalid  = "voucher-invalid"
+)
+
+// RejectReason maps a Verify error to its stable client-facing reason.
+func RejectReason(err error) string {
+	switch {
+	case errors.Is(err, ErrEncPubMismatch), errors.Is(err, ErrQuoteDigestMismatch):
+		return RejectEncChanged
+	case errors.Is(err, ErrWorkloadDigestMismatch):
+		return RejectWorkloadChanged
+	case errors.Is(err, ErrNotYetValid), errors.Is(err, ErrExpired):
+		return RejectVoucherExpired
+	default:
+		return RejectVoucherInvalid
+	}
+}
+
 // JWKSResolver fetches the IdP's signing key by kid. Implementations
 // SHOULD cache results.
 type JWKSResolver interface {
@@ -187,7 +236,7 @@ func (v *DefaultEncAuthVerifier) Verify(env *EncAuthEnvelope, vc VerifyContext) 
 
 	// enc_pub must match this enclave's identity key byte-for-byte.
 	if !bytes.Equal(payload.EncPub, vc.EncStaticPub) {
-		return nil, errors.New("encauth: enc_pub does not match this enclave")
+		return nil, ErrEncPubMismatch
 	}
 
 	// Optional per-app workload-measurement binding (Sc 1,
@@ -196,21 +245,21 @@ func (v *DefaultEncAuthVerifier) Verify(env *EncAuthEnvelope, vc VerifyContext) 
 	// match the app this bootstrap is routed to; a mismatch means the app
 	// code/config changed (OID 3.2 moved) and the user must re-approve.
 	if vc.HasExpectedWorkloadDigest && !bytes.Equal(payload.WorkloadDigest, vc.ExpectedWorkloadDigest[:]) {
-		return nil, errors.New("encauth: workload digest does not match this app (code/config changed)")
+		return nil, ErrWorkloadDigestMismatch
 	}
 
 	// Optional attestation-digest binding (crypto-contract §4.1).
 	if vc.HasQuoteDigest && !bytes.Equal(payload.QuoteHash, vc.QuoteDigest[:]) {
-		return nil, errors.New("encauth: quote_hash does not match expected attestation digest")
+		return nil, ErrQuoteDigestMismatch
 	}
 
 	// Time window.
 	nowSec := uint64(vc.Now.Unix())
 	if nowSec+30 < payload.NotBefore { // 30s skew
-		return nil, errors.New("encauth: not yet valid")
+		return nil, ErrNotYetValid
 	}
 	if nowSec >= payload.NotAfter {
-		return nil, errors.New("encauth: expired")
+		return nil, ErrExpired
 	}
 	if payload.SID == "" {
 		return nil, errors.New("encauth: empty sid")

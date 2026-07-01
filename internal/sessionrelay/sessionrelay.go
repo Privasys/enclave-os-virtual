@@ -332,6 +332,13 @@ type initResponse struct {
 	// EncAuth voucher (silent rebind). Empty for FIDO2-bootstrapped
 	// sessions.
 	Sub string `json:"sub,omitempty"`
+	// EncAuthReject is the stable reason a supplied EncAuth voucher was
+	// refused (RejectReason: enc-changed / workload-changed /
+	// voucher-expired / voucher-invalid); the bootstrap then fell through
+	// to the unauthenticated legacy path. In the body (not only the
+	// X-Privasys-Reason header) because the gateway-terminate leg's CORS
+	// does not expose custom headers to the browser SDK.
+	EncAuthReject string `json:"encauth_reject,omitempty"`
 }
 
 func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
@@ -379,6 +386,7 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 		sessionID    string
 		sessionIDRaw []byte
 		sub          string
+		rejectReason string
 	)
 
 	if req.EncAuth != nil && verifier != nil {
@@ -402,9 +410,15 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 		})
 		if vErr != nil {
 			// Fall through to legacy bootstrap path so the SDK can
-			// retry with a fresh FIDO2 ceremony. Surface the reason
-			// via a header for client-side diagnostics.
+			// retry with a fresh FIDO2 ceremony. Surface the raw error
+			// via a diagnostics header, and the STABLE reason both as
+			// X-Privasys-Reason and in the response body
+			// (encauth_reject): the gateway-terminate leg owns CORS and
+			// does not expose custom headers to the browser, so the
+			// body field is what the SDK actually branches on.
+			rejectReason = RejectReason(vErr)
 			w.Header().Set("X-Privasys-EncAuth-Reject", vErr.Error())
+			w.Header().Set("X-Privasys-Reason", rejectReason)
 		} else {
 			sub = payload.Sub
 			// Note: the enclave session_id stays random even when an
@@ -437,10 +451,11 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 	m.mu.Unlock()
 
 	resp := initResponse{
-		SessionID: sessionID,
-		EncPub:    base64.RawURLEncoding.EncodeToString(encPubBytes),
-		ExpiresAt: sess.ExpiresAt.Unix(),
-		Sub:       sub,
+		SessionID:     sessionID,
+		EncPub:        base64.RawURLEncoding.EncodeToString(encPubBytes),
+		ExpiresAt:     sess.ExpiresAt.Unix(),
+		Sub:           sub,
+		EncAuthReject: rejectReason,
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

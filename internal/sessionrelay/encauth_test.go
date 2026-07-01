@@ -187,6 +187,126 @@ func TestEncStaticKeyFromSeed_Deterministic(t *testing.T) {
 	}
 }
 
+// TestEncAuthRejectReason pins the stable client-facing rejection reasons
+// (wire contract: X-Privasys-Reason header + bootstrap encauth_reject body
+// field — crypto-contract §8.4). Each distinct wake cause must classify to
+// its own token via errors.Is, so the SDK can tell the browser tab WHY a
+// wallet ceremony is needed (E′: "app updated" vs "platform changed" vs
+// "voucher expired") without string-matching Go error text.
+func TestEncAuthRejectReason(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+
+	encStaticPriv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	encPub := elliptic.Marshal(elliptic.P256(), encStaticPriv.PublicKey.X, encStaticPriv.PublicKey.Y)
+	hwPriv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	hwPub := elliptic.Marshal(elliptic.P256(), hwPriv.PublicKey.X, hwPriv.PublicKey.Y)
+	idpPriv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+
+	seal := func(p EncAuthPayload) *EncAuthEnvelope {
+		em, _ := cbor.CTAP2EncOptions().EncMode()
+		cborBytes, err := em.Marshal(&p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hwSig := signRaw64(t, hwPriv, cborBytes)
+		idpSig := signRaw64(t, idpPriv, append(append([]byte(nil), cborBytes...), hwSig...))
+		return &EncAuthEnvelope{
+			V:       1,
+			Payload: base64.RawURLEncoding.EncodeToString(cborBytes),
+			HwSig:   base64.RawURLEncoding.EncodeToString(hwSig),
+			IdpSig:  base64.RawURLEncoding.EncodeToString(idpSig),
+		}
+	}
+	payload := EncAuthPayload{
+		V: 1, Sub: "u", SID: "s",
+		WorkloadDigest: bytes32(0xa1), EncMeas: bytes32(0xe1),
+		EncPub: encPub, QuoteHash: bytes32(0xb2),
+		NotBefore: uint64(now.Unix()) - 10,
+		NotAfter:  uint64(now.Unix()) + 3600,
+		HwPub:     hwPub,
+	}
+	v := &DefaultEncAuthVerifier{Resolver: JWKSResolverFunc(
+		func(_ context.Context, _ string) (*ecdsa.PublicKey, error) { return &idpPriv.PublicKey, nil },
+	)}
+
+	cases := []struct {
+		name   string
+		env    *EncAuthEnvelope
+		vc     VerifyContext
+		reason string
+	}{
+		{
+			// Voucher pins a different identity key → platform rotated.
+			name: "enc_pub mismatch -> enc-changed",
+			env: seal(func() EncAuthPayload {
+				p := payload
+				otherPriv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+				p.EncPub = elliptic.Marshal(elliptic.P256(), otherPriv.PublicKey.X, otherPriv.PublicKey.Y)
+				return p
+			}()),
+			vc:     VerifyContext{EncStaticPub: encPub, Now: now},
+			reason: RejectEncChanged,
+		},
+		{
+			name: "workload digest mismatch -> workload-changed",
+			env:  seal(payload),
+			vc: VerifyContext{
+				EncStaticPub: encPub, Now: now,
+				ExpectedWorkloadDigest: to32(bytes32(0xc3)), HasExpectedWorkloadDigest: true,
+			},
+			reason: RejectWorkloadChanged,
+		},
+		{
+			name: "quote_hash mismatch -> enc-changed",
+			env:  seal(payload),
+			vc: VerifyContext{
+				EncStaticPub: encPub, Now: now,
+				QuoteDigest: to32(bytes32(0xc3)), HasQuoteDigest: true,
+			},
+			reason: RejectEncChanged,
+		},
+		{
+			name:   "expired -> voucher-expired",
+			env:    seal(payload),
+			vc:     VerifyContext{EncStaticPub: encPub, Now: now.Add(3700 * time.Second)},
+			reason: RejectVoucherExpired,
+		},
+		{
+			name:   "not yet valid -> voucher-expired",
+			env:    seal(payload),
+			vc:     VerifyContext{EncStaticPub: encPub, Now: now.Add(-3600 * time.Second)},
+			reason: RejectVoucherExpired,
+		},
+		{
+			// Tampered payload breaks hw_sig → catch-all.
+			name: "bad signature -> voucher-invalid",
+			env: func() *EncAuthEnvelope {
+				e := seal(payload)
+				raw, _ := base64.RawURLEncoding.DecodeString(e.Payload)
+				raw[len(raw)-1] ^= 0x01
+				e.Payload = base64.RawURLEncoding.EncodeToString(raw)
+				return e
+			}(),
+			vc:     VerifyContext{EncStaticPub: encPub, Now: now},
+			reason: RejectVoucherInvalid,
+		},
+	}
+	for _, tc := range cases {
+		_, err := v.Verify(tc.env, tc.vc)
+		if err == nil {
+			t.Fatalf("%s: expected rejection", tc.name)
+		}
+		if got := RejectReason(err); got != tc.reason {
+			t.Fatalf("%s: reason %q, want %q (err: %v)", tc.name, got, tc.reason, err)
+		}
+	}
+
+	// Sanity: the happy path yields no reason to classify.
+	if _, err := v.Verify(seal(payload), VerifyContext{EncStaticPub: encPub, Now: now}); err != nil {
+		t.Fatalf("happy path: %v", err)
+	}
+}
+
 func bytesEq(a, b []byte) bool {
 	if len(a) != len(b) {
 		return false
