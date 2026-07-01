@@ -1,0 +1,15 @@
+[Unit]
+Description=Mount hot-attached image-*/model-* GCE disks (post-boot)
+# Triggered by 99-privasys-disk-mounter.rules (udev SYSTEMD_WANTS) when a cache
+# disk is attached to the running VM. Runs the SAME idempotent mounter as the
+# boot-time disk-mounter.service; unlike that unit it is NOT RemainAfterExit,
+# so it can re-run on every hot-attach. Needs the CVM runtime (NVIDIA CC) up,
+# same as the boot mounter.
+After=cvm-runtime-init.service
+Wants=cvm-runtime-init.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/enclave-os/disk-mounter
+StandardOutput=journal
+StandardError=journal

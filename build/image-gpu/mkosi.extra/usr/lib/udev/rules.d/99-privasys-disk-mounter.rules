@@ -1,0 +1,12 @@
+# Re-run the disk mounter when an image-*/model-* cache disk is HOT-ATTACHED
+# after boot. The boot-time disk-mounter.service is a oneshot ordered before
+# containerd/manager, so a disk attached to a running VM (e.g. a freshly
+# published cloud-image disk) would otherwise never be mounted until the next
+# reboot, and the manager's disk:// image import would fail with "no such
+# directory". The mounter is idempotent (it skips already-mounted targets), so
+# re-running it on each attach is safe.
+#
+# GCE exposes an attached disk at /dev/disk/by-id/google-<deviceName>; our
+# cache disks use deviceName image-<name>-<channel>-<digest> or model-<name>.
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", SYMLINK=="disk/by-id/google-image-*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="disk-mounter-hotplug.service"
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", SYMLINK=="disk/by-id/google-model-*", TAG+="systemd", ENV{SYSTEMD_WANTS}+="disk-mounter-hotplug.service"
