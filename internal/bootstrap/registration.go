@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -70,6 +71,10 @@ type registerResponse struct {
 	RegistrationID string `json:"registration_id"`
 	CallbackToken  string `json:"callback_token"`
 	Reason         string `json:"reason"`
+	// Sealed carries a parked approval payload (base64 NaCl anonymous box
+	// to our epk) when the admin approved but the callback to our listener
+	// could not be delivered. The re-register poll picks it up here.
+	Sealed string `json:"sealed"`
 }
 
 type registrationResult struct {
@@ -152,12 +157,20 @@ func RunRegistration(ctx context.Context, cfg Config) error {
 		Addr:    listenAddr,
 		Handler: registrationListener(tokenCh, resultCh),
 	}
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			fmt.Fprintf(os.Stderr, "manager-bootstrap: registration listener: %v\n", err)
-		}
-	}()
-	defer srv.Close()
+	// Bind explicitly so a failure is visible immediately instead of a
+	// goroutine dying silently and the loop registering deaf forever.
+	// A dead listener is survivable — the register poll below also picks
+	// up a parked approval payload — but it must be LOUD.
+	if ln, lnErr := net.Listen("tcp", listenAddr); lnErr != nil {
+		fmt.Fprintf(os.Stderr, "manager-bootstrap: WARNING: callback listener bind %s failed: %v — relying on register polling for approval pickup\n", listenAddr, lnErr)
+	} else {
+		go func() {
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fmt.Fprintf(os.Stderr, "manager-bootstrap: registration listener: %v\n", err)
+			}
+		}()
+		defer srv.Close()
+	}
 
 	register := func() (*registerResponse, error) {
 		body, _ := json.Marshal(registerRequest{
@@ -206,6 +219,17 @@ func RunRegistration(ctx context.Context, cfg Config) error {
 			fmt.Fprintf(os.Stderr, "manager-bootstrap: register attempt failed: %v (retrying in %s)\n", err, reRegisterInterval)
 		case resp.Status == "rejected":
 			return fmt.Errorf("registration rejected: %s", resp.Reason)
+		case resp.Status == "approved" && resp.Sealed != "":
+			// The admin approved but the callback never reached our
+			// listener; the platform parked the payload and this poll
+			// collected it (one-shot).
+			fmt.Fprintf(os.Stderr, "manager-bootstrap: approval payload picked up via register poll (id=%s)\n", resp.RegistrationID)
+			payload, perr := openSealedPayload(resp.Sealed, epk, esk)
+			if perr != nil {
+				fmt.Fprintf(os.Stderr, "manager-bootstrap: bad polled approval payload: %v (continuing to wait)\n", perr)
+				break
+			}
+			return persistRegistration(cfg, payload)
 		case resp.Status == "pending":
 			fmt.Fprintf(os.Stderr, "manager-bootstrap: pending approval (id=%s), waiting for callback on %s\n",
 				resp.RegistrationID, listenAddr)
