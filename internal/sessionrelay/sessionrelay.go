@@ -46,6 +46,16 @@ const (
 	sealedContentType       = "application/privasys-sealed+cbor"
 	sealedStreamContentType = "application/privasys-sealed-stream+cbor"
 	authScheme              = "PrivasysSession"
+	// relaySubHeader carries the EncAuth-authenticated subject to the inner
+	// handler. Set exclusively by this middleware; stripped from every
+	// inbound request so neither gateway-leg nor RA-TLS-direct clients can
+	// assert an identity.
+	relaySubHeader = "X-Privasys-Sub"
+	// sealedEnvelopeHeader carries the sealed request envelope
+	// (base64url, no padding) for methods that cannot have a request body
+	// in browser fetch (GET/HEAD). The AAD is unchanged (outer
+	// method:URI:session), so the envelope stays bound to the real method.
+	sealedEnvelopeHeader = "X-Privasys-Sealed"
 	hkdfInfo                = "privasys-session/v1"
 	dirInfoC2S              = "privasys-dir/c2s"
 	dirInfoS2C              = "privasys-dir/s2c"
@@ -134,6 +144,13 @@ type Session struct {
 	S2CCtr    uint64
 	C2SNext   uint64 // smallest acceptable c2s ctr; rejects replay incl. the last frame
 	ExpiresAt time.Time
+	// Sub is the wallet-authenticated subject when the session was
+	// bootstrapped from an EncAuth voucher (silent rebind / cold resume).
+	// Empty for FIDO2-ceremony bootstraps (the enclave never learns the
+	// sub on that path). Forwarded to the inner handler as the
+	// X-Privasys-Sub header so apps behind the relay can attribute
+	// requests without a bearer ever crossing the gateway leg.
+	Sub string
 }
 
 // NewManager creates a session manager. The enclave identity key is
@@ -290,6 +307,11 @@ func (m *Manager) SetRequireSealed(f func(*http.Request) bool) {
 //     splice-mode RA-TLS clients keep working).
 func (m *Manager) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// X-Privasys-Sub is a relay-asserted identity: only this middleware
+		// may set it (from an EncAuth-authenticated session). Strip any
+		// inbound value on EVERY path — passthrough (RA-TLS direct clients
+		// could otherwise spoof it) and sealed alike.
+		r.Header.Del(relaySubHeader)
 		if r.URL.Path == initPath && r.Method == http.MethodPost {
 			m.handleInit(w, r)
 			return
@@ -444,6 +466,7 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "session derive: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	sess.Sub = sub
 
 	m.mu.Lock()
 	m.gcLocked()
@@ -492,6 +515,19 @@ func (m *Manager) handleSealed(w http.ResponseWriter, r *http.Request, next http
 		http.Error(w, "read sealed body", http.StatusBadRequest)
 		return
 	}
+	// Browser fetch cannot attach a body to GET/HEAD, so for those methods
+	// the SDK carries the (tiny — empty-plaintext) envelope in the
+	// X-Privasys-Sealed header instead. The AAD below still binds the real
+	// outer method and URI, so the envelope cannot be replayed onto a
+	// different route or verb.
+	if len(body) == 0 {
+		if h := r.Header.Get(sealedEnvelopeHeader); h != "" {
+			if body, err = base64.RawURLEncoding.DecodeString(h); err != nil {
+				http.Error(w, "decode sealed header", http.StatusBadRequest)
+				return
+			}
+		}
+	}
 	env, err := decodeSealed(body)
 	if err != nil {
 		http.Error(w, "decode sealed: "+err.Error(), http.StatusBadRequest)
@@ -529,10 +565,18 @@ func (m *Manager) handleSealed(w http.ResponseWriter, r *http.Request, next http
 	r2.Body = io.NopCloser(bytes.NewReader(pt))
 	r2.ContentLength = int64(len(pt))
 	r2.Header.Del("Content-Type")
+	r2.Header.Del(sealedEnvelopeHeader)
 	if len(pt) > 0 {
 		// Default the inner content-type so JSON handlers don't have to
 		// guess. The plaintext is already what the handler expects.
 		r2.Header.Set("Content-Type", "application/json")
+	}
+	// Assert the wallet-authenticated identity toward the app. Only
+	// EncAuth-vouched sessions carry a Sub (a FIDO2-ceremony bootstrap
+	// leaves it empty — the enclave never learns the sub on that path);
+	// the Middleware entry already stripped any spoofed inbound value.
+	if sess.Sub != "" {
+		r2.Header.Set(relaySubHeader, sess.Sub)
 	}
 
 	sw := newSealedRespWriter(w, sess, ad, m)
