@@ -2027,6 +2027,16 @@ func (l *Launcher) SetAttestationExtension(name, oid string, value []byte) error
 		if err := l.writeContainerExtensions(name, spec.Hostname, spec.Port); err != nil {
 			return fmt.Errorf("rewrite extensions: %w", err)
 		}
+		// Reload Caddy so the RA-TLS module re-reads the extension file and
+		// the NEXT leaf carries the new OID. Writing the file alone is not
+		// enough — the module reads it when the route is added (at Load), so a
+		// post-Load SetAttestationExtension (e.g. the identity-verifier
+		// publishing its trust-anchor hash at /configure) never reached the
+		// leaf. Same pattern as the CA-update path.
+		if err := l.caddyClient.Reload(); err != nil {
+			l.log.Warn("failed to reload Caddy after attestation-extension update (leaf updates on next route change)",
+				zap.String("name", name), zap.String("oid", oid), zap.Error(err))
+		}
 	}
 	return nil
 }
