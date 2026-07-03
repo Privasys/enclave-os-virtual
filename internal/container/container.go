@@ -21,6 +21,7 @@ import (
 
 	"crypto/tls"
 
+	tasks "github.com/containerd/containerd/api/services/tasks/v1"
 	"github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/remotes/docker"
@@ -601,6 +602,16 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 
 	// Create and start the task (== the running process).
 	task, err := container.NewTask(ctx, cio.NewCreator(cio.WithStdio))
+	if err != nil && errdefs.IsAlreadyExists(err) {
+		// A dead-shim task record from the pre-swap boot survived (see
+		// forceRemoveOrphan). Delete it via the task service and retry.
+		m.log.Warn("task already exists after container create; force-removing orphan task and retrying",
+			zap.String("name", spec.Name))
+		if _, derr := m.client.TaskService().Delete(ctx, &tasks.DeleteTaskRequest{ContainerID: spec.Name}); derr != nil && !errdefs.IsNotFound(derr) {
+			m.log.Warn("force-remove orphan task failed", zap.String("name", spec.Name), zap.Error(derr))
+		}
+		task, err = container.NewTask(ctx, cio.NewCreator(cio.WithStdio))
+	}
 	if err != nil {
 		_ = container.Delete(ctx)
 		return nil, fmt.Errorf("container: failed to create task for %s: %w", spec.Name, err)
@@ -639,29 +650,30 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	return mc, nil
 }
 
-// forceRemoveOrphan hard-deletes a container record that the ordinary
-// cleanup (LoadContainer + Delete WithSnapshotCleanup) could not remove —
-// typically because its snapshot references image layers that no longer
-// exist (a boot-disk swap keeps containerd's persistent state, so the old
-// build's container survives into the new boot). It kills any task, then
-// deletes the container via the store API (which does NOT touch the
-// snapshotter), then best-effort removes the snapshot. Errors are logged,
-// not fatal: the retried NewContainer is the real success signal.
+// forceRemoveOrphan hard-deletes every containerd record for `name` that
+// the ordinary cleanup could not remove. A boot-disk swap keeps
+// containerd's persistent state while killing the running shims, so the
+// pre-swap build leaves behind BOTH a container record (whose snapshot now
+// references gone image layers, so WithSnapshotCleanup fails) AND a task
+// record (whose shim is dead, so the normal task Delete fails). Both then
+// break the next Load — "container already exists" then "task already
+// exists" — and the app runs on the enclave-wide fallback cert with no
+// attestation quote. This nukes all three record types via the low-level
+// services (task → container → snapshot), each best-effort; the retried
+// NewContainer/NewTask is the real success signal. On a headless prod
+// enclave (no sshd) this self-heal is the only recovery path.
 func (m *Manager) forceRemoveOrphan(ctx context.Context, name string) {
-	if existing, err := m.client.LoadContainer(ctx, name); err == nil {
-		if t, terr := existing.Task(ctx, nil); terr == nil {
-			_ = t.Kill(ctx, 9)
-			if _, derr := t.Delete(ctx); derr != nil {
-				m.log.Warn("force-remove: task delete failed", zap.String("name", name), zap.Error(derr))
-			}
-		}
+	// 1. Task record — via the task service so a dead-shim task is removed
+	//    even though container.Task()/Delete() can't reach the shim.
+	if _, err := m.client.TaskService().Delete(ctx, &tasks.DeleteTaskRequest{ContainerID: name}); err != nil && !errdefs.IsNotFound(err) {
+		m.log.Warn("force-remove: task-service delete failed", zap.String("name", name), zap.Error(err))
 	}
-	// Delete the container metadata record directly, bypassing the
-	// snapshot-cleanup path that failed above.
+	// 2. Container metadata record — bypasses the snapshot-cleanup path
+	//    that failed above.
 	if err := m.client.ContainerService().Delete(ctx, name); err != nil && !errdefs.IsNotFound(err) {
 		m.log.Warn("force-remove: container-store delete failed", zap.String("name", name), zap.Error(err))
 	}
-	// Best-effort snapshot removal (the record is gone regardless).
+	// 3. Snapshot (the records are gone regardless).
 	if snSvc := m.client.SnapshotService(""); snSvc != nil {
 		_ = snSvc.Remove(ctx, name+"-snapshot")
 	}
