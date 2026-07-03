@@ -28,6 +28,7 @@ import (
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
+	"github.com/containerd/errdefs"
 	godigest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -552,8 +553,10 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	}
 
 	// Clean up any stale container or snapshot from a prior failed
-	// attempt with the same name. Without this, a half-created
-	// container/snapshot leaks and prevents future loads.
+	// attempt (or a boot-disk swap that outlived containerd state) with
+	// the same name. Without this, a half-created container/snapshot
+	// leaks and prevents future loads. forceRemoveOrphan is the harder
+	// fallback used when NewContainer still reports "already exists".
 	if existing, err := m.client.LoadContainer(ctx, spec.Name); err == nil {
 		// Delete any lingering task FIRST: containerd refuses to delete a
 		// container that still has a task (even a STOPPED one), so a bare
@@ -578,6 +581,20 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		client.WithNewSpec(opts...),
 	}
 	container, err := m.client.NewContainer(ctx, spec.Name, containerOpts...)
+	if err != nil && errdefs.IsAlreadyExists(err) {
+		// The best-effort cleanup above did not clear the orphan — most
+		// often because its snapshot references image layers that are
+		// gone (a boot-disk swap replaces the image but keeps containerd's
+		// persistent state, so the old container record survives into the
+		// new boot). WithSnapshotCleanup then fails and leaves the record.
+		// Force-remove via the container store (no snapshot dependency)
+		// and retry once. On a headless prod enclave this self-heal is the
+		// only recovery — there is no shell to run `ctr delete`.
+		m.log.Warn("container already exists after cleanup; force-removing orphan and retrying",
+			zap.String("name", spec.Name))
+		m.forceRemoveOrphan(ctx, spec.Name)
+		container, err = m.client.NewContainer(ctx, spec.Name, containerOpts...)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("container: failed to create %s: %w", spec.Name, err)
 	}
@@ -620,6 +637,34 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 
 	m.log.Info("container started", zap.String("name", spec.Name))
 	return mc, nil
+}
+
+// forceRemoveOrphan hard-deletes a container record that the ordinary
+// cleanup (LoadContainer + Delete WithSnapshotCleanup) could not remove —
+// typically because its snapshot references image layers that no longer
+// exist (a boot-disk swap keeps containerd's persistent state, so the old
+// build's container survives into the new boot). It kills any task, then
+// deletes the container via the store API (which does NOT touch the
+// snapshotter), then best-effort removes the snapshot. Errors are logged,
+// not fatal: the retried NewContainer is the real success signal.
+func (m *Manager) forceRemoveOrphan(ctx context.Context, name string) {
+	if existing, err := m.client.LoadContainer(ctx, name); err == nil {
+		if t, terr := existing.Task(ctx, nil); terr == nil {
+			_ = t.Kill(ctx, 9)
+			if _, derr := t.Delete(ctx); derr != nil {
+				m.log.Warn("force-remove: task delete failed", zap.String("name", name), zap.Error(derr))
+			}
+		}
+	}
+	// Delete the container metadata record directly, bypassing the
+	// snapshot-cleanup path that failed above.
+	if err := m.client.ContainerService().Delete(ctx, name); err != nil && !errdefs.IsNotFound(err) {
+		m.log.Warn("force-remove: container-store delete failed", zap.String("name", name), zap.Error(err))
+	}
+	// Best-effort snapshot removal (the record is gone regardless).
+	if snSvc := m.client.SnapshotService(""); snSvc != nil {
+		_ = snSvc.Remove(ctx, name+"-snapshot")
+	}
 }
 
 // Stop stops and removes a container.
