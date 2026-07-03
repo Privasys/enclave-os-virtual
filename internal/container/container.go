@@ -93,6 +93,7 @@ type ManagedContainer struct {
 	Task        client.Task
 
 	pullProgress PullProgress
+	failure      string // why Status is failed, for status reports
 	mu           sync.RWMutex
 
 	// healthCancel stops this container's health-check goroutine. Set by
@@ -107,6 +108,23 @@ func (mc *ManagedContainer) SetStatus(s Status) {
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
 	mc.Status = s
+}
+
+// SetFailure marks the container failed and records why. The message is
+// surfaced in status reports so the control plane can show the operator a
+// reason instead of a bare "failed" (prod enclaves have no journal access).
+func (mc *ManagedContainer) SetFailure(msg string) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	mc.Status = StatusFailed
+	mc.failure = msg
+}
+
+// GetFailure returns the recorded failure reason ("" when none).
+func (mc *ManagedContainer) GetFailure() string {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+	return mc.failure
 }
 
 // GetStatus returns the container status safely.

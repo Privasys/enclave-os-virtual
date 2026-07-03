@@ -423,12 +423,30 @@ type Launcher struct {
 
 	// configAPI tracks the optional config-API decoration per container.
 	// nil entries (or a missing key) mean the container is not frozen.
+	// Guarded by freezeMu (NOT l.mu): Statuses() must stay readable while
+	// Load holds l.mu across a multi-minute image import — the status
+	// endpoint previously blocked for the whole load and the control
+	// plane read the enclave as unreachable.
 	configAPI map[string]*ConfigAPISpec
 
 	// configured records whether the freeze gate has been opened for
 	// each container. true when no ConfigAPI is set, or when a
 	// matching successful call has been observed since (re)load.
+	// Guarded by freezeMu.
 	configured map[string]bool
+
+	// freezeMu guards configAPI + configured. Always acquired AFTER l.mu
+	// when both are held (writers inside Load/Unload); Statuses takes it
+	// alone.
+	freezeMu sync.RWMutex
+
+	// failures records why a container load failed, keyed by name, so the
+	// control plane sees status=failed + a reason instead of the container
+	// silently vanishing from the status list (a failed pull removes the
+	// containerd stub). Cleared on the next successful Load or an Unload.
+	// Guarded by failMu (standalone).
+	failMu   sync.Mutex
+	failures map[string]string
 
 	// billingFrozen tracks the host-driven billing freeze per container
 	// (name → reason, e.g. "credits_exhausted"). A present entry means the
@@ -476,6 +494,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		oidExts:           make(map[string]map[string][]byte),
 		configAPI:         make(map[string]*ConfigAPISpec),
 		configured:        make(map[string]bool),
+		failures:          make(map[string]string),
 		billingFrozen:     make(map[string]string),
 		containerTokens:   make(map[string]string),
 		attestationTokens: make(map[string]string),
@@ -633,18 +652,31 @@ func (l *Launcher) WaitReady(ctx context.Context) error {
 	}
 }
 
-// MarkFailed sets a container's status to "failed". Load registers a
-// "pulling" stub before the network pull; if Load later errors (e.g. the
-// vault DEK reconstruction fails), the stub would otherwise stay "pulling"
-// forever and status queries would never reflect the failure. Safe to call
-// when the container is unknown (no-op).
-func (l *Launcher) MarkFailed(name string) {
+// MarkFailed sets a container's status to "failed" and records why. Load
+// registers a "pulling" stub before the network pull; if Load later errors
+// (e.g. the vault DEK reconstruction fails), the stub would otherwise stay
+// "pulling" forever — or, when the failed pull removed the stub entirely,
+// the container would vanish from status reports and the control plane
+// would blindly auto-redeploy in a loop. The failure record keeps a
+// synthetic failed entry (with the reason) in Statuses either way; prod
+// enclaves expose no journal, so this is the operator's only error channel.
+func (l *Launcher) MarkFailed(name, reason string) {
+	l.failMu.Lock()
+	l.failures[name] = reason
+	l.failMu.Unlock()
 	if l.mgr == nil {
 		return
 	}
 	if mc, ok := l.mgr.Get(name); ok {
-		mc.SetStatus(container.StatusFailed)
+		mc.SetFailure(reason)
 	}
+}
+
+// clearFailure drops a recorded load failure (on successful Load/Unload).
+func (l *Launcher) clearFailure(name string) {
+	l.failMu.Lock()
+	delete(l.failures, name)
+	l.failMu.Unlock()
 }
 
 // ContainerCount returns the number of running containers.
@@ -1197,12 +1229,15 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	if req.KeyHandle != "" {
 		l.persistentVolume[req.Name] = true
 	}
+	l.freezeMu.Lock()
 	if req.ConfigAPI != nil {
 		l.configAPI[req.Name] = req.ConfigAPI
 		l.configured[req.Name] = false
 	} else {
 		l.configured[req.Name] = true
 	}
+	l.freezeMu.Unlock()
+	l.clearFailure(req.Name)
 	l.containerTokens[req.Name] = containerToken
 
 	// Recompute attestation.
@@ -1315,8 +1350,11 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	delete(l.volumeEncryption, name)
 	delete(l.persistentVolume, name)
 	delete(l.oidExts, name)
+	l.freezeMu.Lock()
 	delete(l.configAPI, name)
 	delete(l.configured, name)
+	l.freezeMu.Unlock()
+	l.clearFailure(name)
 	delete(l.containerTokens, name)
 
 	// Garbage-collect the image if no other loaded container references it.
@@ -1633,22 +1671,30 @@ func (l *Launcher) TPMEvents() []tpm.Event {
 }
 
 // StatusReport returns a summary of all containers and their health.
+//
+// Deliberately does NOT take l.mu: Load holds it across a multi-minute
+// image import, and the status endpoint blocking for that long made the
+// control plane read the enclave as unreachable. The container list and
+// the freeze/failure maps each have their own locks.
 func (l *Launcher) StatusReport() []ContainerStatus {
 	mgr := l.mgr
 	if mgr == nil {
 		return nil
 	}
 	containers := mgr.List()
-	// Read the per-container freeze maps under the lock so the report can tell
-	// the control plane which containers are still behind the configure gate.
-	l.mu.RLock()
-	defer l.mu.RUnlock()
+	l.freezeMu.RLock()
+	defer l.freezeMu.RUnlock()
+	l.failMu.Lock()
+	defer l.failMu.Unlock()
+	seen := make(map[string]bool, len(containers))
 	result := make([]ContainerStatus, 0, len(containers))
 	for _, mc := range containers {
+		seen[mc.Name] = true
 		cs := ContainerStatus{
 			Name:           mc.Name,
 			Image:          mc.Spec.Image,
 			Status:         string(mc.GetStatus()),
+			Error:          mc.GetFailure(),
 			AwaitingConfig: l.configAPI[mc.Name] != nil && !l.configured[mc.Name],
 		}
 		progress := mc.GetPullProgress()
@@ -1660,6 +1706,19 @@ func (l *Launcher) StatusReport() []ContainerStatus {
 		}
 		result = append(result, cs)
 	}
+	// A failed pull removes the containerd stub, so the container would
+	// otherwise vanish from this report and the control plane would loop
+	// on blind auto-redeploys. Surface a synthetic failed entry with the
+	// recorded reason instead.
+	for name, reason := range l.failures {
+		if !seen[name] {
+			result = append(result, ContainerStatus{
+				Name:   name,
+				Status: string(container.StatusFailed),
+				Error:  reason,
+			})
+		}
+	}
 	return result
 }
 
@@ -1669,6 +1728,10 @@ type ContainerStatus struct {
 	Image        string                  `json:"image"`
 	Status       string                  `json:"status"`
 	PullProgress *container.PullProgress `json:"pull_progress,omitempty"`
+	// Error carries the load-failure reason when Status is "failed" —
+	// prod enclaves expose no journal, so this is the operator's only
+	// error channel.
+	Error string `json:"error,omitempty"`
 	// AwaitingConfig is true when the container declares a configure gate and
 	// has not yet been configured (the freeze gate returns 503 for all
 	// non-configure traffic). Lets the control plane surface a "Frozen" state.
@@ -1817,8 +1880,10 @@ type FreezeState struct {
 // container. An unknown container returns the zero value (no freeze).
 func (l *Launcher) ContainerFreezeState(name string) FreezeState {
 	l.mu.RLock()
-	defer l.mu.RUnlock()
 	reason, billingFrozen := l.billingFrozen[name]
+	l.mu.RUnlock()
+	l.freezeMu.RLock()
+	defer l.freezeMu.RUnlock()
 	return FreezeState{
 		ConfigAPI:     l.configAPI[name],
 		Configured:    l.configured[name],
@@ -1882,7 +1947,9 @@ func (l *Launcher) MarkConfigured(name string) {
 	if _, ok := l.specs[name]; !ok {
 		return
 	}
+	l.freezeMu.Lock()
 	l.configured[name] = true
+	l.freezeMu.Unlock()
 }
 
 // LookupContainerByToken returns the container name that matches the

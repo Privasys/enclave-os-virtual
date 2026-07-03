@@ -731,11 +731,12 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 				zap.String("name", req.Name),
 				zap.Error(err),
 			)
-			// Mark the container failed so status queries report "failed"
-			// instead of a perpetual "pulling". Load registers a "pulling"
-			// stub before the network pull; a later failure (e.g. vault DEK
-			// reconstruction) would otherwise leave it stuck pulling forever.
-			s.launcher.MarkFailed(req.Name)
+			// Mark the container failed with the reason so status queries
+			// report "failed: <why>" instead of a perpetual "pulling" (or
+			// the container vanishing when a failed pull removed the stub).
+			// Prod enclaves expose no journal — this is the only error
+			// channel the control plane and the operator get.
+			s.launcher.MarkFailed(req.Name, err.Error())
 			return
 		}
 		// Persist for replay-on-restart only after a successful Load.

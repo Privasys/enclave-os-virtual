@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+# Strip sshd from production images. The gcp profile's
+# google-compute-engine package drags in openssh-server as a dependency
+# — AFTER the cvm-images no-sshd assertion ran on the base image — so
+# prod enclaves were shipping a running ssh.service (R14, 2026-07
+# release). The dev profile installs openssh explicitly and keeps it;
+# only a proven "production" image-profile marker triggers removal.
+profile=$(cat /etc/privasys/image-profile 2>/dev/null || echo unknown)
+if [ "$profile" = "production" ]; then
+    rm -f /usr/sbin/sshd
+    systemctl mask ssh.service ssh.socket sshd.service 2>/dev/null || true
+    echo "production profile: sshd binary removed and units masked"
+    if [ -e /usr/sbin/sshd ]; then
+        echo "FATAL: sshd still present in production image" >&2
+        exit 1
+    fi
+fi
