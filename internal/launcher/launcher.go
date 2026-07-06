@@ -1146,6 +1146,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	if req.AppId != "" {
 		runtimeEnv["PRIVASYS_APP_ID"] = req.AppId
 	}
+	// The verified image digest (hex SHA-256) — the same value attested at
+	// OID 3.2. Lets an app stamp its own measurement into artifacts it signs
+	// (e.g. the identity verifier's IVR) without a self-attestation
+	// round-trip; clients can cross-check it against the RA-TLS leaf.
+	runtimeEnv["PRIVASYS_IMAGE_DIGEST"] = hex.EncodeToString(digest)
 
 	// PaaS port contract (12-factor): the management-service allocates a
 	// unique port per app and routes Caddy -> localhost:req.Port. With host
