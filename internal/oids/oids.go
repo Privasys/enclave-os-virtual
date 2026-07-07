@@ -19,6 +19,10 @@
 //	  3.4 Container Volume Encryption
 //	  3.5 Container Model Digest (SHA-256 of AI/ML model weights)
 //	  3.6 Container App Id (apps.id, raw 16-byte UUID; MR_APP vault sealing)
+//	5.*   Hardware accelerator attestation evidence
+//	  5.1 NVIDIA GPU CC attestation evidence (carried alongside the TDX
+//	      quote; the tdx-gpu combined case). Aligned with the RA-TLS
+//	      client's OidNVIDIAGPUEvidence.
 //
 // The TDX and SGX quote OIDs are defined by Intel:
 //
@@ -102,6 +106,17 @@ var AttestationServersHash = append(append(asn1.ObjectIdentifier{}, privasysArc.
 // (allowDebugImages). The OID is absent on images that predate the
 // marker.
 var ImageProfile = append(append(asn1.ObjectIdentifier{}, privasysArc...), 2, 8)
+
+// --- Accelerator attestation OIDs (1.3.6.1.4.1.65230.5.*) ---------------
+
+// NVIDIAGPUEvidence carries the NVIDIA GPU Confidential-Computing attestation
+// evidence envelope (SPDM report + attestation cert chain + CC state; see
+// internal/gpuattest) as a SECONDARY extension alongside the primary TDX
+// quote — the "tdx-gpu" combined case. Its presence signals to a verifier
+// that the TDX REPORTDATA additionally commits to SHA-256(evidence) and that
+// the GPU report is bound to the same mode value B. Aligned byte-for-byte
+// with the RA-TLS client's OidNVIDIAGPUEvidence (1.3.6.1.4.1.65230.5.1).
+var NVIDIAGPUEvidence = append(append(asn1.ObjectIdentifier{}, privasysArc...), 5, 1)
 
 // --- Per-container OIDs (1.3.6.1.4.1.65230.3.*) -------------------------
 
