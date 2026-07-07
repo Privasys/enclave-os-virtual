@@ -263,6 +263,15 @@ type LoadRequest struct {
 	// The app's responsibility is to persist its config on the encrypted
 	// volume and to re-deliver it via this endpoint after each restart.
 	ConfigAPI *ConfigAPISpec `json:"config_api,omitempty"`
+
+	// Owners is the per-app owners team (platform OIDC subs), the
+	// TRANSITIONAL fallback for the configure-authz gate: the manager
+	// admits a configure caller whose verified sub is on this list when
+	// the token carries no per-app config role yet. Primary authz is the
+	// <audience>:app:<hex>:owner|admin role on the caller's token; this
+	// list goes away once the IdP role backfill is verified. Persisted
+	// with the registry entry like every other LoadRequest field.
+	Owners []string `json:"owners,omitempty"`
 }
 
 // reservedHostPort is the platform's own host port (the management proxy /
@@ -435,6 +444,12 @@ type Launcher struct {
 	// Guarded by freezeMu.
 	configured map[string]bool
 
+	// configOwners is the per-container owners team from the load
+	// envelope — the configure-authz gate's transitional sub-list
+	// fallback (primary authz is the per-app config role on the caller's
+	// token). Guarded by freezeMu, like configAPI.
+	configOwners map[string][]string
+
 	// freezeMu guards configAPI + configured. Always acquired AFTER l.mu
 	// when both are held (writers inside Load/Unload); Statuses takes it
 	// alone.
@@ -494,6 +509,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		oidExts:           make(map[string]map[string][]byte),
 		configAPI:         make(map[string]*ConfigAPISpec),
 		configured:        make(map[string]bool),
+		configOwners:      make(map[string][]string),
 		failures:          make(map[string]string),
 		billingFrozen:     make(map[string]string),
 		containerTokens:   make(map[string]string),
@@ -1241,6 +1257,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	} else {
 		l.configured[req.Name] = true
 	}
+	l.configOwners[req.Name] = req.Owners
 	l.freezeMu.Unlock()
 	l.clearFailure(req.Name)
 	l.containerTokens[req.Name] = containerToken
@@ -1358,6 +1375,7 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	l.freezeMu.Lock()
 	delete(l.configAPI, name)
 	delete(l.configured, name)
+	delete(l.configOwners, name)
 	l.freezeMu.Unlock()
 	l.clearFailure(name)
 	delete(l.containerTokens, name)
@@ -1879,6 +1897,12 @@ type FreezeState struct {
 	// and the manager returns 503 (BillingReason) for its traffic.
 	BillingFrozen bool
 	BillingReason string
+	// AppID and Owners feed the configure-authz gate: AppID (the platform
+	// apps.id from the load envelope) composes the per-app config role the
+	// caller's token must carry; Owners is the transitional sub-list
+	// fallback. Both come from the persisted LoadRequest.
+	AppID  string
+	Owners []string
 }
 
 // ContainerFreezeState reports the current freeze state for the given
@@ -1886,6 +1910,10 @@ type FreezeState struct {
 func (l *Launcher) ContainerFreezeState(name string) FreezeState {
 	l.mu.RLock()
 	reason, billingFrozen := l.billingFrozen[name]
+	appID := ""
+	if raw := l.appIDs[name]; len(raw) > 0 {
+		appID = hex.EncodeToString(raw) // undashed lowercase, the OID 3.6 / role encoding
+	}
 	l.mu.RUnlock()
 	l.freezeMu.RLock()
 	defer l.freezeMu.RUnlock()
@@ -1894,6 +1922,8 @@ func (l *Launcher) ContainerFreezeState(name string) FreezeState {
 		Configured:    l.configured[name],
 		BillingFrozen: billingFrozen,
 		BillingReason: reason,
+		AppID:         appID,
+		Owners:        l.configOwners[name],
 	}
 }
 

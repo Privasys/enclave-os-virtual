@@ -39,6 +39,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -391,20 +392,29 @@ func (s *Server) Start(ctx context.Context) error {
 					s.jsonError(w, http.StatusServiceUnavailable, "app paused: "+st.BillingReason)
 					return
 				}
-				if st.ConfigAPI != nil && !st.Configured {
-					if !matchesConfigAPI(st.ConfigAPI, r) {
-						w.Header().Set("Retry-After", "5")
-						s.jsonError(w, http.StatusServiceUnavailable, "container is awaiting initial configuration")
+				// Configure-authz gate: the config surface is owner/admin
+				// only, on EVERY call (not just while frozen — a
+				// reconfigure of a running app is equally privileged).
+				if st.ConfigAPI != nil && matchesConfigAPI(st.ConfigAPI, r) {
+					if err := s.authorizeConfigure(r, containerName, st); err != nil {
+						s.jsonError(w, http.StatusForbidden,
+							"configure requires the app owner or admin: "+err.Error())
 						return
 					}
-					// Wrap the writer so we can flip the flag on 2xx.
-					rw := &statusRecorder{ResponseWriter: w}
-					s.appProxy.ServeHTTP(rw, r)
-					if rw.status >= 200 && rw.status < 300 {
-						s.launcher.MarkConfigured(containerName)
-						s.log.Info("container configured (freeze lifted)",
-							zap.String("container", containerName))
+					if !st.Configured {
+						// Wrap the writer so we can flip the flag on 2xx.
+						rw := &statusRecorder{ResponseWriter: w}
+						s.appProxy.ServeHTTP(rw, r)
+						if rw.status >= 200 && rw.status < 300 {
+							s.launcher.MarkConfigured(containerName)
+							s.log.Info("container configured (freeze lifted)",
+								zap.String("container", containerName))
+						}
+						return
 					}
+				} else if st.ConfigAPI != nil && !st.Configured {
+					w.Header().Set("Retry-After", "5")
+					s.jsonError(w, http.StatusServiceUnavailable, "container is awaiting initial configuration")
 					return
 				}
 			}
@@ -1244,6 +1254,61 @@ func matchesConfigAPI(spec *launcher.ConfigAPISpec, r *http.Request) bool {
 		return false
 	}
 	return r.URL.Path == spec.Path
+}
+
+// authorizeConfigure decides whether the caller may hit the container's
+// configure surface (the configure-authz standard). Primary: the request
+// bearer must be a valid platform-issuer token whose roles include
+// <audience>:app:<app-id-hex>:owner or :admin — grants/revocations are live
+// (next token), managed by the control plane on team changes. Transitional
+// fallback: a verified sub on the load-envelope owners team (removed once
+// the IdP role backfill is verified). Legacy loads carrying neither an app
+// id nor an owners list are admitted with a warning — enforcement becomes
+// possible when the control plane redeploys them with the new envelope.
+// Everything else fails closed. Note the sealed-relay X-Privasys-Sub is
+// deliberately NOT accepted: it asserts a subject but carries no roles, and
+// configure is not a sealed-session flow (portal and CLI both present the
+// user's platform bearer).
+func (s *Server) authorizeConfigure(r *http.Request, containerName string, st launcher.FreezeState) error {
+	if st.AppID == "" && len(st.Owners) == 0 {
+		s.log.Warn("configure gate: legacy load without app id or owners team — admitting",
+			zap.String("container", containerName))
+		return nil
+	}
+	if s.verifier == nil {
+		return errors.New("no token verifier configured")
+	}
+	authz := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authz, "Bearer ") {
+		return errors.New("missing bearer token")
+	}
+	sub, roles, err := s.verifier.AuthenticateUser(strings.TrimPrefix(authz, "Bearer "))
+	if err != nil {
+		return fmt.Errorf("invalid token: %w", err)
+	}
+	if st.AppID != "" {
+		aud := s.verifier.Audience()
+		ownerRole := aud + ":app:" + st.AppID + ":owner"
+		adminRole := aud + ":app:" + st.AppID + ":admin"
+		for _, role := range roles {
+			if role == ownerRole || role == adminRole {
+				s.log.Info("configure authorized by app config role",
+					zap.String("container", containerName),
+					zap.String("sub", sub),
+					zap.String("role", role))
+				return nil
+			}
+		}
+	}
+	for _, owner := range st.Owners {
+		if owner != "" && owner == sub {
+			s.log.Warn("configure authorized by owners-list fallback (token carries no app config role yet — run the config-role backfill)",
+				zap.String("container", containerName),
+				zap.String("sub", sub))
+			return nil
+		}
+	}
+	return errors.New("token carries no owner/admin role for this app")
 }
 
 // replayRegistry re-issues launcher.Load for every entry persisted in

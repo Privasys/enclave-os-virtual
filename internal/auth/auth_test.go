@@ -183,3 +183,50 @@ func TestCheckRole_KeycloakRealmAccess(t *testing.T) {
 		t.Fatal("expected Keycloak realm_access role to match")
 	}
 }
+
+func TestCollectRoles_AllClaimPaths(t *testing.T) {
+	// The configure-authz gate reads the FULL role list (it looks for
+	// <audience>:app:<hex>:owner|admin, not a fixed platform tier), so
+	// collectRoles must surface roles from every path checkRole consults:
+	// the configured claim (map or array), the standard "roles" array, and
+	// Keycloak's realm_access.roles — de-duplicated.
+	claims := map[string]interface{}{
+		"custom": map[string]interface{}{
+			"privasys-platform:app:f555f319bfa94fc0bcae2c8c714fb31a:admin": map[string]interface{}{},
+		},
+		"roles": []interface{}{
+			"privasys-platform:monitoring",
+			"privasys-platform:app:f555f319bfa94fc0bcae2c8c714fb31a:admin", // dup
+			42, // non-string ignored
+		},
+		"realm_access": map[string]interface{}{
+			"roles": []interface{}{"realm-role"},
+		},
+	}
+	roles := collectRoles(claims, "custom")
+	want := map[string]bool{
+		"privasys-platform:app:f555f319bfa94fc0bcae2c8c714fb31a:admin": false,
+		"privasys-platform:monitoring":                                 false,
+		"realm-role":                                                   false,
+	}
+	for _, r := range roles {
+		if _, ok := want[r]; !ok {
+			t.Fatalf("unexpected role %q", r)
+		}
+		if want[r] {
+			t.Fatalf("role %q duplicated", r)
+		}
+		want[r] = true
+	}
+	for r, seen := range want {
+		if !seen {
+			t.Fatalf("role %q missing from %v", r, roles)
+		}
+	}
+}
+
+func TestCollectRoles_Empty(t *testing.T) {
+	if roles := collectRoles(map[string]interface{}{}, "roles"); len(roles) != 0 {
+		t.Fatalf("expected no roles, got %v", roles)
+	}
+}

@@ -182,8 +182,11 @@ func (v *Verifier) Authenticate(tokenStr string) (*AuthResult, error) {
 	return v.verifyOIDCToken(tokenStr)
 }
 
-// verifyOIDCToken validates a standard OIDC bearer token via JWKS.
-func (v *Verifier) verifyOIDCToken(tokenStr string) (*AuthResult, error) {
+// verifyClaims performs the full cryptographic + claim validation of an
+// OIDC bearer (header, JWKS signature, issuer, audience, expiry) and
+// returns the parsed claims. Shared by verifyOIDCToken (which additionally
+// requires a platform tier role) and AuthenticateUser (which does not).
+func (v *Verifier) verifyClaims(tokenStr string) (map[string]interface{}, error) {
 	parts := strings.SplitN(tokenStr, ".", 3)
 	if len(parts) != 3 {
 		return nil, errors.New("auth: malformed OIDC token")
@@ -245,6 +248,35 @@ func (v *Verifier) verifyOIDCToken(tokenStr string) (*AuthResult, error) {
 		}
 	}
 
+	return claims, nil
+}
+
+// AuthenticateUser validates an OIDC bearer with the same cryptographic and
+// claim checks as Authenticate but WITHOUT requiring the platform
+// manager/monitoring tier, returning the subject and the full roles list.
+// Used by the app data-plane configure gate, where authorization is a
+// per-app role (<audience>:app:<hex>:owner|admin) carried by an ordinary
+// user token rather than a platform tier.
+func (v *Verifier) AuthenticateUser(tokenStr string) (sub string, roles []string, err error) {
+	claims, err := v.verifyClaims(tokenStr)
+	if err != nil {
+		return "", nil, err
+	}
+	sub, _ = claims["sub"].(string)
+	return sub, collectRoles(claims, v.oidc.RoleClaim), nil
+}
+
+// Audience returns the expected OIDC audience — also the namespace prefix
+// of the app-scoped roles this verifier's tokens can carry.
+func (v *Verifier) Audience() string { return v.oidc.Audience }
+
+// verifyOIDCToken validates a standard OIDC bearer token via JWKS.
+func (v *Verifier) verifyOIDCToken(tokenStr string) (*AuthResult, error) {
+	claims, err := v.verifyClaims(tokenStr)
+	if err != nil {
+		return nil, err
+	}
+
 	// Determine role from token.
 	role := ""
 	if v.oidc.ManagerRole != "" && checkRole(claims, v.oidc.ManagerRole, v.oidc.RoleClaim) {
@@ -291,6 +323,54 @@ func checkAudience(claims map[string]interface{}, expected string) bool {
 		}
 	}
 	return false
+}
+
+// collectRoles gathers every role string from the same claim paths
+// checkRole consults (the configured roleClaim as map or array, the
+// standard "roles" array, and Keycloak's realm_access.roles), de-duplicated
+// in encounter order.
+func collectRoles(claims map[string]interface{}, roleClaim string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(s string) {
+		if _, dup := seen[s]; s != "" && !dup {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	if raw, ok := claims[roleClaim]; ok {
+		if roleMap, ok := raw.(map[string]interface{}); ok {
+			for name := range roleMap {
+				add(name)
+			}
+		}
+		if arr, ok := raw.([]interface{}); ok {
+			for _, r := range arr {
+				if s, ok := r.(string); ok {
+					add(s)
+				}
+			}
+		}
+	}
+	if raw, ok := claims["roles"]; ok {
+		if arr, ok := raw.([]interface{}); ok {
+			for _, r := range arr {
+				if s, ok := r.(string); ok {
+					add(s)
+				}
+			}
+		}
+	}
+	if ra, ok := claims["realm_access"].(map[string]interface{}); ok {
+		if arr, ok := ra["roles"].([]interface{}); ok {
+			for _, r := range arr {
+				if s, ok := r.(string); ok {
+					add(s)
+				}
+			}
+		}
+	}
+	return out
 }
 
 // checkRole checks multiple claim paths for the required role:
