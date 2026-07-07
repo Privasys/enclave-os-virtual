@@ -26,10 +26,21 @@
 // SHA-512( SHA-256(DER public key) || creation_time )
 //
 // where creation_time is the certificate's NotBefore value truncated to
-// 1-minute precision, formatted as the UTC string "2006-01-02T15:04Z".
-// This allows a verifier to reproduce the ReportData from the certificate
-// alone: read the public key and NotBefore, apply the same formula, and
-// compare against the quote.
+// 1-minute precision, formatted as the UTC string "2006-01-02T15:04Z"
+// (deterministic mode), or the client's ClientHello challenge nonce
+// (challenge mode). This allows a verifier to reproduce the ReportData from
+// the certificate alone: read the public key and NotBefore, apply the same
+// formula, and compare against the quote.
+//
+// When the certificate ALSO carries the NVIDIA GPU CC evidence extension
+// (OID 1.3.6.1.4.1.65230.5.1, the tdx-gpu combined case), the binding is
+// extended so the fresh quote commits to the exact GPU evidence:
+//
+// SHA-512( SHA-256(DER public key) || B || SHA-256(gpu_evidence) )
+//
+// where B is the mode value above and gpu_evidence is the raw bytes of the
+// 5.1 extension (see gpu_evidence.go, internal/gpuattest). A verifier that
+// sees the 5.1 extension MUST use this extended form.
 //
 // # Trust Model
 //
@@ -159,6 +170,13 @@ type RATLSIssuer struct {
 	// objects that are added to the certificate alongside the attestation
 	// quote. Written by the workload manager.
 	ExtensionsDir string `json:"extensions_dir,omitempty"`
+
+	// GPUEvidenceDir is where the gpu-attest daemon writes the cached NVIDIA
+	// GPU CC attestation evidence (gpu-evidence.bin). When present it is
+	// added as the OID-5.1 extension and its SHA-256 is folded into the
+	// quote REPORTDATA (plan D1). Empty ⇒ /run. Absent file ⇒ no GPU
+	// extension (byte-identical to a non-GPU cert).
+	GPUEvidenceDir string `json:"gpu_evidence_dir,omitempty"`
 
 	// attester is the hardware-specific attestation provider, created from
 	// the Backend configuration during Provision.
@@ -326,7 +344,8 @@ func (iss *RATLSIssuer) Issue(ctx context.Context, csr *x509.CertificateRequest)
 	if err != nil {
 		return nil, fmt.Errorf("ra_tls: failed to marshal CSR public key: %w", err)
 	}
-	reportData := computeReportData(pubKeyDER, []byte(creationTimeStr))
+	gpuEv, gpuSum, gpuOK := loadGPUEvidence(iss.GPUEvidenceDir)
+	reportData := computeReportData(pubKeyDER, gpuBinding([]byte(creationTimeStr), gpuSum, gpuOK))
 
 	// -- 4. Generate attestation evidence ---------------------
 	rawQuote, err := iss.attester.Quote(reportData)
@@ -359,6 +378,9 @@ func (iss *RATLSIssuer) Issue(ctx context.Context, csr *x509.CertificateRequest)
 
 	extraExts := []pkix.Extension{
 		iss.attester.CertExtension(rawQuote),
+	}
+	if gpuOK {
+		extraExts = append(extraExts, gpuExtension(gpuEv))
 	}
 
 	// Load per-hostname OID extensions from the extensions directory.
@@ -615,7 +637,8 @@ func (iss *RATLSIssuer) GetCertificate(ctx context.Context, hello *tls.ClientHel
 	if err != nil {
 		return nil, fmt.Errorf("ra_tls: failed to marshal ephemeral public key: %w", err)
 	}
-	reportData := computeReportData(pubKeyDER, nonce)
+	gpuEv, gpuSum, gpuOK := loadGPUEvidence(iss.GPUEvidenceDir)
+	reportData := computeReportData(pubKeyDER, gpuBinding(nonce, gpuSum, gpuOK))
 
 	// -- Generate attestation evidence ------------------------
 	rawQuote, err := iss.attester.Quote(reportData)
@@ -631,6 +654,9 @@ func (iss *RATLSIssuer) GetCertificate(ctx context.Context, hello *tls.ClientHel
 
 	crExtraExts := []pkix.Extension{
 		iss.attester.CertExtension(rawQuote),
+	}
+	if gpuOK {
+		crExtraExts = append(crExtraExts, gpuExtension(gpuEv))
 	}
 
 	// Load per-hostname OID extensions from the extensions directory.
@@ -755,6 +781,11 @@ func (iss *RATLSIssuer) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				return d.ArgErr()
 			}
 			iss.ExtensionsDir = d.Val()
+		case "gpu_evidence_dir":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			iss.GPUEvidenceDir = d.Val()
 		default:
 			return d.Errf("unrecognised sub-directive: %s", d.Val())
 		}
@@ -945,7 +976,8 @@ func (g *RATLSCertGetter) issueDeterministic(hello *tls.ClientHelloInfo) (*tls.C
 	}
 	creationTime := time.Now().UTC().Truncate(time.Minute)
 	creationTimeStr := creationTime.Format(reportTimeFormat)
-	reportData := computeReportData(pubKeyDER, []byte(creationTimeStr))
+	gpuEv, gpuSum, gpuOK := loadGPUEvidence(g.GPUEvidenceDir)
+	reportData := computeReportData(pubKeyDER, gpuBinding([]byte(creationTimeStr), gpuSum, gpuOK))
 
 	// Generate attestation evidence.
 	rawQuote, err := g.attester.Quote(reportData)
@@ -967,6 +999,9 @@ func (g *RATLSCertGetter) issueDeterministic(hello *tls.ClientHelloInfo) (*tls.C
 
 	extraExts := []pkix.Extension{
 		g.attester.CertExtension(rawQuote),
+	}
+	if gpuOK {
+		extraExts = append(extraExts, gpuExtension(gpuEv))
 	}
 	hostExts, err := g.loadHostnameExtensions(hello.ServerName)
 	if err != nil {
