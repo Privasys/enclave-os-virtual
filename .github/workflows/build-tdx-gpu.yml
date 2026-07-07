@@ -122,6 +122,17 @@ jobs:
             ./cmd/manager-bootstrap/
           ls -lh build/image/mkosi.extra/usr/sbin/manager-bootstrap
 
+      - name: Build gpu-attest binary (NVIDIA GPU CC evidence collector)
+        run: |
+          # Stock Go / CGO_ENABLED=0 — NVML is bound at runtime via purego,
+          # so no cgo and no NVML build dependency. Only run on the GPU image
+          # (gpu-attest.service in the image-gpu overlay).
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+            -ldflags="-s -w" \
+            -o build/image/mkosi.extra/usr/bin/gpu-attest \
+            ./cmd/gpu-attest/
+          ls -lh build/image/mkosi.extra/usr/bin/gpu-attest
+
       - name: Build Caddy with RA-TLS module
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest

@@ -212,6 +212,18 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
     "$REPO_ROOT/cmd/manager-bootstrap/"
 echo "Binary built: $EXTRA_DIR/usr/sbin/manager-bootstrap"
 
+# Step 1c: Build the gpu-attest binary (NVIDIA GPU CC attestation evidence
+# collector). Only RUN on the GPU image via gpu-attest.service (harmless on
+# the base image). Stock Go / CGO_ENABLED=0 — it binds NVML at runtime via
+# purego, so no cgo and no NVML build dependency.
+echo ""
+echo "=== Step 1c: Building gpu-attest binary ==="
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+    -ldflags="-s -w" \
+    -o "$EXTRA_DIR/usr/bin/gpu-attest" \
+    "$REPO_ROOT/cmd/gpu-attest/"
+echo "Binary built: $EXTRA_DIR/usr/bin/gpu-attest"
+
 # Step 2: Build the Caddy binary with RA-TLS module.
 echo ""
 echo "=== Step 2: Building Caddy with RA-TLS module ==="

@@ -1,0 +1,29 @@
+[Unit]
+Description=NVIDIA GPU CC attestation evidence daemon
+# Regenerates /run/gpu-evidence.{bin,sha256} (deterministic, per-UTC-day
+# window) so the RA-TLS cert issuer can bind the GPU evidence into every
+# leaf. Needs the CC GPU ready (patched modules loaded, conf-compute ready
+# state set) — that is cvm-runtime-init's job. Ordered before caddy so the
+# first issued cert already carries GPU evidence; a late start only means
+# the very first cert omits it (the daemon refreshes within --poll).
+After=cvm-runtime-init.service
+Wants=cvm-runtime-init.service
+Before=caddy.service
+
+[Service]
+Type=simple
+# --mode deterministic (default) writes the daily-window evidence to /run.
+# Non-GPU host / CC off -> Collect returns ErrUnavailable, the daemon logs
+# and retries; the issuer simply omits GPU evidence (cert byte-identical).
+ExecStart=/usr/bin/gpu-attest --daemon --out /run
+Restart=always
+RestartSec=10
+# Hardening: read-only except /run, no new privileges. NVML needs /dev/nvidia*.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run
+DeviceAllow=/dev/nvidiactl rw
+DeviceAllow=/dev/nvidia0 rw
+
+[Install]
+WantedBy=multi-user.target
