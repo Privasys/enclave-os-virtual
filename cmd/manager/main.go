@@ -250,6 +250,10 @@ func runServe(args []string) error {
 		// the EncAuth IdP: the session-relay middleware uses it to
 		// fetch the JWKS that signs silent-rebind vouchers.
 		IdpIssuer: *oidcIssuer,
+		// Settlement channel for paid attribute disclosures: reuses the
+		// fleet mgmt URL + enclave bearer (same credential as check-in).
+		MgmtBaseURL:  *rsMgmtURL,
+		EnclaveToken: *rsEnclaveToken,
 	}
 	srv := manager.New(mgrCfg, log, l, verifier)
 

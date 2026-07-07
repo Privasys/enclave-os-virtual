@@ -53,6 +53,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
+	"github.com/Privasys/enclave-os-virtual/internal/attrbilling"
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
@@ -134,6 +135,14 @@ type Config struct {
 	// FIDO2-bootstrapped sessions and silently ignores the optional
 	// `encauth` field on /__privasys/session-bootstrap.
 	IdpIssuer string
+
+	// MgmtBaseURL and EnclaveToken address the management-service and carry
+	// the enclave bearer used to settle/release paid attribute disclosures.
+	// When either is empty the runtime verifies vouchers but does not report
+	// settlement (the reservation simply expires) — dev/test, or a fleet with
+	// no attribute marketplace.
+	MgmtBaseURL  string
+	EnclaveToken string
 }
 
 // Server is the management API server.
@@ -161,6 +170,11 @@ type Server struct {
 	// SDK clients can run sealed-CBOR sessions against any container host
 	// without the container app having to implement the protocol itself.
 	appProxy *httputil.ReverseProxy
+
+	// settler reports disclosure-voucher settlement to mgmt. nil when the
+	// runtime is not configured to settle (the reservation then expires on
+	// its own).
+	settler *attrbilling.Settler
 }
 
 // New creates a new management API Server.
@@ -180,6 +194,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		verifier:     v,
 		registry:     newRegistry(cfg.RegistryPath),
 		sessionRelay: sr,
+		settler:      attrbilling.New(attrbilling.Config{MgmtBaseURL: cfg.MgmtBaseURL, EnclaveToken: cfg.EnclaveToken}, log),
 	}
 	// No plaintext app bodies through intermediaries: when the gateway
 	// terminated the public TLS leg it marks the request with
@@ -375,6 +390,13 @@ func (s *Server) Start(ctx context.Context) error {
 	dispatcher := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := hostOnly(r.Host)
 		if _, ok := s.lookupAppHost(host); ok {
+			// Strip any client-supplied trusted voucher headers before the
+			// app can see them: only the runtime, after verifying a voucher,
+			// is allowed to assert these — otherwise a caller could forge an
+			// authorised-claims header and bypass the app's paid gate.
+			r.Header.Del(voucherJTIHeader)
+			r.Header.Del(voucherProviderHeader)
+			r.Header.Del(voucherClaimsHeader)
 			// Freeze gate: if the container declared a config_api at
 			// load time and has not yet been configured, serve only
 			// requests matching that endpoint and return 503 for
@@ -418,7 +440,7 @@ func (s *Server) Start(ctx context.Context) error {
 					return
 				}
 			}
-			s.appProxy.ServeHTTP(w, r)
+			s.serveAppWithVoucher(w, r)
 			return
 		}
 		mux.ServeHTTP(w, r)
@@ -1215,6 +1237,69 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+// Disclosure-voucher headers. A relying party's wallet presents the signed
+// voucher on voucherHeader; after verifying it the runtime replaces that with
+// the trusted claim headers the app reads to authorise a paid disclosure. The
+// runtime strips any inbound copy of the trusted headers first (anti-spoof).
+const (
+	voucherHeader         = "X-Privasys-Voucher"
+	voucherJTIHeader      = "X-Privasys-Voucher-Jti"
+	voucherProviderHeader = "X-Privasys-Voucher-Provider"
+	voucherClaimsHeader   = "X-Privasys-Voucher-Claims"
+)
+
+// serveAppWithVoucher proxies an app request, metering it against a disclosure
+// voucher when one is presented. A request carrying voucherHeader has its
+// voucher verified against the IdP JWKS; on success the verified claims are
+// handed to the app as trusted headers and, once the app has responded, the
+// credit reservation is settled (2xx) or released (otherwise) by voucher jti.
+// A request with no voucher proxies unchanged — the app itself decides whether
+// a given operation requires one (a missing voucher simply yields no authorised
+// claims, so a paid endpoint refuses).
+func (s *Server) serveAppWithVoucher(w http.ResponseWriter, r *http.Request) {
+	tok := r.Header.Get(voucherHeader)
+	if tok == "" || s.verifier == nil {
+		s.appProxy.ServeHTTP(w, r)
+		return
+	}
+	vc, err := s.verifier.VerifyVoucher(tok)
+	if err != nil {
+		s.log.Warn("disclosure voucher rejected", zap.Error(err))
+		s.jsonError(w, http.StatusForbidden, "invalid disclosure voucher")
+		return
+	}
+	// The raw voucher never reaches the app; the verified claims do.
+	r.Header.Del(voucherHeader)
+	r.Header.Set(voucherJTIHeader, vc.JTI)
+	r.Header.Set(voucherProviderHeader, vc.Provider)
+	r.Header.Set(voucherClaimsHeader, strings.Join(vc.Claims, ","))
+
+	rw := &statusRecorder{ResponseWriter: w}
+	s.appProxy.ServeHTTP(rw, r)
+
+	// Settle on delivery, release otherwise (idempotent on jti at the ledger).
+	// Best-effort and detached: settlement must never disturb the user-visible
+	// response, and a lost call is covered by the reservation's own expiry.
+	if s.settler != nil {
+		status := rw.status
+		jti := vc.JTI
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var serr error
+			if status == 0 || (status >= 200 && status < 300) {
+				serr = s.settler.Settle(ctx, jti)
+			} else {
+				serr = s.settler.Release(ctx, jti)
+			}
+			if serr != nil {
+				s.log.Warn("attribute voucher settlement",
+					zap.String("jti", jti), zap.Int("status", status), zap.Error(serr))
+			}
+		}()
+	}
 }
 
 // statusRecorder is a minimal http.ResponseWriter wrapper used by the
