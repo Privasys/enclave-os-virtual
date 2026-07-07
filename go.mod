@@ -9,9 +9,11 @@ go 1.25.0
 require (
 	enclave-os-mini/clients/go v0.0.0
 	github.com/Privasys/enclave-vaults-client/go v0.0.0
+	github.com/containerd/containerd/api v1.8.0
 	github.com/containerd/containerd/v2 v2.0.4
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/platforms v1.0.0-rc.1
+	github.com/ebitengine/purego v0.10.1
 	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
@@ -41,7 +43,6 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/containerd/cgroups/v3 v3.0.3 // indirect
-	github.com/containerd/containerd/api v1.8.0 // indirect
 	github.com/containerd/continuity v0.4.4 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/fifo v1.1.0 // indirect
