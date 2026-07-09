@@ -1064,6 +1064,23 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 			zap.String("name", req.Name), zap.String("handle", req.RegistrySecretHandle))
 	}
 
+	// Reclaim disk BEFORE pulling: the containerd image store lives on the
+	// small persistent /data PD, images from every previously-deployed app
+	// version accumulate with no host to prune from, and a full store hangs
+	// the pull at "pulling" forever (2026-07-09 m1-tdx-france wedge). Keep the
+	// images still referenced by loaded containers plus the one about to be
+	// pulled; drop the rest. Best-effort — a running image refuses delete and
+	// is skipped, so this never breaks a live workload. (l.mu is held.)
+	keep := map[string]bool{req.Image: true}
+	for _, s := range l.specs {
+		keep[s.Image] = true
+	}
+	if n, perr := l.mgr.PruneImages(ctx, keep); perr != nil {
+		l.log.Warn("image prune before pull failed (continuing)", zap.Error(perr))
+	} else if n > 0 {
+		l.log.Info("pruned unused images before pull", zap.Int("removed", n))
+	}
+
 	// Pull image.
 	l.log.Info("pulling image",
 		zap.String("name", req.Name),

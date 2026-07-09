@@ -201,6 +201,42 @@ func (m *Manager) RemoveImage(ctx context.Context, ref string) error {
 	return nil
 }
 
+// PruneImages garbage-collects containerd images that are NOT in `keep`,
+// reclaiming disk on the (small, persistent) /data/containerd store. Enclave
+// images accumulate across every app version deployed, there is no host to
+// `ctr image prune` on, and a full store hangs the NEXT pull at "pulling"
+// forever — so the manager prunes before it pulls. `keep` is the set of
+// image refs still referenced by a registered/running container plus the
+// image about to be pulled; disk:// refs are ignored (no containerd image).
+// Best-effort: a delete failure is logged, never fatal. Returns how many were
+// removed.
+func (m *Manager) PruneImages(ctx context.Context, keep map[string]bool) (int, error) {
+	ctx = m.ctx(ctx)
+	imgs, err := m.client.ImageService().List(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list images: %w", err)
+	}
+	removed := 0
+	for _, img := range imgs {
+		if keep[img.Name] {
+			continue
+		}
+		if err := m.client.ImageService().Delete(ctx, img.Name, images.SynchronousDelete()); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				continue
+			}
+			// A still-referenced image (a running container) refuses delete —
+			// log and move on; never let GC break the deploy path.
+			m.log.Warn("prune: could not remove image",
+				zap.String("image", img.Name), zap.Error(err))
+			continue
+		}
+		m.log.Info("prune: removed unused image", zap.String("image", img.Name))
+		removed++
+	}
+	return removed, nil
+}
+
 // Pull downloads an OCI image and verifies its digest matches the manifest.
 // Returns the resolved image descriptor and the raw digest bytes.
 // Registers a pulling container in the manager so pull progress is visible
