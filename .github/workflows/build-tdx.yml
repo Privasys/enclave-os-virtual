@@ -77,7 +77,7 @@ jobs:
           # which adds tls.ClientHelloInfo.RATLSChallenge.
           # The manager binary compiles with upstream Go (fork needed at runtime),
           # but Caddy's RA-TLS module requires the fork at COMPILE time.
-          curl -sL https://github.com/Privasys/go/releases/download/privasys-v0.2.0-go1.25.8/go-ratls-privasys-v0.2.0-go1.25.8-linux-amd64.tar.gz -o /tmp/go-ratls.tar.gz
+          curl -sL https://github.com/Privasys/go/releases/download/privasys-v0.3.0-go1.26.5/go-ratls-privasys-v0.3.0-go1.26.5-linux-amd64.tar.gz -o /tmp/go-ratls.tar.gz
           sudo tar -C /usr/local -xzf /tmp/go-ratls.tar.gz
           echo "/usr/local/go-ratls/bin" >> "$GITHUB_PATH"
           /usr/local/go-ratls/bin/go version
