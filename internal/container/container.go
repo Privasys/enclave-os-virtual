@@ -208,6 +208,13 @@ func (m *Manager) RemoveImage(ctx context.Context, ref string) error {
 // forever — so the manager prunes before it pulls. `keep` is the set of
 // image refs still referenced by a registered/running container plus the
 // image about to be pulled; disk:// refs are ignored (no containerd image).
+//
+// SynchronousDelete triggers containerd's full content mark-and-sweep, so
+// this also reclaims ORPHANED blobs left by earlier killed/partial pulls
+// (not just the named image's layers) — as long as no lease still holds
+// them; leaked pull-leases carry a gc.expire label and self-expire. So this
+// one call is both the image GC and the content GC.
+//
 // Best-effort: a delete failure is logged, never fatal. Returns how many were
 // removed.
 func (m *Manager) PruneImages(ctx context.Context, keep map[string]bool) (int, error) {

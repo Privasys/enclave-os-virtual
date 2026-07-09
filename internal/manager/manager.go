@@ -196,6 +196,23 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		sessionRelay: sr,
 		settler:      attrbilling.New(attrbilling.Config{MgmtBaseURL: cfg.MgmtBaseURL, EnclaveToken: cfg.EnclaveToken}, log),
 	}
+	// Teach the launcher's image GC the FULL desired image set (every app in
+	// the registry), so a concurrent replay never prunes a sibling's cached
+	// image before that sibling loads. Without this the GC evicts an image an
+	// about-to-replay app needs and, on a full disk, the re-pull hangs forever.
+	l.SetDesiredImages(func() []string {
+		entries, err := s.registry.List()
+		if err != nil {
+			return nil
+		}
+		imgs := make([]string, 0, len(entries))
+		for _, e := range entries {
+			if e.Image != "" {
+				imgs = append(imgs, e.Image)
+			}
+		}
+		return imgs
+	})
 	// No plaintext app bodies through intermediaries: when the gateway
 	// terminated the public TLS leg it marks the request with
 	// X-Privasys-Edge: terminate (and strips any client-supplied value).

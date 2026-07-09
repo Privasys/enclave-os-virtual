@@ -486,12 +486,30 @@ type Launcher struct {
 	// Runtime state.
 	pulledImages map[string]client.Image
 
+	// desiredImages returns the image refs of EVERY app the manager intends
+	// to run (its full registry), independent of load order. The image GC
+	// (PruneImages, before each pull) must keep these, or a concurrent replay
+	// — apps load in parallel goroutines — would prune a not-yet-loaded app's
+	// cached image, forcing a re-pull that, on a full disk, hangs forever
+	// (the 2026-07-09 m1-tdx-france self-inflicted wedge). Nil = keep only
+	// currently-loaded specs (dev/test).
+	desiredImages func() []string
+
 	// readyCh is closed by Run() once containerd is connected and l.mgr
 	// is non-nil. Other components (notably the management API replay
 	// path) call WaitReady() to avoid racing into Load() with a nil mgr.
 	readyCh chan struct{}
 
 	mu sync.RWMutex
+}
+
+// SetDesiredImages wires a provider for the full set of image refs the manager
+// intends to run (its registry). Used by the image GC so a concurrent replay
+// never prunes an app's cached image before that app has loaded.
+func (l *Launcher) SetDesiredImages(fn func() []string) {
+	l.mu.Lock()
+	l.desiredImages = fn
+	l.mu.Unlock()
 }
 
 // New creates a new Launcher with the given config.
@@ -1068,12 +1086,20 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// small persistent /data PD, images from every previously-deployed app
 	// version accumulate with no host to prune from, and a full store hangs
 	// the pull at "pulling" forever (2026-07-09 m1-tdx-france wedge). Keep the
-	// images still referenced by loaded containers plus the one about to be
-	// pulled; drop the rest. Best-effort — a running image refuses delete and
-	// is skipped, so this never breaks a live workload. (l.mu is held.)
+	// image about to be pulled, every currently-loaded container's image, AND
+	// every image in the manager's registry (`desiredImages`) — the last is
+	// essential because replay loads apps CONCURRENTLY, so pruning on only the
+	// specs loaded so far would evict a sibling app's cached image mid-replay
+	// and, on a full disk, that re-pull never completes. Best-effort — a
+	// running image refuses delete and is skipped. (l.mu is held.)
 	keep := map[string]bool{req.Image: true}
 	for _, s := range l.specs {
 		keep[s.Image] = true
+	}
+	if l.desiredImages != nil {
+		for _, img := range l.desiredImages() {
+			keep[img] = true
+		}
 	}
 	if n, perr := l.mgr.PruneImages(ctx, keep); perr != nil {
 		l.log.Warn("image prune before pull failed (continuing)", zap.Error(perr))
