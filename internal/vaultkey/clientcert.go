@@ -26,8 +26,8 @@ import (
 // never mints its own identity, so the measured manager remains the sole minter
 // and the app id it stamps is trustworthy. It is the same identity minted for
 // the per-app data key.
-func MintIdentity(challenge, imageDigest, appID []byte) (*tls.Certificate, error) {
-	return mintIdentity(challenge, imageDigest, appID)
+func MintIdentity(challenge, channelBinder, imageDigest, appID []byte) (*tls.Certificate, error) {
+	return mintIdentity(challenge, channelBinder, imageDigest, appID)
 }
 
 // EncodeIdentityPEM PEM-encodes a minted identity's certificate and private key
@@ -52,14 +52,16 @@ var tdxQuoteOID = asn1.ObjectIdentifier{1, 2, 840, 113741, 1, 5, 5, 1, 6}
 // mintIdentity builds a one-shot RA-TLS client certificate bound to the
 // vault's challenge nonce:
 //
-//	ReportData = SHA-512( SHA-256(SPKI_DER) || challenge )
+//	ReportData = SHA-512( SHA-256(SPKI_DER) || challenge || channelBinder )
 //
 // (the platform-wide binding formula; the vault recomputes it in
-// verify_challenge_binding). The self-signed leaf carries the raw TDX
-// quote plus the container's image digest at OID 3.2 and (for MR_APP keys)
-// its app-id at OID 3.6, which is what the vault's Principal::Tee profile
-// pins (the enclave-upgrade + MR_APP design).
-func mintIdentity(challenge, imageDigest, appID []byte) (*tls.Certificate, error) {
+// verify_challenge_binding). channelBinder is the 32-byte RA-TLS channel binder
+// of the live vault handshake, so the quote commits to this exact TLS session
+// and a relayed client cert fails closed. It is empty only on a non-TLS-1.3
+// handshake. The self-signed leaf carries the raw TDX quote plus the container's
+// image digest at OID 3.2 and (for MR_APP keys) its app-id at OID 3.6, which is
+// what the vault's Principal::Tee profile pins (the enclave-upgrade + MR_APP design).
+func mintIdentity(challenge, channelBinder, imageDigest, appID []byte) (*tls.Certificate, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("vaultkey: generate identity key: %w", err)
@@ -70,9 +72,10 @@ func mintIdentity(challenge, imageDigest, appID []byte) (*tls.Certificate, error
 	}
 
 	spkiHash := sha256.Sum256(spki)
-	preimage := make([]byte, 0, len(spkiHash)+len(challenge))
+	preimage := make([]byte, 0, len(spkiHash)+len(challenge)+len(channelBinder))
 	preimage = append(preimage, spkiHash[:]...)
 	preimage = append(preimage, challenge...)
+	preimage = append(preimage, channelBinder...)
 	reportData := sha512.Sum512(preimage)
 
 	quote, err := tdx.GetQuote(reportData)

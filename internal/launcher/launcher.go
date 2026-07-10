@@ -2054,7 +2054,7 @@ func (l *Launcher) LookupContainerByToken(token string) string {
 // container token, so the app id stamped is the one the platform assigned to
 // that container — an app cannot mint another app's identity. This is the same
 // identity the launcher mints for the per-app data key.
-func (l *Launcher) MintVaultIdentity(name string, challenge []byte) (certPEM, keyPEM []byte, err error) {
+func (l *Launcher) MintVaultIdentity(name string, challenge, channelBinder []byte) (certPEM, keyPEM []byte, err error) {
 	l.mu.RLock()
 	digest := l.imageDigests[name]
 	appID := l.appIDs[name]
@@ -2062,7 +2062,7 @@ func (l *Launcher) MintVaultIdentity(name string, challenge []byte) (certPEM, ke
 	if len(digest) == 0 {
 		return nil, nil, fmt.Errorf("launcher: unknown container %q", name)
 	}
-	cert, err := vaultkey.MintIdentity(challenge, digest, appID)
+	cert, err := vaultkey.MintIdentity(challenge, channelBinder, digest, appID)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -1143,6 +1143,11 @@ func (s *Server) handleMintVaultIdentity(w http.ResponseWriter, r *http.Request)
 	}
 	var body struct {
 		ChallengeB64 string `json:"challenge_b64"`
+		// BinderB64 is the 32-byte RA-TLS channel binder of the caller's live
+		// vault handshake (CertificateRequestInfo.RATLSChannelBinder). Folded
+		// into the minted quote so it commits to that exact session. The vault
+		// requires it; a caller on the Privasys Go fork always has it.
+		BinderB64 string `json:"binder_b64"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		s.jsonError(w, http.StatusBadRequest, "invalid JSON body")
@@ -1153,7 +1158,15 @@ func (s *Server) handleMintVaultIdentity(w http.ResponseWriter, r *http.Request)
 		s.jsonError(w, http.StatusBadRequest, "challenge_b64 must be non-empty base64")
 		return
 	}
-	certPEM, keyPEM, err := s.launcher.MintVaultIdentity(name, challenge)
+	var channelBinder []byte
+	if body.BinderB64 != "" {
+		channelBinder, err = base64.StdEncoding.DecodeString(body.BinderB64)
+		if err != nil {
+			s.jsonError(w, http.StatusBadRequest, "binder_b64 must be valid base64")
+			return
+		}
+	}
+	certPEM, keyPEM, err := s.launcher.MintVaultIdentity(name, challenge, channelBinder)
 	if err != nil {
 		s.log.Warn("mint vault identity failed", zap.String("container", name), zap.Error(err))
 		s.jsonError(w, http.StatusInternalServerError, "failed to mint vault identity")

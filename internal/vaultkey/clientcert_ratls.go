@@ -16,6 +16,9 @@ func clientCertificateFn(imageDigest, appID []byte) (func(*tls.CertificateReques
 		if len(info.RATLSChallenge) == 0 {
 			return nil, errors.New("vaultkey: vault sent no RA-TLS challenge (bidirectional challenge-response is required)")
 		}
-		return mintIdentity(info.RATLSChallenge, imageDigest, appID)
+		// Fold the live session channel binder (TLS 1.3) into the quote so the
+		// client cert commits to this exact vault handshake (mutual channel
+		// binding). The vault recomputes it from its own key schedule.
+		return mintIdentity(info.RATLSChallenge, info.RATLSChannelBinder, imageDigest, appID)
 	}, nil
 }
