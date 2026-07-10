@@ -87,7 +87,7 @@ jobs:
 
       - name: Install Privasys Go fork
         run: |
-          curl -sL https://github.com/Privasys/go/releases/download/privasys-v0.3.0-go1.26.5/go-ratls-privasys-v0.3.0-go1.26.5-linux-amd64.tar.gz -o /tmp/go-ratls.tar.gz
+          curl -sL https://github.com/Privasys/go/releases/download/privasys-v0.4.0-go1.26.5/go-ratls-privasys-v0.4.0-go1.26.5-linux-amd64.tar.gz -o /tmp/go-ratls.tar.gz
           sudo tar -C /usr/local -xzf /tmp/go-ratls.tar.gz
           echo "/usr/local/go-ratls/bin" >> "$GITHUB_PATH"
           /usr/local/go-ratls/bin/go version
