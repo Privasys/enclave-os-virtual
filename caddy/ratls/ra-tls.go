@@ -66,11 +66,15 @@
 //   - Challenge-Response (GetCertificate path): When the client's TLS
 //     ClientHello contains a RA-TLS challenge extension (0xffbb), a fresh
 //     ephemeral certificate is generated with
-//     ReportData = SHA-512(SHA-256(pubkey) || nonce). This certificate is
-//     not cached. To read the challenge payload, build with the Privasys/go
-//     fork (https://github.com/Privasys/go/tree/ratls) and the "ratls" build
-//     tag. With standard Go the extension is detected but the payload cannot
-//     be read, so the module falls back to the deterministic certificate.
+//     ReportData = SHA-512(SHA-256(pubkey) || nonce || binder). This certificate
+//     is not cached. The 32-byte binder is the TLS session channel binder,
+//     derived from the handshake key schedule; the Privasys/go fork re-invokes
+//     GetCertificate at the TLS 1.3 Certificate-emit seam with the binder set on
+//     ClientHelloInfo, so the quote commits to this exact session (channel
+//     binding). To read the challenge payload and the binder, build with the
+//     Privasys/go fork (https://github.com/Privasys/go/tree/ratls). With standard
+//     Go the extension is detected but the payload cannot be read, so the module
+//     falls back to the deterministic certificate.
 //
 // # Private Key Sensitivity
 //
@@ -632,13 +636,25 @@ func (iss *RATLSIssuer) GetCertificate(ctx context.Context, hello *tls.ClientHel
 		return nil, fmt.Errorf("ra_tls: ephemeral key generation failed: %w", err)
 	}
 
-	// -- ReportData = SHA-512( SHA-256(pubkey) || nonce ) ------
+	// -- ReportData = SHA-512( SHA-256(pubkey) || nonce [|| binder] ) --
 	pubKeyDER, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
 	if err != nil {
 		return nil, fmt.Errorf("ra_tls: failed to marshal ephemeral public key: %w", err)
 	}
+	// RA-TLS channel binding: when the TLS 1.3 emit seam re-invokes this callback
+	// with the 32-byte session channel binder, fold it in after the nonce so the
+	// quote commits to this exact TLS session and a relayed quote fails closed. A
+	// verifier reproduces the same value from its own handshake key schedule. The
+	// binder is nil on the initial certificate selection (no key schedule yet);
+	// that certificate is only used to pick parameters and is replaced by the
+	// bound one before it is sent.
+	challengeBinding := nonce
+	channelBound := len(hello.RATLSChannelBinder) > 0
+	if channelBound {
+		challengeBinding = append(append([]byte(nil), nonce...), hello.RATLSChannelBinder...)
+	}
 	gpuEv, gpuSum, gpuOK := loadGPUEvidence(iss.GPUEvidenceDir)
-	reportData := computeReportData(pubKeyDER, gpuBinding(nonce, gpuSum, gpuOK))
+	reportData := computeReportData(pubKeyDER, gpuBinding(challengeBinding, gpuSum, gpuOK))
 
 	// -- Generate attestation evidence ------------------------
 	rawQuote, err := iss.attester.Quote(reportData)
@@ -736,7 +752,8 @@ func (iss *RATLSIssuer) GetCertificate(ctx context.Context, hello *tls.ClientHel
 	iss.logger.Info("RA-TLS challenge-response certificate generated",
 		zap.String("backend", iss.attester.Name()),
 		zap.String("server_name", hello.ServerName),
-		zap.Int("quote_bytes", len(rawQuote)))
+		zap.Int("quote_bytes", len(rawQuote)),
+		zap.Bool("channel_bound", channelBound))
 
 	return &tlsCert, nil
 }
