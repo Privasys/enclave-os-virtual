@@ -72,7 +72,7 @@
 //     GetCertificate at the TLS 1.3 Certificate-emit seam with the binder set on
 //     ClientHelloInfo, so the quote commits to this exact session (channel
 //     binding). To read the challenge payload and the binder, build with the
-//     Privasys/go fork (https://github.com/Privasys/go/tree/ratls). With standard
+//     Privasys/go fork (https://github.com/Privasys/go/tree/release-branch.go1.26). With standard
 //     Go the extension is detected but the payload cannot be read, so the module
 //     falls back to the deterministic certificate.
 //
@@ -853,14 +853,14 @@ func (iss *RATLSIssuer) encodeChainPEM(leafDER []byte) []byte {
 
 // ratlsExtType is the TLS extension type for the RA-TLS challenge extension.
 // This matches the temporary value (0xffbb) used in the Privasys/go fork
-// (https://github.com/Privasys/go/tree/ratls).
+// (https://github.com/Privasys/go/tree/release-branch.go1.26).
 // Replace with the IANA-assigned value once allocated.
 const ratlsExtType uint16 = 0xffbb // TODO: replace with IANA assignment
 
 // extractRATLSChallenge inspects the ClientHello for a RA-TLS challenge extension.
 //
 // This implementation requires the Privasys/go fork
-// (https://github.com/Privasys/go/tree/ratls) which adds
+// (https://github.com/Privasys/go/tree/release-branch.go1.26) which adds
 // tls.ClientHelloInfo.RATLSChallenge — the raw challenge bytes from the
 // RA-TLS extension (0xffbb). The fork validates the payload length (8–64
 // bytes) during handshake parsing; if malformed, the handshake is rejected
