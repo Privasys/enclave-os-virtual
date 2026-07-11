@@ -51,6 +51,14 @@ type Config struct {
 	// feed; only GPU samples will be sent.
 	ProxyBaseURL string
 
+	// ProxyURLFunc, when set, resolves the proxy URL fresh for every
+	// sample and takes precedence over ProxyBaseURL. Needed since
+	// per-container network namespaces (#45): the AI container's :8080
+	// lives at its private bridge IP, which changes across (re)deploys —
+	// the launcher rewrites the localhost flag to the live container
+	// address. An empty return skips the proxy feed for that sample.
+	ProxyURLFunc func() string
+
 	// Interval is the wall-clock interval between samples. Defaults
 	// to 30s when zero.
 	Interval time.Duration
@@ -167,7 +175,7 @@ func (s *Sender) snapshot(ctx context.Context) runtimeStatus {
 		out.GPUTemperatureC = &t
 		out.GPUPowerW = &p
 	}
-	if s.cfg.ProxyBaseURL != "" {
+	if s.proxyBase() != "" {
 		if ps, ok := s.sampleProxy(ctx); ok {
 			out.LoadedModel = ps.Model
 			out.LoadedModelDigest = ps.ModelDigest
@@ -223,11 +231,19 @@ type proxyStatus struct {
 	Message     *string  `json:"message,omitempty"`
 }
 
+// proxyBase resolves the proxy URL for this sample (see Config.ProxyURLFunc).
+func (s *Sender) proxyBase() string {
+	if s.cfg.ProxyURLFunc != nil {
+		return s.cfg.ProxyURLFunc()
+	}
+	return s.cfg.ProxyBaseURL
+}
+
 // sampleProxy fetches the local confidential-ai model state. Failures
 // (proxy down, no model loaded yet) yield ok=false; the manager keeps
 // pushing GPU-only deltas until the proxy comes back.
 func (s *Sender) sampleProxy(ctx context.Context) (proxyStatus, bool) {
-	url := strings.TrimRight(s.cfg.ProxyBaseURL, "/") + "/v1/models/status"
+	url := strings.TrimRight(s.proxyBase(), "/") + "/v1/models/status"
 	cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(cctx, http.MethodGet, url, nil)

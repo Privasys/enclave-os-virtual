@@ -31,6 +31,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"sort"
@@ -742,6 +743,54 @@ func (l *Launcher) ContainerCount() int {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return len(l.specs)
+}
+
+// ResolveAIProxyURL resolves the runtime-status proxy feed URL under
+// per-container network namespaces (#45): a raw URL addressing
+// localhost/127.0.0.1 is rewritten to the AI container's private bridge IP
+// (the in-container port — the fixed :8080 Go proxy — is kept as-is).
+// Container preference: a running "confidential-ai*" by name, else the single
+// running container (GPU enclaves are effectively dedicated). Returns "" when
+// nothing is resolvable yet (containerd still starting, no container up, or
+// several ambiguous candidates) — the sender skips the proxy feed for that
+// sample and retries on the next tick. Non-loopback URLs pass through
+// untouched (explicit operator override).
+func (l *Launcher) ResolveAIProxyURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || raw == "" {
+		return raw
+	}
+	host := u.Hostname()
+	if host != "localhost" && host != "127.0.0.1" {
+		return raw
+	}
+	if l.mgr == nil {
+		return ""
+	}
+	var candidates []*container.ManagedContainer
+	for _, mc := range l.mgr.List() {
+		if mc.Status == container.StatusRunning && mc.IP != "" {
+			candidates = append(candidates, mc)
+		}
+	}
+	var chosen *container.ManagedContainer
+	for _, mc := range candidates {
+		if strings.HasPrefix(mc.Name, "confidential-ai") {
+			chosen = mc
+			break
+		}
+	}
+	if chosen == nil && len(candidates) == 1 {
+		chosen = candidates[0]
+	}
+	if chosen == nil {
+		return ""
+	}
+	port := u.Port()
+	if port == "" {
+		port = "8080"
+	}
+	return fmt.Sprintf("%s://%s:%s", u.Scheme, chosen.IP, port)
 }
 
 // CACertPath returns the configured path to the intermediary CA certificate.

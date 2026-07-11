@@ -291,6 +291,11 @@ func runServe(args []string) error {
 		EnclaveToken: *rsEnclaveToken,
 		EnclaveID:    *rsEnclaveID,
 		ProxyBaseURL: *rsProxyURL,
+		// Per-container netns (#45): the AI container's fixed :8080 proxy
+		// lives at its private bridge IP, resolved fresh per sample so the
+		// feed follows redeploys. Loopback flag values are rewritten; an
+		// explicit non-loopback --proxy-url passes through.
+		ProxyURLFunc: func() string { return l.ResolveAIProxyURL(*rsProxyURL) },
 		Interval:     *rsInterval,
 	}, log); sender != nil {
 		g.Go(func() error {
