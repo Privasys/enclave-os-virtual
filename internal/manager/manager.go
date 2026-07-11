@@ -56,6 +56,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/attrbilling"
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
+	"github.com/Privasys/enclave-os-virtual/internal/network"
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
 )
 
@@ -549,11 +550,14 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 // of container B.
 func (s *Server) requireContainerSelf(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Loopback only \u2014 the only legitimate caller is a container
-		// in the same host network namespace.
+		// In-enclave callers only. Since #45 each container has its own netns
+		// and reaches the manager from its private bridge IP (10.88.x.y), so we
+		// accept loopback OR the bridge subnet. The manager-port iptables guard
+		// blocks the external interface, and the PRIVASYS_CONTAINER_TOKEN below
+		// is the actual identity binding \u2014 this source check is defence in depth.
 		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil || !isLoopbackHost(host) {
-			s.log.Debug("requireContainerSelf: non-loopback caller rejected",
+		if err != nil || !isInEnclaveCaller(host) {
+			s.log.Debug("requireContainerSelf: out-of-enclave caller rejected",
 				zap.String("remote", r.RemoteAddr))
 			s.jsonError(w, http.StatusForbidden, "this endpoint is reachable only from inside the enclave")
 			return
@@ -594,6 +598,19 @@ func isLoopbackHost(host string) bool {
 		return host == "localhost"
 	}
 	return ip.IsLoopback()
+}
+
+// bridgeSubnet is the container network's CIDR, parsed once.
+var _, bridgeSubnet, _ = net.ParseCIDR(network.Subnet)
+
+// isInEnclaveCaller returns true for a loopback caller (the host) or one from
+// the container bridge subnet (a co-resident container in its own netns, #45).
+func isInEnclaveCaller(host string) bool {
+	if isLoopbackHost(host) {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && bridgeSubnet != nil && bridgeSubnet.Contains(ip)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {

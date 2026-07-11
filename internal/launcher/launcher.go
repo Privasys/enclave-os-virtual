@@ -45,6 +45,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/extensions"
 	"github.com/Privasys/enclave-os-virtual/internal/manifest"
 	"github.com/Privasys/enclave-os-virtual/internal/merkle"
+	"github.com/Privasys/enclave-os-virtual/internal/network"
 	"github.com/Privasys/enclave-os-virtual/internal/oids"
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
 	"github.com/Privasys/enclave-os-virtual/internal/tpm"
@@ -321,10 +322,30 @@ func (r *LoadRequest) toContainerSpec() manifest.Container {
 		Volumes:     r.Volumes,
 		Command:     r.Command,
 		Internal:    r.Internal,
-		HealthCheck: r.HealthCheck,
+		HealthCheck: rewriteHealthCheckHost(r.HealthCheck, r.Port),
 		Storage:     r.Storage,
 		Devices:     r.Devices,
 	}
+}
+
+// rewriteHealthCheckHost retargets a control-plane health check (sent as
+// localhost:<port>, from the host-networking era) at the container's private
+// bridge IP (#45). The manager probes from the host netns, so it must dial
+// <container-ip>:<port>, not localhost. Returns a copy; nil in → nil out.
+func rewriteHealthCheckHost(hc *manifest.HealthCheck, port int) *manifest.HealthCheck {
+	if hc == nil || port <= 0 {
+		return hc
+	}
+	ip := network.ContainerIP(port)
+	repl := func(s string) string {
+		s = strings.ReplaceAll(s, "127.0.0.1", ip)
+		s = strings.ReplaceAll(s, "localhost", ip)
+		return s
+	}
+	out := *hc
+	out.HTTP = repl(out.HTTP)
+	out.TCP = repl(out.TCP)
+	return &out
 }
 
 // parseAppID decodes a UUID string (with or without hyphens) into its raw 16
@@ -1200,6 +1221,13 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	}
 	runtimeEnv["PRIVASYS_CONTAINER_NAME"] = req.Name
 	runtimeEnv["PRIVASYS_CONTAINER_TOKEN"] = containerToken
+	// Manager callback URL. Under the per-container netns model (#45) the
+	// container can no longer reach the manager at 127.0.0.1:9443 (that is now
+	// its OWN private loopback); it reaches it at the bridge gateway. The SDK
+	// reads PRIVASYS_MANAGER_URL and MUST be rebuilt into app images before this
+	// runtime ships — an image with the old hard-coded 127.0.0.1:9443 fallback
+	// will not reach the manager once it is in its own netns.
+	runtimeEnv["PRIVASYS_MANAGER_URL"] = network.ManagerURL()
 	// The platform-assigned app id (apps.id). Apps that authenticate to the vault
 	// as themselves use it to ask the platform to delegate key ops to their TEE.
 	if req.AppId != "" {
@@ -1321,7 +1349,10 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				l.log.Warn("failed to write container extensions",
 					zap.String("name", req.Name), zap.Error(err))
 			}
-			containerUpstream := fmt.Sprintf("localhost:%d", req.Port)
+			// The container now lives in its own netns on a private bridge IP
+			// (bugs-and-fixes #45), so the manager reverse-proxies to
+			// <container-ip>:<port> instead of localhost:<port>.
+			containerUpstream := fmt.Sprintf("%s:%d", network.ContainerIP(req.Port), req.Port)
 			// Route external TLS-terminated traffic to the manager so the
 			// session-relay middleware can intercept sealed-CBOR requests
 			// before they reach the container. Falls back to the container
@@ -1332,7 +1363,9 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				if mgmtPort == "" {
 					mgmtPort = "9443"
 				}
-				caddyUpstream = "localhost:" + mgmtPort
+				// The manager now binds on the bridge gateway (not localhost),
+				// so Caddy (host netns) reaches it at <gateway>:<mgmtPort>.
+				caddyUpstream = network.GatewayIP + ":" + mgmtPort
 				l.appHostRouter.RegisterAppHost(spec.Hostname, containerUpstream)
 				// Resolve THIS app's session-relay identity key (enc_pub) and
 				// install it under its Host, reusing the app's vault addressing +
@@ -1910,7 +1943,9 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string, port
 		}
 	}
 
-	upstream := fmt.Sprintf("http://127.0.0.1:%d", port)
+	// The RA-TLS Caddy module fetches /.well-known/attestation-extensions from
+	// this upstream; the container is on its private bridge IP now (#45).
+	upstream := fmt.Sprintf("http://%s:%d", network.ContainerIP(port), port)
 	return extensions.Write(l.cfg.ExtensionsDir, hostname, exts, upstream)
 }
 

@@ -36,6 +36,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Privasys/enclave-os-virtual/internal/manifest"
+	"github.com/Privasys/enclave-os-virtual/internal/network"
 )
 
 const (
@@ -93,6 +94,10 @@ type ManagedContainer struct {
 	ImageDigest []byte // resolved SHA-256 digest of the pulled image
 	Container   client.Container
 	Task        client.Task
+	// IP is the container's private bridge address (10.88.x.y), assigned by
+	// network.Attach. Empty for internal-only containers (no port). Callers
+	// dial the container at IP:Spec.Port instead of the old localhost:Port.
+	IP string
 
 	pullProgress PullProgress
 	failure      string // why Status is failed, for status reports
@@ -464,9 +469,15 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	// Build OCI spec options.
 	opts := []oci.SpecOpts{
 		oci.WithImageConfig(img),
-		// Host networking — all containers share the host network namespace.
-		// In a TEE the VM itself is the security boundary, so this is safe.
-		oci.WithHostNamespace(specs.NetworkNamespace),
+		// Per-container network namespace (bugs-and-fixes #45): omitting the
+		// host-netns opt leaves the OCI default network namespace (empty path),
+		// so runc creates a FRESH netns per container — private loopback, no
+		// shared 127.0.0.1. Connectivity is wired after task-create, before
+		// start, by network.Attach (veth into the privasys0 bridge). Previously
+		// this was oci.WithHostNamespace(specs.NetworkNamespace), justified by
+		// "the TEE VM is the boundary" — true for ONE workload, but the platform
+		// co-locates mutually-untrusting apps, so each needs its own netns.
+		//
 		// Bind-mount the host's resolv.conf so DNS works inside the container.
 		// Using WithMounts directly rather than WithHostResolvconf, because the
 		// nvidia-container-runtime rewrites the spec and may drop higher-level
@@ -660,7 +671,25 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		return nil, fmt.Errorf("container: failed to create task for %s: %w", spec.Name, err)
 	}
 
+	// Wire the container's fresh netns to the bridge on its deterministic IP
+	// (bugs-and-fixes #45). Done after task-create (the netns now exists,
+	// identified by the init PID) and before start, so the process comes up
+	// with eth0 + default route + egress already in place. An internal-only
+	// container (no external port) still gets an isolated netns; it just has no
+	// routable service, which is the desired isolation.
+	var containerIP string
+	if spec.Port > 0 {
+		ip, nerr := network.Attach(m.log, int(task.Pid()), spec.Port)
+		if nerr != nil {
+			_, _ = task.Delete(ctx)
+			_ = container.Delete(ctx)
+			return nil, fmt.Errorf("container: failed to attach network for %s: %w", spec.Name, nerr)
+		}
+		containerIP = ip
+	}
+
 	if err := task.Start(ctx); err != nil {
+		network.Detach(spec.Port)
 		_, _ = task.Delete(ctx)
 		_ = container.Delete(ctx)
 		return nil, fmt.Errorf("container: failed to start task for %s: %w", spec.Name, err)
@@ -672,6 +701,7 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		Status:    StatusRunning,
 		Container: container,
 		Task:      task,
+		IP:        containerIP,
 	}
 
 	m.mu.Lock()
@@ -682,6 +712,7 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		existing.Status = StatusRunning
 		existing.Container = container
 		existing.Task = task
+		existing.IP = containerIP
 		existing.mu.Unlock()
 		mc = existing
 	} else {
@@ -763,6 +794,13 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 
 	if mc.Container != nil {
 		_ = mc.Container.Delete(ctx, client.WithSnapshotCleanup)
+	}
+
+	// Tear down the container's veth (bugs-and-fixes #45). The netns itself is
+	// reaped with the task; this frees the host-side interface + its bridge
+	// port so a later reload on the same port re-attaches cleanly.
+	if mc.Spec.Port > 0 {
+		network.Detach(mc.Spec.Port)
 	}
 
 	mc.SetStatus(StatusStopped)

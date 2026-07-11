@@ -31,6 +31,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/manager"
+	"github.com/Privasys/enclave-os-virtual/internal/network"
 	"github.com/Privasys/enclave-os-virtual/internal/runtimestatus"
 )
 
@@ -236,11 +237,21 @@ func runServe(args []string) error {
 		ToolSpecEnclaveToken: *rsEnclaveToken,
 		LoadToken:            *loadToken,
 	}
+	// Bring up the container bridge + egress NAT + manager-port guard before
+	// any container is loaded or the management API binds (#45). Fatal on
+	// failure: without it containers would come up with no connectivity.
+	if err := network.Setup(log); err != nil {
+		log.Fatal("failed to set up container network", zap.Error(err))
+	}
+
 	l := launcher.New(launcherCfg, log)
 
-	// Configure management API server (plain HTTP, localhost only).
+	// Configure management API server (plain HTTP). Binds on all interfaces so
+	// one listener serves both the host (Caddy/probes at localhost:9443) and
+	// containers (at the bridge gateway); network.Setup's iptables guard drops
+	// :9443 on the external interface (#45).
 	mgrCfg := manager.Config{
-		Addr:             "localhost:9443",
+		Addr:             ":9443",
 		PlatformHostname: platformHostname,
 		// /data is the per-VM LUKS-encrypted volume — keep the registry
 		// here (entries may carry Env values flagged secret; volume keys
