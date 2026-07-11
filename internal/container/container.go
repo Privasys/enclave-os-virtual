@@ -478,13 +478,16 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		// "the TEE VM is the boundary" — true for ONE workload, but the platform
 		// co-locates mutually-untrusting apps, so each needs its own netns.
 		//
-		// Bind-mount the host's resolv.conf so DNS works inside the container.
-		// Using WithMounts directly rather than WithHostResolvconf, because the
-		// nvidia-container-runtime rewrites the spec and may drop higher-level
-		// OCI options.
+		// Bind-mount a resolv.conf with REAL upstream nameservers so DNS works
+		// inside the container. The host's /etc/resolv.conf points at
+		// systemd-resolved's 127.0.0.53 stub, which inside a private netns is
+		// the container's own (empty) loopback — network.Setup materialises
+		// the upstreams into ResolvConfPath instead. Using WithMounts directly
+		// rather than WithHostResolvconf, because the nvidia-container-runtime
+		// rewrites the spec and may drop higher-level OCI options.
 		oci.WithMounts([]specs.Mount{{
 			Destination: "/etc/resolv.conf",
-			Source:      "/etc/resolv.conf",
+			Source:      network.ResolvConfPath,
 			Type:        "bind",
 			Options:     []string{"rbind", "ro"},
 		}}),

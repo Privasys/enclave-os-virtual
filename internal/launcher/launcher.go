@@ -630,7 +630,10 @@ func (l *Launcher) Run(ctx context.Context) error {
 		if raw, err := os.ReadFile(l.cfg.DEKOriginFile); err == nil {
 			origin := strings.TrimSpace(string(raw))
 			switch {
-			case strings.HasPrefix(origin, "byok:"):
+			case strings.HasPrefix(origin, "byok:"), strings.HasPrefix(origin, "vault:"):
+				// byok:<sha256(passphrase)> (metadata passphrase) or
+				// vault:<handle> (constellation-held manager /data DEK — the
+				// enclave pre-approval flow).
 				l.dekOrigin = origin
 				l.log.Info("LUKS DEK origin loaded (OID 2.6)",
 					zap.String("dek_origin", origin))
