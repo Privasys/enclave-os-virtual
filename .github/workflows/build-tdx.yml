@@ -105,8 +105,13 @@ jobs:
 
       - name: Build manager-bootstrap binary (Phase B first-boot helper)
         run: |
+          # -tags ratls: the `dek` subcommand resolves the vault-backed
+          # /data DEK through internal/vaultkey (same fork requirement as
+          # the manager). Without it the stub clientcert_std.go fails every
+          # pre-approved first boot at LUKS time.
           mkdir -p build/image/mkosi.extra/usr/sbin
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+            -tags ratls \
             -ldflags="-s -w" \
             -o build/image/mkosi.extra/usr/sbin/manager-bootstrap \
             ./cmd/manager-bootstrap/
