@@ -100,10 +100,11 @@ func Setup(log *zap.Logger) error {
 	if err := os.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1\n"), 0o644); err != nil {
 		return fmt.Errorf("network: ip_forward: %w", err)
 	}
-	// Egress masquerade (check-then-add so it is idempotent).
-	nat := []string{"-t", "nat", "POSTROUTING", "-s", Subnet, "!", "-o", BridgeName, "-j", "MASQUERADE"}
-	if exec.Command("iptables", append([]string{"-C"}, nat...)...).Run() != nil {
-		if err := run("iptables", append([]string{"-A"}, nat...)...); err != nil {
+	// Egress masquerade (check-then-add so it is idempotent). The table flag
+	// must precede the command: iptables parses `-A <chain>` as one unit.
+	nat := []string{"POSTROUTING", "-s", Subnet, "!", "-o", BridgeName, "-j", "MASQUERADE"}
+	if exec.Command("iptables", append([]string{"-t", "nat", "-C"}, nat...)...).Run() != nil {
+		if err := run("iptables", append([]string{"-t", "nat", "-A"}, nat...)...); err != nil {
 			return fmt.Errorf("network: masquerade: %w", err)
 		}
 	}

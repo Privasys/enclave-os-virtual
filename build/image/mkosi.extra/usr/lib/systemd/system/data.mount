@@ -16,7 +16,14 @@ Before=umount.target
 What=/dev/mapper/data-crypt
 Where=/data
 Type=ext4
-Options=defaults,noatime
+# x-systemd.device-timeout: the first-boot LUKS2 + dm-integrity format
+# writes integrity tags across the whole PD (~1min per 13GB), and the
+# vault-backed DEK path adds network round-trips before luksOpen. The
+# default 90s device timeout failed data.mount mid-format on a 32GB PD
+# while luks-data.service was still (successfully) running. Bounded, not
+# infinite, so a genuinely failed luks-setup still lets the boot reach
+# multi-user (and SSH) for debugging. PDs beyond ~200GB need a bump.
+Options=defaults,noatime,x-systemd.device-timeout=15min
 
 [Install]
 WantedBy=remote-fs.target
