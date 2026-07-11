@@ -113,11 +113,19 @@ func Setup(log *zap.Logger) error {
 	// on one listener. Close it on the external interface: accept :9443 only
 	// from loopback and the bridge, drop the rest. Keeps host-side callers
 	// unchanged while the manager is no longer exposed on the VM's public IP.
-	guard := []string{"INPUT", "-p", "tcp", "--dport", fmt.Sprintf("%d", ManagerPort),
-		"!", "-i", "lo", "!", "-i", BridgeName, "-j", "DROP"}
-	if exec.Command("iptables", append([]string{"-C"}, guard...)...).Run() != nil {
-		if err := run("iptables", append([]string{"-A"}, guard...)...); err != nil {
-			return fmt.Errorf("network: manager-port guard: %w", err)
+	// Three rules because iptables rejects two -i matches in one rule; the
+	// ACCEPTs must precede the DROP, which appending in order guarantees.
+	port := fmt.Sprintf("%d", ManagerPort)
+	guards := [][]string{
+		{"INPUT", "-p", "tcp", "--dport", port, "-i", "lo", "-j", "ACCEPT"},
+		{"INPUT", "-p", "tcp", "--dport", port, "-i", BridgeName, "-j", "ACCEPT"},
+		{"INPUT", "-p", "tcp", "--dport", port, "-j", "DROP"},
+	}
+	for _, g := range guards {
+		if exec.Command("iptables", append([]string{"-C"}, g...)...).Run() != nil {
+			if err := run("iptables", append([]string{"-A"}, g...)...); err != nil {
+				return fmt.Errorf("network: manager-port guard: %w", err)
+			}
 		}
 	}
 	log.Info("container network ready",

@@ -17,3 +17,21 @@ if [ "$profile" = "production" ]; then
         exit 1
     fi
 fi
+
+# Extend the start-job wait for the LUKS data device. The first-boot
+# LUKS2 + dm-integrity format (~1min per 13GB of PD) and the vault-backed
+# DEK resolution both run inside luks-data.service BEFORE
+# /dev/mapper/data-crypt exists; systemd's default 90s device timeout
+# failed data.mount mid-format on a 32GB PD. A native mount unit cannot
+# carry x-systemd.device-timeout (that is an fstab-generator option), so
+# the drop-in goes on the device unit itself. Created here because the
+# escaped unit name contains a backslash, which a Windows checkout of
+# mkosi.extra cannot represent as a filename. Bounded, not infinite, so a
+# genuinely failed luks-setup still lets the boot reach multi-user (and
+# SSH on dev) for debugging. PDs beyond ~200GB need a bump.
+mkdir -p '/usr/lib/systemd/system/dev-mapper-data\x2dcrypt.device.d'
+cat > '/usr/lib/systemd/system/dev-mapper-data\x2dcrypt.device.d/50-luks-format-timeout.conf' <<'EOF'
+[Unit]
+JobRunningTimeoutSec=15min
+EOF
+echo "data-crypt device timeout drop-in installed"
