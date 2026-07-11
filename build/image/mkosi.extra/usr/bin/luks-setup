@@ -3,15 +3,23 @@
 #
 # Run by luks-data.service before data.mount.
 #
-# Key source: BYOK only. The operator must set the LUKS passphrase as an
-# instance metadata attribute named `luks-passphrase` (GCP), an instance
-# tag of the same name (AWS IMDSv2), or an Azure compute tag of the same
-# name. The script fails hard if no passphrase is found, on every boot.
+# Key sources, in order:
 #
+#   vault — the default for pre-approved enclaves. `manager-bootstrap dek`
+#     resolves the DEK from the Enclave Vaults constellation: on first boot
+#     it redeems the `bootstrap-token` instance metadata (single-use,
+#     quote-gated) and creates the key as k-of-n Shamir shares; on reboots
+#     it reconstructs from the constellation, located via a non-secret
+#     LUKS2 header token that travels with the disk. The DEK never exists
+#     outside TEE memory and no key material sits in instance metadata.
+#
+#   byok — legacy. The operator sets the LUKS passphrase as an instance
+#     metadata attribute named `luks-passphrase` (GCP), an instance tag of
+#     the same name (AWS IMDSv2), or an Azure compute tag of the same name.
+#
+# The script fails hard when neither source yields a key, on every boot.
 # Auto-generation is intentionally not supported: a random key kept only
-# in RAM bricks the partition on the next reboot. Once Enclave Vaults
-# ships we will add a Vaults-backed flow that generates a key, seals it
-# to the VM's attestation evidence, and retrieves it on restart.
+# in RAM bricks the partition on the next reboot.
 #
 # On first boot the partition is formatted with LUKS2 + ext4 with
 # per-sector dm-integrity tags (AES-XTS + HMAC-SHA256). On subsequent
@@ -25,8 +33,9 @@
 # throughput. Do not switch to aes-gcm-random without a benchmark.
 #
 # Outputs:
-#   /run/luks/dek-origin   key origin string for OID 2.6: "byok:<fingerprint>"
-#   /run/luks/key-source   "byok"
+#   /run/luks/dek-origin   key origin string for OID 2.6:
+#                          "vault:<handle>" or "byok:<fingerprint>"
+#   /run/luks/key-source   "vault" or "byok"
 #   /dev/mapper/data-crypt the unlocked block device
 
 set -euo pipefail
@@ -87,7 +96,7 @@ case "$PART" in
         ;;
 esac
 
-# ── 1. Fetch BYOK passphrase from instance metadata ──────────────────────
+# ── 1. Resolve the DEK ───────────────────────────────────────────────────
 #
 # luks-data.service is ordered After=network-online.target, but DNS and
 # metadata DHCP options can still take a few hundred ms to settle after
@@ -98,25 +107,48 @@ esac
 # shellcheck disable=SC1091
 source /usr/lib/enclave-os/provisioning-secret.sh
 
-PASSPHRASE=""
-if PASSPHRASE=$(read_provisioning_secret_retry luks-passphrase 5 2); then
-    :
-fi
+# 1a. Vault-backed (pre-approved enclaves). Surface the bootstrap token to
+# the binary through the multi-cloud secret library (it falls back to GCE
+# metadata itself). Exit 3 = not vault-managed, fall through to BYOK; any
+# other failure is fatal — never guess a key.
+BOOTSTRAP_TOKEN=$(read_provisioning_secret_retry bootstrap-token 2 1) || BOOTSTRAP_TOKEN=""
+export BOOTSTRAP_TOKEN
 
-if [ -z "$PASSPHRASE" ]; then
-    echo "luks-setup: ERROR — no LUKS passphrase found via systemd-creds or cloud metadata" >&2
-    echo "luks-setup: set 'luks-passphrase' (systemd credential or instance metadata) and retry" >&2
+PASSPHRASE=""
+KEY_SOURCE=""
+set +e
+PASSPHRASE=$(/usr/sbin/manager-bootstrap dek --device "$PART")
+rc=$?
+set -e
+unset BOOTSTRAP_TOKEN
+if [ "$rc" -eq 0 ] && [ -n "$PASSPHRASE" ]; then
+    KEY_SOURCE="vault"
+    echo "luks-setup: using vault-backed DEK ($(cat "$ORIGIN_FILE" 2>/dev/null || echo 'vault'))"
+    # manager-bootstrap wrote /run/luks/dek-origin + key-source itself.
+elif [ "$rc" -ne 3 ]; then
+    echo "luks-setup: ERROR — vault DEK resolution failed (rc=$rc); refusing to fall back" >&2
     exit 1
 fi
 
-echo "luks-setup: using BYOK passphrase from instance metadata"
-echo "byok" > "$KEY_SOURCE_FILE"
+# 1b. BYOK fallback (legacy volumes).
+if [ -z "$PASSPHRASE" ]; then
+    if PASSPHRASE=$(read_provisioning_secret_retry luks-passphrase 5 2); then
+        :
+    fi
+    if [ -z "$PASSPHRASE" ]; then
+        echo "luks-setup: ERROR — no vault-backed DEK and no LUKS passphrase found via systemd-creds or cloud metadata" >&2
+        echo "luks-setup: pre-approve the enclave (bootstrap-token) or set 'luks-passphrase' and retry" >&2
+        exit 1
+    fi
+    KEY_SOURCE="byok"
+    echo "luks-setup: using BYOK passphrase from instance metadata"
+    echo "byok" > "$KEY_SOURCE_FILE"
 
-# ── 2. Persist DEK origin (for OID 2.6) ──────────────────────────────────
-
-FINGERPRINT=$(printf '%s' "$PASSPHRASE" | sha256sum | awk '{print $1}')
-echo "byok:${FINGERPRINT}" > "$ORIGIN_FILE"
-chmod 644 "$ORIGIN_FILE"
+    # ── 2. Persist DEK origin (for OID 2.6) ──────────────────────────────
+    FINGERPRINT=$(printf '%s' "$PASSPHRASE" | sha256sum | awk '{print $1}')
+    echo "byok:${FINGERPRINT}" > "$ORIGIN_FILE"
+    chmod 644 "$ORIGIN_FILE"
+fi
 
 # ── 3. Format or open ────────────────────────────────────────────────────
 
@@ -145,6 +177,18 @@ else
         "$PART"
 
     printf '%s' "$PASSPHRASE" | cryptsetup luksOpen "$PART" "$MAPPER" --key-file=-
+
+    # Vault mode: stamp the non-secret DEK locator into the LUKS2 header
+    # (token id 7) so every future boot can find the constellation from
+    # the disk alone. Written by `manager-bootstrap dek` on first boot.
+    if [ "$KEY_SOURCE" = "vault" ]; then
+        if [ ! -f /run/enclave/luks-token.json ]; then
+            echo "luks-setup: ERROR — vault mode but no locator at /run/enclave/luks-token.json" >&2
+            exit 1
+        fi
+        cryptsetup token import --token-id 7 --json-file /run/enclave/luks-token.json "$PART"
+        echo "luks-setup: vault DEK locator imported into LUKS2 header (token 7)"
+    fi
 
     echo "luks-setup: creating ext4 filesystem on /dev/mapper/$MAPPER"
     mkfs.ext4 -L data "/dev/mapper/$MAPPER"

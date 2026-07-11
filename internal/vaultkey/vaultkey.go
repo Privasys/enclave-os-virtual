@@ -69,6 +69,13 @@ type Config struct {
 	MgmtURL      string
 	EnclaveID    string
 	EnclaveToken string
+	// AttestationToken is a pre-fetched bearer for the attestation-server
+	// quote verification. Set on the boot path (manager /data unlock),
+	// where the per-enclave credential is still locked inside /data and
+	// the bearer comes from the quote-authenticated redeem /
+	// boot-attestation-token endpoints instead. When set, MgmtURL /
+	// EnclaveID / EnclaveToken are not required and no fetch happens.
+	AttestationToken string
 }
 
 func (c Config) threshold() int {
@@ -91,10 +98,19 @@ func (c Config) validate() error {
 	if c.AttestationServerURL == "" {
 		return errors.New("vaultkey: attestation server URL is required")
 	}
-	if c.MgmtURL == "" || c.EnclaveID == "" || c.EnclaveToken == "" {
-		return errors.New("vaultkey: MgmtURL, EnclaveID and EnclaveToken are required (to fetch the attestation-server token)")
+	if c.AttestationToken == "" && (c.MgmtURL == "" || c.EnclaveID == "" || c.EnclaveToken == "") {
+		return errors.New("vaultkey: either AttestationToken or MgmtURL+EnclaveID+EnclaveToken is required (for the attestation-server quote verification)")
 	}
 	return nil
+}
+
+// attestationToken returns the pre-fetched bearer, or fetches one from the
+// management service with the per-enclave credential.
+func attestationToken(ctx context.Context, cfg Config) (string, error) {
+	if cfg.AttestationToken != "" {
+		return cfg.AttestationToken, nil
+	}
+	return fetchAttestationToken(ctx, cfg)
 }
 
 // fetchAttestationToken gets a short-lived OIDC bearer from the
@@ -227,7 +243,7 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 	}
 	log = log.Named("vaultkey").With(zap.String("handle", handle))
 
-	attToken, err := fetchAttestationToken(ctx, cfg)
+	attToken, err := attestationToken(ctx, cfg)
 	if err != nil {
 		return "", "", false, fmt.Errorf("vaultkey: %w", err)
 	}
@@ -368,7 +384,7 @@ func Export(ctx context.Context, log *zap.Logger, cfg Config, handle string, ima
 	}
 	log = log.Named("vaultkey").With(zap.String("handle", handle))
 
-	attToken, err := fetchAttestationToken(ctx, cfg)
+	attToken, err := attestationToken(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("vaultkey: %w", err)
 	}

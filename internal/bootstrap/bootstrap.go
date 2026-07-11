@@ -56,6 +56,15 @@ func Run(ctx context.Context, cfg Config) error {
 		return nil
 	}
 
+	// Pre-approved first boot: the LUKS boot path already redeemed the
+	// bootstrap token (manager-bootstrap dek) and parked the payload on
+	// tmpfs; persist it now that /data is mounted. No admin wait.
+	if payload, err := loadStashedRedeem(); err != nil {
+		return err
+	} else if payload != nil {
+		return persistRedeemed(cfg, payload)
+	}
+
 	return RunRegistration(ctx, cfg)
 }
 
