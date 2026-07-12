@@ -493,6 +493,21 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		}}),
 	}
 
+	// Resource limits — the Confidential-* instance size chosen at deploy.
+	// CPU is a CFS quota (average consumption capped at N cores, no cpuset
+	// pinning) and memory a hard limit with swap capped to the same value.
+	// Zero fields mean unlimited (pre-sizing deploys, replayed registry
+	// entries). Deliberately NOT part of the attested identity.
+	if spec.ResourceVCPUs > 0 {
+		const cfsPeriod = uint64(100000) // 100ms, the kernel default
+		quota := int64(spec.ResourceVCPUs) * int64(cfsPeriod)
+		opts = append(opts, oci.WithCPUCFS(quota, cfsPeriod))
+	}
+	if spec.ResourceMemoryMB > 0 {
+		bytes := uint64(spec.ResourceMemoryMB) << 20
+		opts = append(opts, oci.WithMemoryLimit(bytes), oci.WithMemorySwap(int64(bytes)))
+	}
+
 	// Hostname override.
 	if spec.Hostname != "" {
 		opts = append(opts, oci.WithHostname(spec.Hostname))

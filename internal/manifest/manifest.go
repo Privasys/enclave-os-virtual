@@ -99,14 +99,23 @@ type Container struct {
 	// Storage is the requested size for a per-container encrypted volume
 	// (e.g. "1G", "500M"). If non-empty the launcher provisions a
 	// LUKS2+AEAD LV and bind-mounts it into the container at /data.
-	// This field IS measured into the per-container Config Merkle Tree.
+	// NOT measured (capacity, not identity): only the injected /data
+	// mount reaches the Config Merkle Tree, via Volumes.
 	Storage string `yaml:"storage,omitempty"`
 
 	// Devices is a list of host device paths to pass into the container
 	// (e.g. "/dev/nvidia0", "/dev/nvidiactl"). Each path must exist on
-	// the host. This field IS measured into the per-container Config
-	// Merkle Tree.
+	// the host. NOT currently measured into the Config Merkle Tree (see
+	// ContainerMerkleTree for the measured set).
 	Devices []string `yaml:"devices,omitempty"`
+
+	// ResourceVCPUs / ResourceMemoryMB cap the container's CPU (CFS
+	// quota) and memory (hard limit, MiB) — the Confidential-* instance
+	// size chosen at deploy. Zero = unlimited. NOT measured: sizing is
+	// capacity/cost, never workload identity, so a resize does not change
+	// the attested container.
+	ResourceVCPUs    int   `yaml:"resource_vcpus,omitempty"`
+	ResourceMemoryMB int64 `yaml:"resource_memory_mb,omitempty"`
 }
 
 // HealthCheck defines a container health check.

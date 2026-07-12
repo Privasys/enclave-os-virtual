@@ -170,7 +170,16 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 			return nil, fmt.Errorf("volume: %q expects existing data (key reconstructed) but LV %s is absent — refusing to create an empty volume that would mask data loss", name, lvName)
 		}
 		if err := run("lvcreate", "-L", size, "-n", lvName, VGName, "-y"); err != nil {
-			return nil, fmt.Errorf("volume: lvcreate failed: %w", err)
+			// The pool may simply not have grown into a disk the cloud-ops
+			// agent already resized: rescan the PV's device and pvresize,
+			// then retry once. Capacity is bought just-in-time (GCP-side PD
+			// resize is online); this is the in-guest half.
+			m.log.Warn("lvcreate failed — rescanning the containers pool for a grown disk and retrying",
+				zap.String("lv", lvName), zap.String("size", size), zap.Error(err))
+			m.growPool()
+			if err := run("lvcreate", "-L", size, "-n", lvName, VGName, "-y"); err != nil {
+				return nil, fmt.Errorf("volume: lvcreate failed (pool exhausted? grow the containers disk via cloud-ops, it is picked up automatically): %w", err)
+			}
 		}
 	}
 
@@ -421,6 +430,40 @@ func randomKey() (string, error) {
 // /etc/lvm/{archive,backup} unwritable and causes lvcreate to fail with
 // "Internal error: Failed command did not use log_error" / status 5).
 // The /run/lvm-conf directory is provisioned by container-volumes.service.
+// growPool picks up an out-of-band resize of the containers pool disk (the
+// cloud-ops agent grows the PD online on the cloud side): rescan each of the
+// VG's physical devices so the kernel sees the new size, then pvresize so LVM
+// can allocate from it. Best-effort — the caller retries lvcreate and reports
+// the real failure if capacity is still short.
+func (m *Manager) growPool() {
+	cmd := exec.Command("pvs", "--noheadings", "-o", "pv_name", "--select", "vg_name="+VGName)
+	cmd.Env = lvmEnv(os.Environ(), "pvs")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		m.log.Warn("growPool: pvs failed", zap.Error(err), zap.String("out", string(out)))
+		return
+	}
+	for _, pv := range strings.Fields(string(out)) {
+		// /dev/sdb1 -> sdb, /dev/nvme0n1p1 -> nvme0n1 (partition suffix off);
+		// bare-disk PVs pass through unchanged.
+		base := strings.TrimPrefix(pv, "/dev/")
+		if i := strings.LastIndexByte(base, 'p'); i > 0 && strings.ContainsAny(base[i+1:], "0123456789") && strings.HasPrefix(base, "nvme") {
+			base = base[:i]
+		} else {
+			base = strings.TrimRight(base, "0123456789")
+		}
+		rescan := "/sys/class/block/" + base + "/device/rescan"
+		if err := os.WriteFile(rescan, []byte("1"), 0o200); err != nil {
+			m.log.Debug("growPool: rescan not available", zap.String("path", rescan), zap.Error(err))
+		}
+		if err := run("pvresize", pv); err != nil {
+			m.log.Warn("growPool: pvresize failed", zap.String("pv", pv), zap.Error(err))
+		} else {
+			m.log.Info("growPool: pvresize ok", zap.String("pv", pv))
+		}
+	}
+}
+
 func run(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Env = lvmEnv(os.Environ(), name)

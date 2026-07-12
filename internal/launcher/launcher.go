@@ -34,6 +34,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -176,9 +177,20 @@ type LoadRequest struct {
 	// this size is created on the "containers" VG and bind-mounted into
 	// the container at /data.
 	//
-	// This field IS measured into the per-container Merkle tree — changing
-	// the storage size changes the attested container identity.
+	// NOT measured: the size is capacity, not workload identity — only the
+	// injected /data mount lands in the config Merkle tree (via Volumes),
+	// so growing a volume never changes the attested container identity.
 	Storage string `json:"storage,omitempty"`
+
+	// Resources caps the container's CPU and memory (the Confidential-*
+	// instance size chosen at deploy). Enforced via cgroups (CPU CFS quota
+	// + memory limit). Absent = no limits (pre-sizing deployments and old
+	// registry entries replayed on boot).
+	//
+	// NOT measured: sizing affects availability and cost, never code
+	// identity — a resize (redeploy with a new size) must not change the
+	// attested identity or re-prompt session-relay users.
+	Resources *ResourceLimits `json:"resources,omitempty"`
 
 	// KeyHandle names the vault key holding this container's volume DEK,
 	// e.g. "apps.privasys.org/<app-id>/storage-kek/v1". When set, the DEK is
@@ -285,10 +297,27 @@ type LoadRequest struct {
 // a fixed 8080.
 const reservedHostPort = 8080
 
+// ResourceLimits is the per-container CPU/memory cap (see
+// LoadRequest.Resources).
+type ResourceLimits struct {
+	// VCPUs caps average CPU consumption at N cores (CFS quota, not
+	// cpuset pinning — bursty co-tenants still share cores fairly).
+	VCPUs int `json:"vcpus"`
+	// MemoryMB is the hard memory limit in MiB (swap capped to the same
+	// value; the CVMs run swapless anyway).
+	MemoryMB int64 `json:"memory_mb"`
+}
+
 // Validate checks the load request for required fields.
 func (r *LoadRequest) Validate() error {
 	if r.Name == "" {
 		return fmt.Errorf("name is required")
+	}
+	if r.Resources != nil {
+		if r.Resources.VCPUs < 0 || r.Resources.MemoryMB < 0 {
+			return fmt.Errorf("resources must be non-negative (vcpus=%d, memory_mb=%d)",
+				r.Resources.VCPUs, r.Resources.MemoryMB)
+		}
 	}
 	if r.Image == "" {
 		return fmt.Errorf("image is required")
@@ -316,7 +345,7 @@ func (r *LoadRequest) Validate() error {
 // not workload identity. The volume's key origin is attested
 // separately via OID 3.4.
 func (r *LoadRequest) toContainerSpec() manifest.Container {
-	return manifest.Container{
+	spec := manifest.Container{
 		Name:        r.Name,
 		Image:       r.Image,
 		Port:        r.Port,
@@ -327,6 +356,11 @@ func (r *LoadRequest) toContainerSpec() manifest.Container {
 		Storage:     r.Storage,
 		Devices:     r.Devices,
 	}
+	if r.Resources != nil {
+		spec.ResourceVCPUs = r.Resources.VCPUs
+		spec.ResourceMemoryMB = r.Resources.MemoryMB
+	}
+	return spec
 }
 
 // rewriteHealthCheckHost retargets a control-plane health check (sent as
@@ -1069,6 +1103,17 @@ func atomicWrite(path string, data []byte) error {
 func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	if err := req.Validate(); err != nil {
 		return nil, fmt.Errorf("launcher: invalid load request: %w", err)
+	}
+
+	// Cap the CPU limit at the machine: a mis-sized request degrades
+	// gracefully instead of bricking the deploy (the CFS quota cannot
+	// exceed the cores that exist anyway).
+	if req.Resources != nil && req.Resources.VCPUs > runtime.NumCPU() {
+		l.log.Warn("requested vCPUs exceed the machine; capping",
+			zap.String("container", req.Name),
+			zap.Int("requested", req.Resources.VCPUs),
+			zap.Int("machine", runtime.NumCPU()))
+		req.Resources.VCPUs = runtime.NumCPU()
 	}
 
 	// Digest-pinned disk:// refs survive in manager-apps.json across
