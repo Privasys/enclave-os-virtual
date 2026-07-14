@@ -164,6 +164,15 @@ var ContainerModelDigest = append(append(asn1.ObjectIdentifier{}, privasysArc...
 // the MR_APP / promote-step-up design.
 var ContainerAppId = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 6)
 
+// AttestedDependencySet carries a container's set of DIRECT attested
+// cross-enclave dependency identities (the peers it is pinned to and will only
+// complete an RA-TLS handshake with). The value is the canonical dependency-set
+// encoding, byte-identical to the RA-TLS SDKs. The manager (measured) owns and
+// stamps it; the container cannot write it, so the advertised set and the
+// enforced set are one object. The top-level 6 arc is distinct from the
+// hardware-evidence arcs (4.x SEV-SNP, 5.x NVIDIA GPU).
+var AttestedDependencySet = append(append(asn1.ObjectIdentifier{}, privasysArc...), 6, 1)
+
 // ContainerEnvVarArcPrefix is the dot-notation prefix for per-environment-
 // variable attestation extensions. Each runtime-supplied env var may be
 // pinned at a sub-OID 1.3.6.1.4.1.65230.3.5.<n>[.<n>...]. The extension
