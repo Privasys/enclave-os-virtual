@@ -300,13 +300,27 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 		// integrity sectors, EIO. Direct I/O never touches the page cache:
 		// no RMW reads, no readahead (proven by fra-4's AEAD errors at the
 		// backup-superblock offsets, 2026-07-16).
-		if err := run("mkfs.ext4", "-F", "-D", "-L", label,
-			"-E", "nodiscard,lazy_itable_init=0,lazy_journal_init=0", mapperPath); err != nil {
-			if !mapperExisted {
-				_ = run("cryptsetup", "luksClose", mapperName)
+		mkfs := func() error {
+			return run("mkfs.ext4", "-F", "-D", "-L", label,
+				"-E", "nodiscard,lazy_itable_init=0,lazy_journal_init=0", mapperPath)
+		}
+		if err := mkfs(); err != nil {
+			// One retry after the device settles: the very first volume on a
+			// freshly booted host can lose a race with an early-boot reader
+			// whose failed read of unwritten integrity sectors (EILSEQ)
+			// poisons the device mapping; the identical mkfs succeeds moments
+			// later (proven live 2026-07-16 — deployed run failed, the same
+			// command sequence by hand passed, and the redeploy passed).
+			m.log.Warn("mkfs failed — settling and retrying once",
+				zap.String("mapper", mapperName), zap.Error(err))
+			_ = run("udevadm", "settle", "--timeout=10")
+			if err := mkfs(); err != nil {
+				if !mapperExisted {
+					_ = run("cryptsetup", "luksClose", mapperName)
+				}
+				m.lvremoveAudit(lvPath)
+				return nil, fmt.Errorf("volume: mkfs.ext4 failed: %w", err)
 			}
-			m.lvremoveAudit(lvPath)
-			return nil, fmt.Errorf("volume: mkfs.ext4 failed: %w", err)
 		}
 	}
 
