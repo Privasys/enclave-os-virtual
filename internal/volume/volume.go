@@ -197,6 +197,14 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 			"--key-size", "512",
 			"--hash", "sha256",
 			"--integrity", "hmac-sha256",
+			// 4096-byte sectors: keeps the mapped device 4k-aligned so the
+			// page cache never read-modify-writes a partial tail page. With
+			// 512-byte sectors the integrity tags leave a non-4k-aligned tail,
+			// and the RMW read of never-written sectors fails with INTEGRITY
+			// AEAD ERROR -> EIO at the end of mkfs (first seen on the first
+			// catalogue-sized 80G volume, 2026-07-16; small volumes dodge it
+			// by luck of their tail alignment). Also 8x fewer hmac tags.
+			"--sector-size", "4096",
 			"--iter-time", "2000",
 			"--key-file=-",
 			"--batch-mode",
@@ -237,6 +245,7 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 					"--key-size", "512",
 					"--hash", "sha256",
 					"--integrity", "hmac-sha256",
+					"--sector-size", "4096", // 4k alignment — see the primary luksFormat above
 					"--iter-time", "2000",
 					"--key-file=-",
 					"--batch-mode",
@@ -262,7 +271,16 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 	// 4. Create ext4 filesystem — on freshly formatted volumes, and on a
 	// stale LV we just reformatted (it holds no readable filesystem).
 	if !lvExisted || staleReformatted {
-		if err := run("mkfs.ext4", "-L", name, mapperPath); err != nil {
+		// dm-integrity discipline: initialise everything mkfs will later read
+		// (lazy init reads-back uninitialised areas -> AEAD error -> EIO) and
+		// skip discard (dm-crypt+integrity rejects it). ext4 labels cap at 16
+		// bytes; truncate ourselves instead of tripping mke2fs's warning.
+		label := name
+		if len(label) > 16 {
+			label = label[:16]
+		}
+		if err := run("mkfs.ext4", "-L", label,
+			"-E", "nodiscard,lazy_itable_init=0,lazy_journal_init=0", mapperPath); err != nil {
 			if !mapperExisted {
 				_ = run("cryptsetup", "luksClose", mapperName)
 			}
