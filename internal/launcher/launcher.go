@@ -134,6 +134,13 @@ type Config struct {
 	// config Merkle tree. Sourced from the manager's --load-token
 	// (i.e. /data/manager.env).
 	LoadToken string
+
+	// IsolationUserns enables per-container user-namespace remapping (see
+	// container.Manager.usernsRemap). Set ONLY on shared, multi-tenant VMs;
+	// dedicated VMs (incl. all GPU) leave it off. Sourced from the manager's
+	// --isolation-userns flag / PRIVASYS_ISOLATION_USERNS. Defaults off, and is
+	// EXPERIMENTAL/UNVALIDATED on real enclaves — see the container-side doc.
+	IsolationUserns bool
 }
 
 // ConfigAPISpec describes a post-load configuration endpoint that the
@@ -639,7 +646,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 func (l *Launcher) Run(ctx context.Context) error {
 	// 1. Connect to containerd.
 	l.log.Info("connecting to containerd")
-	mgr, err := container.NewManager(l.log, l.cfg.ContainerdSocket)
+	mgr, err := container.NewManager(l.log, l.cfg.ContainerdSocket, l.cfg.IsolationUserns)
 	if err != nil {
 		return err
 	}

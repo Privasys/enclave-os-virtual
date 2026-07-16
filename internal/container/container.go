@@ -161,10 +161,25 @@ type Manager struct {
 	log        *zap.Logger
 	containers map[string]*ManagedContainer
 	mu         sync.RWMutex
+
+	// usernsRemap, when true, runs each container in a user namespace with
+	// container-root mapped to an unprivileged host uid (see Create). Set only
+	// on SHARED, multi-tenant VMs; dedicated VMs (incl. all GPU) leave it off,
+	// because their single tenant makes the escape-blast-radius argument moot
+	// and GPU passthrough is incompatible with the remap. Wired from the
+	// manager's --isolation-userns flag.
+	//
+	// EXPERIMENTAL / UNVALIDATED: the id-mapped rootfs + bind path has not yet
+	// been exercised on a real enclave (needs an m2-dev run). Defaults off, so
+	// enabling it is a deliberate, per-VM opt-in — never flip it on a prod
+	// shared VM before that validation.
+	usernsRemap bool
 }
 
-// NewManager connects to containerd and returns a new Manager.
-func NewManager(log *zap.Logger, socket string) (*Manager, error) {
+// NewManager connects to containerd and returns a new Manager. usernsRemap
+// enables per-container user-namespace remapping (shared VMs only; see the
+// Manager field doc).
+func NewManager(log *zap.Logger, socket string, usernsRemap bool) (*Manager, error) {
 	if socket == "" {
 		socket = DefaultSocket
 	}
@@ -172,11 +187,49 @@ func NewManager(log *zap.Logger, socket string) (*Manager, error) {
 	if err != nil {
 		return nil, fmt.Errorf("container: failed to connect to containerd at %s: %w", socket, err)
 	}
+	if usernsRemap {
+		log.Warn("container: user-namespace remapping ENABLED (experimental; validate on m2-dev before prod)")
+	}
 	return &Manager{
-		client:     c,
-		log:        log.Named("container"),
-		containers: make(map[string]*ManagedContainer),
+		client:      c,
+		log:         log.Named("container"),
+		containers:  make(map[string]*ManagedContainer),
+		usernsRemap: usernsRemap,
 	}, nil
+}
+
+const (
+	// usernsHostBaseUID/GID is where container id 0 lands on the host under
+	// usernsRemap. Container ids [0, usernsMapSize) map to host ids
+	// [base, base+usernsMapSize). One fixed range for all containers in v1:
+	// per-container /data volumes are already LUKS-separated, so this range is
+	// about capping an escape to an unprivileged host uid, not inter-container
+	// file isolation. A per-container offset can layer on later.
+	usernsHostBaseUID = 100000
+	usernsHostBaseGID = 100000
+	usernsMapSize     = 65536
+)
+
+// usernsIDMap is the single-range id mapping used for both uids and gids
+// (base uid == base gid), for the OCI userns spec and the id-mapped binds.
+func usernsIDMap() []specs.LinuxIDMapping {
+	return []specs.LinuxIDMapping{{ContainerID: 0, HostID: usernsHostBaseUID, Size: usernsMapSize}}
+}
+
+// idmapMounts stamps the userns id-mapping onto every bind mount when remapping
+// is active, so container-root (an unprivileged host uid) can still reach
+// host-root-owned mount sources. No-op — mounts returned unchanged — when
+// inactive. The spec-level user namespace and these mount maps MUST be gated
+// on the same boolean, or the ownership the container sees is wrong.
+func idmapMounts(mounts []specs.Mount, active bool) []specs.Mount {
+	if !active {
+		return mounts
+	}
+	for i := range mounts {
+		mounts[i].UIDMappings = usernsIDMap()
+		mounts[i].GIDMappings = usernsIDMap()
+	}
+	return mounts
 }
 
 // Close shuts down the containerd connection.
@@ -466,6 +519,13 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	ctx = m.ctx(ctx)
 	m.log.Info("creating container", zap.String("name", spec.Name))
 
+	// User-namespace remap decision (shared VMs only; see Manager.usernsRemap).
+	// The spec-level userns and every id-mapped bind below are gated on this
+	// same value so the container sees consistent ownership. GPU/device apps
+	// are refused under remap in the devices block — they belong on dedicated
+	// VMs, which never set the flag.
+	userns := m.usernsRemap
+
 	// Build OCI spec options.
 	opts := []oci.SpecOpts{
 		oci.WithImageConfig(img),
@@ -485,12 +545,37 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		// the upstreams into ResolvConfPath instead. Using WithMounts directly
 		// rather than WithHostResolvconf, because the nvidia-container-runtime
 		// rewrites the spec and may drop higher-level OCI options.
-		oci.WithMounts([]specs.Mount{{
-			Destination: "/etc/resolv.conf",
-			Source:      network.ResolvConfPath,
-			Type:        "bind",
-			Options:     []string{"rbind", "ro"},
-		}}),
+		//
+		// Bind-mount /etc/hosts for the same reason: a private netns starts with
+		// no host runtime to synthesise one, so minimal images that lack a
+		// baked-in `localhost` entry fall through to DNS on a localhost lookup
+		// (NXDOMAIN — the fleet embed/rerank bug). network.Setup writes the
+		// static file at HostsPath. This read-only bind shadows any /etc/hosts
+		// baked into the image, matching Docker/podman semantics.
+		oci.WithMounts(idmapMounts([]specs.Mount{
+			{
+				Destination: "/etc/resolv.conf",
+				Source:      network.ResolvConfPath,
+				Type:        "bind",
+				Options:     []string{"rbind", "ro"},
+			},
+			{
+				Destination: "/etc/hosts",
+				Source:      network.HostsPath,
+				Type:        "bind",
+				Options:     []string{"rbind", "ro"},
+			},
+		}, userns)),
+	}
+
+	// User-namespace remap: map container ids [0, size) to an unprivileged
+	// host range so a container escape lands as a non-root host uid rather than
+	// real root (which on a shared VM would reach every co-tenant's LUKS
+	// volumes and the in-memory vault DEKs). The matching rootfs remap is on
+	// the snapshot (WithRemapperLabels, below); bind sources are id-mapped via
+	// idmapMounts.
+	if userns {
+		opts = append(opts, oci.WithUserNamespace(usernsIDMap(), usernsIDMap()))
 	}
 
 	// Resource limits — the Confidential-* instance size chosen at deploy.
@@ -548,6 +633,13 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 			}
 		}
 	}
+	// A device-passthrough app under userns remap is a contradiction: GPU/host
+	// devices belong on dedicated VMs, which never enable the flag, and the
+	// remap is incompatible with the NVIDIA CDI/device path anyway. Refuse
+	// rather than silently drop either the isolation or the device.
+	if userns && len(devices) > 0 {
+		return nil, fmt.Errorf("container: %s requests host devices (%v) but user-namespace remap is enabled; device/GPU apps must run on a dedicated VM", spec.Name, devices)
+	}
 	for _, devPath := range devices {
 		opts = append(opts, oci.WithDevices(devPath, "", "rwm"))
 	}
@@ -576,12 +668,12 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		if len(parts) == 3 {
 			mountOpts = parts[2]
 		}
-		opts = append(opts, oci.WithMounts([]specs.Mount{{
+		opts = append(opts, oci.WithMounts(idmapMounts([]specs.Mount{{
 			Destination: parts[1],
 			Source:      parts[0],
 			Type:        "bind",
 			Options:     []string{"rbind", mountOpts},
-		}}))
+		}}, userns)))
 		m.log.Info("image-declared volume mount",
 			zap.String("name", spec.Name),
 			zap.String("source", parts[0]),
@@ -595,12 +687,12 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	// RoothashRegistry* consts). Skipped when the host has no registry
 	// (no verity model disks mounted, or a non-GPU image).
 	if st, err := os.Stat(RoothashRegistryHostDir); err == nil && st.IsDir() {
-		opts = append(opts, oci.WithMounts([]specs.Mount{{
+		opts = append(opts, oci.WithMounts(idmapMounts([]specs.Mount{{
 			Destination: RoothashRegistryContainerDir,
 			Source:      RoothashRegistryHostDir,
 			Type:        "bind",
 			Options:     []string{"rbind", "ro"},
-		}}))
+		}}, userns)))
 	}
 
 	// Volume bind mounts (format: "host:container[:ro|rw]").
@@ -622,7 +714,7 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 				Options:     []string{"rbind", mountOpts},
 			})
 		}
-		opts = append(opts, oci.WithMounts(mounts))
+		opts = append(opts, oci.WithMounts(idmapMounts(mounts, userns)))
 	}
 
 	// Clean up any stale container or snapshot from a prior failed
@@ -647,10 +739,14 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		_ = snSvc.Remove(ctx, spec.Name+"-snapshot")
 	}
 
-	// Create the container.
+	// Create the container. Under userns remap the snapshot carries remapper
+	// labels so the overlay rootfs is id-mapped to the same host range as the
+	// spec's user namespace — without it, container-root could not read its own
+	// (host-root-owned) image layers. remapperSnapshotOpts is build-tagged
+	// (the remapper label helper is unix-only); it returns nil on non-unix.
 	containerOpts := []client.NewContainerOpts{
 		client.WithImage(img),
-		client.WithNewSnapshot(spec.Name+"-snapshot", img),
+		client.WithNewSnapshot(spec.Name+"-snapshot", img, remapperSnapshotOpts(userns)...),
 		client.WithNewSpec(opts...),
 	}
 	container, err := m.client.NewContainer(ctx, spec.Name, containerOpts...)
