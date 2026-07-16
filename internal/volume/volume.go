@@ -37,6 +37,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"go.uber.org/zap"
@@ -271,15 +272,29 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 	// 4. Create ext4 filesystem — on freshly formatted volumes, and on a
 	// stale LV we just reformatted (it holds no readable filesystem).
 	if !lvExisted || staleReformatted {
-		// dm-integrity discipline: initialise everything mkfs will later read
-		// (lazy init reads-back uninitialised areas -> AEAD error -> EIO) and
-		// skip discard (dm-crypt+integrity rejects it). ext4 labels cap at 16
-		// bytes; truncate ourselves instead of tripping mke2fs's warning.
+		// dm-integrity discipline: a READ of any never-written sector is a
+		// hard EIO (INTEGRITY AEAD ERROR), and several things read sectors
+		// mkfs never wrote — udev/blkid probe the fresh mapper for
+		// signatures at the device HEAD and TAIL (GPT backup, RAID
+		// superblocks), mke2fs scans for an existing filesystem, and block
+		// readahead pulls unwritten neighbours. A failed read poisons the
+		// device mapping and mkfs's final flush reports EIO (bit the first
+		// catalogue-sized 80G volume, 2026-07-16; the full-device format
+		// wipe demonstrably does not cover these regions on big volumes).
+		// Neutralise every reader:
+		//   - zero the probe-sensitive head+tail (16MiB each) so signature
+		//     scans read initialised sectors;
+		//   - settle udev so its probe completes before mkfs opens;
+		//   - readahead off for the mkfs run;
+		//   - mkfs -F skips the existing-filesystem scan, nodiscard skips
+		//     the rejected BLKDISCARD, lazy_*_init=0 writes everything ext4
+		//     reads back later.
+		m.initIntegrityEdges(mapperPath)
 		label := name
 		if len(label) > 16 {
 			label = label[:16]
 		}
-		if err := run("mkfs.ext4", "-L", label,
+		if err := run("mkfs.ext4", "-F", "-L", label,
 			"-E", "nodiscard,lazy_itable_init=0,lazy_journal_init=0", mapperPath); err != nil {
 			if !mapperExisted {
 				_ = run("cryptsetup", "luksClose", mapperName)
@@ -326,6 +341,38 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 		MountPath: mountPath,
 		LVName:    lvName,
 	}, nil
+}
+
+// initIntegrityEdges makes a fresh dm-crypt+dm-integrity mapper safe to probe
+// and mkfs: zero the first and last 16MiB (the regions signature scanners
+// read), wait for udev's own probe of the new device to finish, and switch
+// readahead off so sequential writes don't drag unwritten neighbours into the
+// page cache. Best-effort: mkfs surfaces the real failure if any step fell
+// short.
+func (m *Manager) initIntegrityEdges(mapperPath string) {
+	const edge = 16 // MiB
+	if err := run("dd", "if=/dev/zero", "of="+mapperPath, "bs=1M", fmt.Sprintf("count=%d", edge), "conv=fsync"); err != nil {
+		m.log.Warn("integrity head zero failed", zap.String("dev", mapperPath), zap.Error(err))
+	}
+	// Tail: seek to size-16MiB. blockdev reports the size in 512 sectors.
+	out, err := exec.Command("blockdev", "--getsz", mapperPath).CombinedOutput()
+	if err != nil {
+		m.log.Warn("blockdev --getsz failed; skipping tail zero", zap.String("dev", mapperPath), zap.Error(err))
+	} else if sectors, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64); perr == nil {
+		sizeMiB := sectors * 512 / (1024 * 1024)
+		if sizeMiB > 2*edge {
+			if err := run("dd", "if=/dev/zero", "of="+mapperPath, "bs=1M",
+				fmt.Sprintf("count=%d", edge), fmt.Sprintf("seek=%d", sizeMiB-edge), "conv=fsync"); err != nil {
+				m.log.Warn("integrity tail zero failed", zap.String("dev", mapperPath), zap.Error(err))
+			}
+		}
+	}
+	// Let udev's probe of the new mapper finish BEFORE mkfs opens the device,
+	// so a probe-triggered read error is not attributed to mkfs's session.
+	_ = run("udevadm", "settle", "--timeout=10")
+	if err := run("blockdev", "--setra", "0", mapperPath); err != nil {
+		m.log.Warn("readahead off failed", zap.String("dev", mapperPath), zap.Error(err))
+	}
 }
 
 // isMountpoint returns true if `path` is a mount point.
