@@ -294,7 +294,13 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 		if len(label) > 16 {
 			label = label[:16]
 		}
-		if err := run("mkfs.ext4", "-F", "-L", label,
+		// -D (direct I/O) is the load-bearing flag: buffered mkfs does
+		// sub-page writes (1KiB backup superblocks), and the page cache
+		// READS the containing page first — a read of never-written
+		// integrity sectors, EIO. Direct I/O never touches the page cache:
+		// no RMW reads, no readahead (proven by fra-4's AEAD errors at the
+		// backup-superblock offsets, 2026-07-16).
+		if err := run("mkfs.ext4", "-F", "-D", "-L", label,
 			"-E", "nodiscard,lazy_itable_init=0,lazy_journal_init=0", mapperPath); err != nil {
 			if !mapperExisted {
 				_ = run("cryptsetup", "luksClose", mapperName)
@@ -354,15 +360,19 @@ func (m *Manager) initIntegrityEdges(mapperPath string) {
 	if err := run("dd", "if=/dev/zero", "of="+mapperPath, "bs=1M", fmt.Sprintf("count=%d", edge), "conv=fsync"); err != nil {
 		m.log.Warn("integrity head zero failed", zap.String("dev", mapperPath), zap.Error(err))
 	}
-	// Tail: seek to size-16MiB. blockdev reports the size in 512 sectors.
-	out, err := exec.Command("blockdev", "--getsz", mapperPath).CombinedOutput()
+	// Tail: byte-exact. A MiB-truncated seek leaves the final partial MiB
+	// unwritten — exactly where the GPT-backup probe reads (fra-4's AEAD
+	// error sat in that truncated remainder). Seek in bytes to size-16MiB
+	// and let dd write through to the true device end.
+	out, err := exec.Command("blockdev", "--getsize64", mapperPath).CombinedOutput()
 	if err != nil {
-		m.log.Warn("blockdev --getsz failed; skipping tail zero", zap.String("dev", mapperPath), zap.Error(err))
-	} else if sectors, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64); perr == nil {
-		sizeMiB := sectors * 512 / (1024 * 1024)
-		if sizeMiB > 2*edge {
+		m.log.Warn("blockdev --getsize64 failed; skipping tail zero", zap.String("dev", mapperPath), zap.Error(err))
+	} else if sizeBytes, perr := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64); perr == nil {
+		edgeBytes := int64(edge) * 1024 * 1024
+		if sizeBytes > 2*edgeBytes {
 			if err := run("dd", "if=/dev/zero", "of="+mapperPath, "bs=1M",
-				fmt.Sprintf("count=%d", edge), fmt.Sprintf("seek=%d", sizeMiB-edge), "conv=fsync"); err != nil {
+				"oflag=seek_bytes", fmt.Sprintf("seek=%d", sizeBytes-edgeBytes),
+				fmt.Sprintf("count=%d", edge), "conv=fsync"); err != nil {
 				m.log.Warn("integrity tail zero failed", zap.String("dev", mapperPath), zap.Error(err))
 			}
 		}
