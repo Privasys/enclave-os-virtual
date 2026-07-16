@@ -210,6 +210,7 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 
 	// 3. Open LUKS (skip if mapper already exists from prior open).
 	mapperExisted := false
+	staleReformatted := false
 	if _, err := os.Stat(mapperPath); err == nil {
 		mapperExisted = true
 		m.log.Info("LUKS mapper already open — reusing", zap.String("mapper", mapperName))
@@ -217,15 +218,50 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 		if err := runStdin(key, "cryptsetup", "luksOpen",
 			lvPath, mapperName, "--key-file=-",
 		); err != nil {
-			if !lvExisted {
-				m.lvremoveAudit(lvPath)
+			// STALE-LV recovery. A key that was freshly CREATED (not
+			// reconstructed) means every vault reported the handle absent, so
+			// nothing was ever encrypted under it. If an LV nonetheless exists
+			// and this key cannot open it, that LV belongs to a superseded key
+			// generation which no longer exists (e.g. a clean vault-constellation
+			// cutover discarded it) — its data is ALREADY unrecoverable. Reformat
+			// instead of failing forever: a production enclave has no SSH, so an
+			// operator cannot lvremove it by hand, and the app would be stranded.
+			// The expectExisting guard keeps the reconstructed-key path (real
+			// data) failing closed exactly as before.
+			if lvExisted && !expectExisting {
+				m.log.Warn("existing LV cannot be opened with the freshly created key — treating it as STALE and reformatting (its key generation is gone; the data was already unrecoverable)",
+					zap.String("container", name), zap.String("lv", lvName), zap.Error(err))
+				if ferr := runStdin(key, "cryptsetup", "luksFormat",
+					"--type", "luks2",
+					"--cipher", "aes-xts-plain64",
+					"--key-size", "512",
+					"--hash", "sha256",
+					"--integrity", "hmac-sha256",
+					"--iter-time", "2000",
+					"--key-file=-",
+					"--batch-mode",
+					lvPath,
+				); ferr != nil {
+					return nil, fmt.Errorf("volume: stale LV reformat failed: %w", ferr)
+				}
+				if oerr := runStdin(key, "cryptsetup", "luksOpen",
+					lvPath, mapperName, "--key-file=-",
+				); oerr != nil {
+					return nil, fmt.Errorf("volume: luksOpen after stale reformat failed: %w", oerr)
+				}
+				staleReformatted = true
+			} else {
+				if !lvExisted {
+					m.lvremoveAudit(lvPath)
+				}
+				return nil, fmt.Errorf("volume: luksOpen failed: %w", err)
 			}
-			return nil, fmt.Errorf("volume: luksOpen failed: %w", err)
 		}
 	}
 
-	// 4. Create ext4 filesystem — only on freshly formatted volumes.
-	if !lvExisted {
+	// 4. Create ext4 filesystem — on freshly formatted volumes, and on a
+	// stale LV we just reformatted (it holds no readable filesystem).
+	if !lvExisted || staleReformatted {
 		if err := run("mkfs.ext4", "-L", name, mapperPath); err != nil {
 			if !mapperExisted {
 				_ = run("cryptsetup", "luksClose", mapperName)
