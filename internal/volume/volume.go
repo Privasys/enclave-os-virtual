@@ -480,17 +480,29 @@ func (m *Manager) growPool() {
 		return
 	}
 	for _, pv := range strings.Fields(string(out)) {
-		// /dev/sdb1 -> sdb, /dev/nvme0n1p1 -> nvme0n1 (partition suffix off);
-		// bare-disk PVs pass through unchanged.
+		// Strip a PARTITION suffix only — bare-disk PVs keep their full name.
+		// NVMe partitions end in pN (nvme0n1p1 -> nvme0n1); a bare NVMe
+		// namespace (nvme0n2) must NOT be touched (the old TrimRight of all
+		// trailing digits mangled it to "nvme0n", so the rescan path never
+		// existed on c3 machines, which attach PDs as NVMe). SCSI-style
+		// partitions end in digits (sdb1 -> sdb); bare sdX has none.
 		base := strings.TrimPrefix(pv, "/dev/")
-		if i := strings.LastIndexByte(base, 'p'); i > 0 && strings.ContainsAny(base[i+1:], "0123456789") && strings.HasPrefix(base, "nvme") {
-			base = base[:i]
+		if strings.HasPrefix(base, "nvme") {
+			if i := strings.LastIndexByte(base, 'p'); i > 0 && !strings.ContainsAny(base[i+1:], "abcdefghijklmnopqrstuvwxyz") && base[i+1:] != "" {
+				base = base[:i]
+			}
 		} else {
 			base = strings.TrimRight(base, "0123456789")
 		}
-		rescan := "/sys/class/block/" + base + "/device/rescan"
-		if err := os.WriteFile(rescan, []byte("1"), 0o200); err != nil {
-			m.log.Debug("growPool: rescan not available", zap.String("path", rescan), zap.Error(err))
+		// Ask the kernel to re-read the device size. SCSI exposes a per-device
+		// rescan; NVMe only has a controller-level namespace rescan (the
+		// device/ symlink points at the controller, which carries it).
+		for _, f := range []string{"rescan", "rescan_controller"} {
+			p := "/sys/class/block/" + base + "/device/" + f
+			if err := os.WriteFile(p, []byte("1"), 0o200); err == nil {
+				m.log.Info("growPool: device rescan", zap.String("path", p))
+				break
+			}
 		}
 		if err := run("pvresize", pv); err != nil {
 			m.log.Warn("growPool: pvresize failed", zap.String("pv", pv), zap.Error(err))
@@ -583,7 +595,7 @@ func runCryptsetupTwoKeys(existingKey, newKey string, args ...string) error {
 // not already set. Non-LVM tools get env unchanged.
 func lvmEnv(env []string, name string) []string {
 	switch name {
-	case "lvcreate", "lvremove", "lvs", "vgcreate", "vgs", "pvcreate", "pvs":
+	case "lvcreate", "lvremove", "lvs", "vgcreate", "vgs", "pvcreate", "pvs", "pvresize", "vgextend":
 	default:
 		return env
 	}
