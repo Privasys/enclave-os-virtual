@@ -1138,13 +1138,17 @@ func (s *Server) handleSetConfigComplete(w http.ResponseWriter, r *http.Request)
 
 // handleMintVaultIdentity mints a one-shot RA-TLS vault client identity for the
 // calling container, bound to the vault's per-connection challenge. The caller
-// authenticates with its launcher-minted container token over loopback, and the
-// manager only ever stamps the app id the token maps to — so a container cannot
-// obtain another app's identity. The manager is the platform's sole minter,
-// which is what makes the stamped app id (OID 3.6) trustworthy to the vault.
+// authenticates with its launcher-minted container token from inside the
+// enclave, and the manager only ever stamps the app id the token maps to — so a
+// container cannot obtain another app's identity. The manager is the platform's
+// sole minter, which is what makes the stamped app id (OID 3.6) trustworthy to
+// the vault. Like requireContainerSelf, the source check accepts loopback OR
+// the container bridge subnet (since #45 a container reaches the manager from
+// its private bridge IP, never loopback); the container token is the actual
+// identity binding.
 func (s *Server) handleMintVaultIdentity(w http.ResponseWriter, r *http.Request) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil || !isLoopbackHost(host) {
+	if err != nil || !isInEnclaveCaller(host) {
 		s.jsonError(w, http.StatusForbidden, "this endpoint is reachable only from inside the enclave")
 		return
 	}
