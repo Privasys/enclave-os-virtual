@@ -540,19 +540,21 @@ var oidPrivasysArc = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 65230}
 
 // containerDeclarableArc reports whether a sub-arc under the Privasys PEN
 // (1.3.6.1.4.1.65230) may be self-declared by a container: the app arc only —
-// 3.5 (AI model digest), 3.5.* (SDK-installed app extensions) and per-app
-// slots at 3.7 and above (e.g. 3.7 AI tools digest). Everything else under
-// the PEN is manager-owned identity/config data.
+// 3.5 (AI model digest) and 3.5.* (app-owned extensions, e.g. 3.5.7 the AI
+// tools digest, and SDK-installed extensions). Every other slot under the PEN
+// is reserved for manager-owned identity/config data, including top-level 3.x
+// slots not yet assigned — an app must never squat an OID the platform may
+// later stamp.
 func containerDeclarableArc(sub asn1.ObjectIdentifier) bool {
-	return len(sub) >= 2 && sub[0] == 3 && (sub[1] == 5 || sub[1] >= 7)
+	return len(sub) >= 2 && sub[0] == 3 && sub[1] == 5
 }
 
 // reservedExtensionOID reports whether a container-declared extension OID must
 // be dropped at certificate issuance: the Intel quote OIDs and every
-// manager-owned Privasys OID (platform 1.*/2.*, workload identity 3.1-3.4 and
-// 3.6, hardware evidence 4.*/5.*, dependency set 6.*). The same trust rule as
-// the manager's own extension writer: identity is stamped by the measured
-// manager, never self-declared.
+// manager-owned Privasys OID (platform 1.*/2.*, workload identity 3.1-3.4,
+// 3.6 and unassigned 3.x slots, hardware evidence 4.*/5.*, dependency set
+// 6.*). The same trust rule as the manager's own extension writer: identity is
+// stamped by the measured manager, never self-declared.
 func reservedExtensionOID(oid asn1.ObjectIdentifier) bool {
 	if oid.Equal(oidTDXQuote) || oid.Equal(oidSGXQuote) {
 		return true
