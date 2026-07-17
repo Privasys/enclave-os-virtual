@@ -467,7 +467,7 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 	// Both commands are cheap no-ops when nothing changed, and ext4 grows
 	// online (never shrinks — the resize API is grow-only).
 	if lvExisted && !staleReformatted {
-		m.growInnerLayers(mapperName, mapperPath)
+		m.growInnerLayers(mapperName, mapperPath, key)
 	}
 
 	m.log.Info("encrypted volume ready",
@@ -582,13 +582,24 @@ func (m *Manager) Remove(name string) error {
 }
 
 // growInnerLayers extends the dm-crypt mapping and the ext4 filesystem to the
-// (possibly grown) LV. cryptsetup resize works on the open mapper; resize2fs
-// grows ext4 ONLINE while mounted. Both are no-ops when nothing changed.
-// Best-effort: a failed grow leaves the volume at its old usable size, which
-// the next attach or resize retries.
-func (m *Manager) growInnerLayers(mapperName, mapperPath string) {
-	if err := run("cryptsetup", "resize", mapperName); err != nil {
-		m.log.Warn("cryptsetup resize failed", zap.String("mapper", mapperName), zap.Error(err))
+// (possibly grown) LV. LUKS2 `cryptsetup resize` needs the volume KEY (it
+// re-authorises the mapping; without it the tool prompts and fails with
+// "Nothing to read on input"), so the reliable convergence point is the
+// attach path in Create, where the key is in hand. Passing key="" attempts a
+// keyless resize (works when the volume key sits in the kernel keyring) and
+// otherwise leaves the grow for the next attach. resize2fs grows ext4 ONLINE
+// while mounted. All steps are no-ops when nothing changed; best-effort — a
+// failed grow leaves the volume at its old usable size for a later retry.
+func (m *Manager) growInnerLayers(mapperName, mapperPath, key string) {
+	var err error
+	if key != "" {
+		err = runStdin(key, "cryptsetup", "resize", mapperName, "--key-file=-")
+	} else {
+		err = run("cryptsetup", "resize", mapperName)
+	}
+	if err != nil {
+		m.log.Warn("cryptsetup resize failed (a pending grow converges on the next attach)",
+			zap.String("mapper", mapperName), zap.Error(err))
 		return
 	}
 	if err := run("resize2fs", mapperPath); err != nil {
@@ -610,17 +621,25 @@ func (m *Manager) Resize(name, size string) error {
 	if _, err := os.Stat(lvPath); err != nil {
 		return fmt.Errorf("volume: %q has no LV on this host", name)
 	}
-	if err := run("lvextend", "-L", size, lvPath); err != nil {
+	// A same-size extend is a no-op request, not an error (retries after a
+	// partially-applied resize land here).
+	lvextendOK := func(err error) bool {
+		return err == nil || strings.Contains(err.Error(), "matches existing size")
+	}
+	if err := run("lvextend", "-L", size, lvPath); !lvextendOK(err) {
 		// The pool may need to grow into an agent-resized disk first.
 		m.log.Warn("lvextend failed — rescanning the containers pool and retrying",
 			zap.String("lv", lvName), zap.String("size", size), zap.Error(err))
 		m.growPool()
-		if err := run("lvextend", "-L", size, lvPath); err != nil {
+		if err := run("lvextend", "-L", size, lvPath); !lvextendOK(err) {
 			return fmt.Errorf("volume: lvextend failed (pool exhausted? grow the containers disk via cloud-ops): %w", err)
 		}
 	}
 	if _, err := os.Stat(mapperPath); err == nil {
-		m.growInnerLayers(mapperName, mapperPath)
+		// Keyless attempt: succeeds when the LUKS2 volume key is in the
+		// kernel keyring; otherwise the grow converges on the next attach
+		// (Create's step 6, which holds the key).
+		m.growInnerLayers(mapperName, mapperPath, "")
 	}
 	m.log.Info("volume resized", zap.String("container", name), zap.String("size", size))
 	return nil
@@ -894,7 +913,7 @@ func runCryptsetupTwoKeys(existingKey, newKey string, args ...string) error {
 // not already set. Non-LVM tools get env unchanged.
 func lvmEnv(env []string, name string) []string {
 	switch name {
-	case "lvcreate", "lvremove", "lvs", "vgcreate", "vgs", "pvcreate", "pvs", "pvresize", "vgextend":
+	case "lvcreate", "lvremove", "lvextend", "lvs", "vgcreate", "vgs", "pvcreate", "pvs", "pvresize", "vgextend":
 	default:
 		return env
 	}
