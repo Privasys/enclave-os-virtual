@@ -450,7 +450,6 @@ type Launcher struct {
 	containerTrees  map[string]*merkle.Tree
 	imageDigests    map[string][]byte
 	appIDs          map[string][]byte // container name → raw 16-byte app id (OID 3.6)
-	debugRawAppID   map[string]string // DEBUG: container name → raw req.AppId string as received (temporary, tdx-v0.2.58-dev)
 	containerdHash  []byte
 	combinedImgHash [32]byte
 
@@ -598,7 +597,6 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		containerTrees:    make(map[string]*merkle.Tree),
 		imageDigests:      make(map[string][]byte),
 		appIDs:            make(map[string][]byte),
-		debugRawAppID:     make(map[string]string),
 		pulledImages:      make(map[string]client.Image),
 		specs:             make(map[string]manifest.Container),
 		volumeEncryption:  make(map[string]string),
@@ -1444,10 +1442,6 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	l.specs[req.Name] = spec
 	l.pulledImages[req.Name] = img
 	l.imageDigests[req.Name] = digest
-	// DEBUG (tdx-v0.2.58-dev): stash the raw app_id string as received on the
-	// wire, unconditionally, so writeContainerExtensions can surface it in the
-	// serving cert for out-of-band diagnosis of the missing OID 3.6.
-	l.debugRawAppID[req.Name] = req.AppId
 	if appID := parseAppID(req.AppId); appID != nil {
 		l.appIDs[req.Name] = appID
 	}
@@ -1581,7 +1575,6 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	delete(l.pulledImages, name)
 	delete(l.imageDigests, name)
 	delete(l.appIDs, name)
-	delete(l.debugRawAppID, name)
 	delete(l.containerTrees, name)
 	delete(l.volumeEncryption, name)
 	delete(l.persistentVolume, name)
@@ -2097,18 +2090,6 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string, port
 	// mgmt-provided value stamped on vault identity leaves (MintVaultIdentity),
 	// never the container's self-declared /.well-known extensions.
 	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc, l.appIDs[containerName])
-
-	// DEBUG (tdx-v0.2.58-dev): surface the runtime app-id state in the serving
-	// cert under the app-declarable 3.5.* arc so it can be read via `attest`
-	// without enclave SSH. 3.5.98 = raw req.AppId string as received on the
-	// wire; 3.5.99 = "len=<N>" of the parsed l.appIDs entry at write time.
-	// Remove once the missing-3.6 cause is found.
-	if oid98, err := oids.ParseEnvVarOID("98"); err == nil {
-		exts = append(exts, oids.Extension(oid98, []byte(l.debugRawAppID[containerName])))
-	}
-	if oid99, err := oids.ParseEnvVarOID("99"); err == nil {
-		exts = append(exts, oids.Extension(oid99, []byte(fmt.Sprintf("len=%d", len(l.appIDs[containerName])))))
-	}
 
 	// Per-app SDK-set X.509 attestation extensions (OIDs under
 	// 1.3.6.1.4.1.65230.3.5.*). Sourced from the in-process oidExts
