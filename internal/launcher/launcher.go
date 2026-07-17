@@ -406,6 +406,20 @@ func parseAppID(s string) []byte {
 	return b
 }
 
+// AppIDHex normalises an app id string (a UUID, with or without hyphens) to the
+// canonical 32-char lowercase hex encoding: the form the per-app IdP roles use
+// (<audience>:app:<hex>:owner|admin, which the IdP pins to [0-9a-f]{32}) and the
+// same encoding pinned at OID 3.6. The control plane sends app_id as a hyphenated
+// UUID, so the role string must be built from this — never from the raw field.
+// Returns "" for empty or malformed input.
+func AppIDHex(s string) string {
+	b := parseAppID(s)
+	if b == nil {
+		return ""
+	}
+	return hex.EncodeToString(b)
+}
+
 // runtimeEnv returns additional environment variables that should be
 // injected at container creation time but NOT measured into attestation.
 func (r *LoadRequest) runtimeEnv() map[string]string {

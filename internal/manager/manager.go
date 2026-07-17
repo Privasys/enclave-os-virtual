@@ -1422,10 +1422,14 @@ func (s *Server) authorizeConfigure(r *http.Request, containerName string, st la
 	if err != nil {
 		return fmt.Errorf("invalid token: %w", err)
 	}
-	if st.AppID != "" {
+	// The role is keyed on the canonical hex app id, not the hyphenated UUID the
+	// control plane sends in the load envelope: the IdP pins app roles to
+	// [0-9a-f]{32}, so comparing against st.AppID verbatim never matches and every
+	// caller silently fell through to the owners-list fallback below.
+	if hexID := launcher.AppIDHex(st.AppID); hexID != "" {
 		aud := s.verifier.Audience()
-		ownerRole := aud + ":app:" + st.AppID + ":owner"
-		adminRole := aud + ":app:" + st.AppID + ":admin"
+		ownerRole := aud + ":app:" + hexID + ":owner"
+		adminRole := aud + ":app:" + hexID + ":admin"
 		for _, role := range roles {
 			if role == ownerRole || role == adminRole {
 				s.log.Info("configure authorized by app config role",
