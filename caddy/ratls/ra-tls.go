@@ -499,6 +499,11 @@ func (iss *RATLSIssuer) loadHostnameExtensions(hostname string) ([]pkix.Extensio
 	}
 
 	// Pull dynamic extensions from the container if an upstream is configured.
+	// Reserved (manager-owned / hardware-evidence) OIDs are stripped: the
+	// container may only declare its own app arc, never an identity extension
+	// the manager stamps (image digest 3.2, app id 3.6, dependency set 6.1, ...)
+	// — otherwise a workload could spoof or duplicate the attested identity on
+	// its own serving certificate.
 	if file.Upstream != "" {
 		dynamic, err := fetchContainerExtensions(file.Upstream)
 		if err != nil {
@@ -506,8 +511,15 @@ func (iss *RATLSIssuer) loadHostnameExtensions(hostname string) ([]pkix.Extensio
 				zap.String("hostname", hostname),
 				zap.String("upstream", file.Upstream),
 				zap.Error(err))
-		} else if len(dynamic) > 0 {
-			exts = append(exts, dynamic...)
+		}
+		for _, ext := range dynamic {
+			if reservedExtensionOID(ext.Id) {
+				iss.logger.Warn("dropping reserved OID self-declared by container",
+					zap.String("hostname", hostname),
+					zap.String("oid", ext.Id.String()))
+				continue
+			}
+			exts = append(exts, ext)
 		}
 	}
 
@@ -516,6 +528,44 @@ func (iss *RATLSIssuer) loadHostnameExtensions(hostname string) ([]pkix.Extensio
 		zap.Int("count", len(exts)),
 		zap.Bool("has_upstream", file.Upstream != ""))
 	return exts, nil
+}
+
+// oidSGXQuote is the Intel SGX DCAP quote extension OID; reserved alongside
+// the TDX one even though this plugin only ever attaches TDX quotes.
+var oidSGXQuote = asn1.ObjectIdentifier{1, 2, 840, 113741, 1, 13, 1, 0}
+
+// oidPrivasysArc is the Privasys Private Enterprise Number arc all platform
+// extension OIDs live under.
+var oidPrivasysArc = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 65230}
+
+// containerDeclarableArc reports whether a sub-arc under the Privasys PEN
+// (1.3.6.1.4.1.65230) may be self-declared by a container: the app arc only —
+// 3.5 (AI model digest), 3.5.* (SDK-installed app extensions) and per-app
+// slots at 3.7 and above (e.g. 3.7 AI tools digest). Everything else under
+// the PEN is manager-owned identity/config data.
+func containerDeclarableArc(sub asn1.ObjectIdentifier) bool {
+	return len(sub) >= 2 && sub[0] == 3 && (sub[1] == 5 || sub[1] >= 7)
+}
+
+// reservedExtensionOID reports whether a container-declared extension OID must
+// be dropped at certificate issuance: the Intel quote OIDs and every
+// manager-owned Privasys OID (platform 1.*/2.*, workload identity 3.1-3.4 and
+// 3.6, hardware evidence 4.*/5.*, dependency set 6.*). The same trust rule as
+// the manager's own extension writer: identity is stamped by the measured
+// manager, never self-declared.
+func reservedExtensionOID(oid asn1.ObjectIdentifier) bool {
+	if oid.Equal(oidTDXQuote) || oid.Equal(oidSGXQuote) {
+		return true
+	}
+	if len(oid) <= len(oidPrivasysArc) {
+		return false
+	}
+	for i, v := range oidPrivasysArc {
+		if oid[i] != v {
+			return false
+		}
+	}
+	return !containerDeclarableArc(oid[len(oidPrivasysArc):])
 }
 
 // fetchContainerExtensions calls GET <upstream>/.well-known/attestation-extensions
