@@ -17,7 +17,7 @@
 //	  3.2 Container Image Digest (SHA-256 of OCI manifest)
 //	  3.3 Container Image Reference (e.g. ghcr.io/example/myapp)
 //	  3.4 Container Volume Encryption
-//	  3.5 Container Model Digest (SHA-256 of AI/ML model weights)
+//	  3.5 Container Model Digest (legacy slot; canonical home is app arc 3.5.5)
 //	  3.6 Container App Id (apps.id, raw 16-byte UUID)
 //	5.*   Hardware accelerator attestation evidence
 //	  5.1 NVIDIA GPU CC attestation evidence (carried alongside the TDX
@@ -146,14 +146,17 @@ var ContainerImageRef = append(append(asn1.ObjectIdentifier{}, privasysArc...), 
 // encrypted with its own LUKS2+AEAD key.
 var ContainerVolumeEncryption = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 4)
 
-// ContainerModelDigest is the SHA-256 digest of the AI/ML model weights
-// loaded inside the container.  The value is the raw 32-byte hash.
-// This OID is only present when the container reports a model digest
-// (e.g. via the /health endpoint's model_digest field).
+// ContainerModelDigest is the LEGACY slot for the SHA-256 digest of the AI/ML
+// model weights loaded inside the container (raw 32-byte hash, self-declared
+// by the container via /.well-known/attestation-extensions — the manager never
+// stamps it, and this constant is not referenced by manager code).
 //
-// It allows verifiers to confirm exactly which model weights are being
-// used for inference, complementing the container image digest (OID 3.2)
-// which covers the code but not the dynamically-loaded model.
+// Deprecated: the model digest is an app-specific value and moved under the
+// app arc, to 3.5.5 (fleet images v0.5+; older fleets emit both during the
+// migration). Literal 3.5 is enclave-os-mini's runtime-stamped configuration
+// hash — once no live verifier reads the model digest here, remove the legacy
+// emission and reserve literal 3.5 in the Caddy filter so every top-level 3.x
+// OID is uniformly runtime-stamped.
 var ContainerModelDigest = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 5)
 
 // ContainerAppId is the platform-assigned app identity (apps.id, the raw
