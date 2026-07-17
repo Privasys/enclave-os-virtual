@@ -561,6 +561,14 @@ func (m *Manager) Close(name string) error {
 // Remove closes and destroys a container's encrypted volume completely.
 // The LV is removed — all data is permanently lost.
 func (m *Manager) Remove(name string) error {
+	// Idempotent: an already-absent LV is the desired end state, not an error
+	// (the platform retries volume deletion after partial failures, and a
+	// retry must converge instead of failing on "Failed to find logical
+	// volume").
+	if _, err := os.Stat("/dev/" + VGName + "/vol-" + name); err != nil {
+		m.log.Info("volume already absent — remove is a no-op", zap.String("container", name))
+		return nil
+	}
 	if err := m.Close(name); err != nil {
 		// Log but continue with LV removal.
 		m.log.Warn("close failed during remove, continuing with LV removal",
