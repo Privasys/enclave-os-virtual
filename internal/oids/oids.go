@@ -18,7 +18,7 @@
 //	  3.3 Container Image Reference (e.g. ghcr.io/example/myapp)
 //	  3.4 Container Volume Encryption
 //	  3.5 Container Model Digest (SHA-256 of AI/ML model weights)
-//	  3.6 Container App Id (apps.id, raw 16-byte UUID; MR_APP vault sealing)
+//	  3.6 Container App Id (apps.id, raw 16-byte UUID)
 //	5.*   Hardware accelerator attestation evidence
 //	  5.1 NVIDIA GPU CC attestation evidence (carried alongside the TDX
 //	      quote; the tdx-gpu combined case). Aligned with the RA-TLS
@@ -159,9 +159,11 @@ var ContainerModelDigest = append(append(asn1.ObjectIdentifier{}, privasysArc...
 // ContainerAppId is the platform-assigned app identity (apps.id, the raw
 // 16-byte UUID) for a specific container. It pins WHICH app a container is, so a
 // vault key bound to it (MR_APP sealing mode) cannot be unsealed by a same-image
-// peer carrying a different app-id. The platform assigns it; the measured manager
-// stamps it, so a peer cannot forge another app's id. See
-// the MR_APP / promote-step-up design.
+// peer carrying a different app-id, and so clients (wallet, dependents) can read
+// the management app id straight off the attested leaf. The platform assigns it;
+// the measured manager stamps it — on the standing serving cert (via
+// ContainerExtensions) and on manager-minted vault identity leaves alike — so a
+// container cannot forge another app's id. See the MR_APP / promote-step-up design.
 var ContainerAppId = append(append(asn1.ObjectIdentifier{}, privasysArc...), 3, 6)
 
 // AttestedDependencySet carries a container's set of DIRECT attested
@@ -250,13 +252,15 @@ func PlatformExtensions(quote []byte, quoteOID asn1.ObjectIdentifier, merkleRoot
 
 // ContainerExtensions returns the set of X.509 extensions for a per-container
 // RA-TLS leaf certificate.  volumeEncryption may be empty to omit the OID.
+// appID is the platform-assigned app identity (raw 16-byte UUID) stamped at
+// OID 3.6; nil/empty omits the OID (pre-app-id deployments).
 //
 // Note: application-specific OIDs (e.g. OID 3.5 model digest) are not included
 // here. Those are served by the container itself via the
 // /.well-known/attestation-extensions endpoint and pulled by Caddy's RA-TLS
 // module at certificate issuance time, the same way enclave-os-mini's
 // custom_oids() works.
-func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef string, volumeEncryption string) []pkix.Extension {
+func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef string, volumeEncryption string, appID []byte) []pkix.Extension {
 	// Strip @sha256:... from the image ref; the digest is captured in OID 3.2.
 	if i := strings.Index(imageRef, "@"); i >= 0 {
 		imageRef = imageRef[:i]
@@ -268,6 +272,9 @@ func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef
 	}
 	if volumeEncryption != "" {
 		exts = append(exts, Extension(ContainerVolumeEncryption, []byte(volumeEncryption)))
+	}
+	if len(appID) > 0 {
+		exts = append(exts, Extension(ContainerAppId, appID))
 	}
 	return exts
 }

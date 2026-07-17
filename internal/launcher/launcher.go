@@ -1892,7 +1892,7 @@ func (l *Launcher) ContainerExtensions(containerName string) ([]pkix.Extension, 
 	digest := l.imageDigests[containerName]
 	volEnc := l.volumeEncryption[containerName]
 
-	return oids.ContainerExtensions(root, digest, spec.Image, volEnc), nil
+	return oids.ContainerExtensions(root, digest, spec.Image, volEnc, l.appIDs[containerName]), nil
 }
 
 // TPMEvents returns the application event log for RTMR[3] replay verification.
@@ -2085,8 +2085,11 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string, port
 	digest := l.imageDigests[containerName]
 	volEnc := l.volumeEncryption[containerName]
 
-	// Build the extensions list (without the quote - the RA-TLS module adds that).
-	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc)
+	// Build the extensions list (without the quote - the RA-TLS module adds
+	// that). Includes the platform-assigned app id at OID 3.6 — the same
+	// mgmt-provided value stamped on vault identity leaves (MintVaultIdentity),
+	// never the container's self-declared /.well-known extensions.
+	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc, l.appIDs[containerName])
 
 	// Per-app SDK-set X.509 attestation extensions (OIDs under
 	// 1.3.6.1.4.1.65230.3.5.*). Sourced from the in-process oidExts
