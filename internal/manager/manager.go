@@ -365,6 +365,12 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("POST /api/v1/containers/{name}/freeze", s.requireAuth(s.handleFreezeContainer))
 	mux.HandleFunc("POST /api/v1/containers/{name}/rotate-key", s.requireAuth(s.handleRotateKey))
 
+	// First-class volumes: inventory/usage, online grow, and owner-requested
+	// deletion (refused while the container is loaded). Named by container.
+	mux.HandleFunc("GET /api/v1/volumes", s.requireAuth(s.handleListVolumes))
+	mux.HandleFunc("POST /api/v1/volumes/{name}/resize", s.requireAuth(s.handleResizeVolume))
+	mux.HandleFunc("DELETE /api/v1/volumes/{name}", s.requireAuth(s.handleDeleteVolume))
+
 	// SDK setAttestationExtension: container apps call this to install
 	// (or update) a per-app X.509 extension under
 	// 1.3.6.1.4.1.65230.3.5.*. The new value is reflected in the next
@@ -937,6 +943,80 @@ func (s *Server) handleFreezeContainer(w http.ResponseWriter, r *http.Request) {
 // volume), "retire" kills the old keyslot once the platform has advanced the
 // app's key handle to the new generation. Manager-role only. See the
 // key-rotation design.
+// handleListVolumes reports every container LV with usage where mounted.
+func (s *Server) handleListVolumes(w http.ResponseWriter, r *http.Request) {
+	result := r.Context().Value(authResultKey).(*auth.AuthResult)
+	if !result.HasManagerAccess() {
+		s.jsonError(w, http.StatusForbidden, "manager role required for volume operations")
+		return
+	}
+	vols, err := s.launcher.VolumeList()
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"volumes": vols})
+}
+
+// volumeNameParam resolves the {name} path segment, accepting either the
+// container name or the LV name ("vol-<container>") the platform records.
+func volumeNameParam(r *http.Request) string {
+	return strings.TrimPrefix(r.PathValue("name"), "vol-")
+}
+
+// handleResizeVolume grows a container volume (grow-only). Body: {"size":"50G"}.
+func (s *Server) handleResizeVolume(w http.ResponseWriter, r *http.Request) {
+	result := r.Context().Value(authResultKey).(*auth.AuthResult)
+	if !result.HasManagerAccess() {
+		s.jsonError(w, http.StatusForbidden, "manager role required for volume operations")
+		return
+	}
+	name := volumeNameParam(r)
+	if name == "" {
+		s.jsonError(w, http.StatusBadRequest, "volume name is required")
+		return
+	}
+	var req struct {
+		Size string `json:"size"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Size == "" {
+		s.jsonError(w, http.StatusBadRequest, "size is required (e.g. \"50G\")")
+		return
+	}
+	if err := s.launcher.VolumeResize(name, req.Size); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]string{"status": "resized", "size": req.Size})
+}
+
+// handleDeleteVolume removes a container volume's LV on the owner's explicit
+// request. Refused while the container is loaded.
+func (s *Server) handleDeleteVolume(w http.ResponseWriter, r *http.Request) {
+	result := r.Context().Value(authResultKey).(*auth.AuthResult)
+	if !result.HasManagerAccess() {
+		s.jsonError(w, http.StatusForbidden, "manager role required for volume operations")
+		return
+	}
+	name := volumeNameParam(r)
+	if name == "" {
+		s.jsonError(w, http.StatusBadRequest, "volume name is required")
+		return
+	}
+	if err := s.launcher.VolumeDelete(name); err != nil {
+		code := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "is loaded") {
+			code = http.StatusConflict
+		}
+		if strings.Contains(err.Error(), "has no LV") {
+			code = http.StatusNotFound
+		}
+		s.jsonError(w, code, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 	result := r.Context().Value(authResultKey).(*auth.AuthResult)
 	if !result.HasManagerAccess() {
@@ -1256,6 +1336,13 @@ func (s *Server) jsonError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// writeJSON writes a JSON success response.
+func (s *Server) writeJSON(w http.ResponseWriter, code int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // handleMetrics serves Prometheus metrics with auth check.

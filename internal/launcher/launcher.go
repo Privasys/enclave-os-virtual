@@ -1900,6 +1900,43 @@ func (l *Launcher) TPMEvents() []tpm.Event {
 	return l.tpmExtender.Events()
 }
 
+// VolumeList reports every LV on the containers VG with filesystem usage
+// where mounted (first-class volumes: the platform's usage/inventory view).
+func (l *Launcher) VolumeList() ([]volume.Usage, error) {
+	if l.volMgr == nil {
+		return nil, fmt.Errorf("launcher: volumes are not available on this host")
+	}
+	return l.volMgr.List()
+}
+
+// VolumeResize grows a container volume (grow-only; online when attached, LV
+// now + inner layers on next attach when detached).
+func (l *Launcher) VolumeResize(name, size string) error {
+	if l.volMgr == nil {
+		return fmt.Errorf("launcher: volumes are not available on this host")
+	}
+	return l.volMgr.Resize(name, size)
+}
+
+// VolumeDelete removes a container volume's LV — the owner's explicit
+// deletion (or app delete --with-volume). Refused while the container is
+// loaded: unload/stop the app first. The encrypted data is gone with the LV;
+// the vault key ages out via the constellation's expiry.
+func (l *Launcher) VolumeDelete(name string) error {
+	if l.volMgr == nil {
+		return fmt.Errorf("launcher: volumes are not available on this host")
+	}
+	l.mu.RLock()
+	_, loaded := l.specs[name]
+	l.mu.RUnlock()
+	if loaded {
+		return fmt.Errorf("launcher: container %q is loaded — unload it before deleting its volume", name)
+	}
+	l.log.Warn("deleting container volume on owner request (encrypted data is destroyed)",
+		zap.String("container", name))
+	return l.volMgr.Remove(name)
+}
+
 // StatusReport returns a summary of all containers and their health.
 //
 // Deliberately does NOT take l.mu: Load holds it across a multi-minute

@@ -461,6 +461,15 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 		m.log.Info("mountpoint already mounted — reusing", zap.String("path", mountPath))
 	}
 
+	// 6. Converge a pending grow. A volume resized while DETACHED only grew
+	// its LV (the inner layers need the key, which only exists here); catch
+	// the mapper and filesystem up now that the volume is open and mounted.
+	// Both commands are cheap no-ops when nothing changed, and ext4 grows
+	// online (never shrinks — the resize API is grow-only).
+	if lvExisted && !staleReformatted {
+		m.growInnerLayers(mapperName, mapperPath)
+	}
+
 	m.log.Info("encrypted volume ready",
 		zap.String("container", name),
 		zap.String("mount", mountPath),
@@ -570,6 +579,94 @@ func (m *Manager) Remove(name string) error {
 	}
 
 	return nil
+}
+
+// growInnerLayers extends the dm-crypt mapping and the ext4 filesystem to the
+// (possibly grown) LV. cryptsetup resize works on the open mapper; resize2fs
+// grows ext4 ONLINE while mounted. Both are no-ops when nothing changed.
+// Best-effort: a failed grow leaves the volume at its old usable size, which
+// the next attach or resize retries.
+func (m *Manager) growInnerLayers(mapperName, mapperPath string) {
+	if err := run("cryptsetup", "resize", mapperName); err != nil {
+		m.log.Warn("cryptsetup resize failed", zap.String("mapper", mapperName), zap.Error(err))
+		return
+	}
+	if err := run("resize2fs", mapperPath); err != nil {
+		m.log.Warn("resize2fs failed", zap.String("mapper", mapperName), zap.Error(err))
+	}
+}
+
+// Resize grows a container volume's LV to `size` (an absolute lvextend size,
+// e.g. "50G"; grow-only — lvextend refuses to shrink). When the volume is
+// attached (mapper open), the encrypted mapping and filesystem grow online in
+// the same call; a detached volume grows its LV now and the inner layers
+// converge on the next attach (they need the key, which only exists while the
+// container is loaded).
+func (m *Manager) Resize(name, size string) error {
+	lvName := "vol-" + name
+	lvPath := "/dev/" + VGName + "/" + lvName
+	mapperName := "container-" + name
+	mapperPath := "/dev/mapper/" + mapperName
+	if _, err := os.Stat(lvPath); err != nil {
+		return fmt.Errorf("volume: %q has no LV on this host", name)
+	}
+	if err := run("lvextend", "-L", size, lvPath); err != nil {
+		// The pool may need to grow into an agent-resized disk first.
+		m.log.Warn("lvextend failed — rescanning the containers pool and retrying",
+			zap.String("lv", lvName), zap.String("size", size), zap.Error(err))
+		m.growPool()
+		if err := run("lvextend", "-L", size, lvPath); err != nil {
+			return fmt.Errorf("volume: lvextend failed (pool exhausted? grow the containers disk via cloud-ops): %w", err)
+		}
+	}
+	if _, err := os.Stat(mapperPath); err == nil {
+		m.growInnerLayers(mapperName, mapperPath)
+	}
+	m.log.Info("volume resized", zap.String("container", name), zap.String("size", size))
+	return nil
+}
+
+// Usage describes one LV on the containers VG, with filesystem usage when the
+// volume is currently mounted (a detached volume's usage is unknowable without
+// its key — the platform reports its provisioned size only).
+type Usage struct {
+	LVName  string `json:"lv_name"`
+	SizeMB  int64  `json:"size_mb"`
+	Mounted bool   `json:"mounted"`
+	UsedMB  *int64 `json:"used_mb,omitempty"`
+	AvailMB *int64 `json:"avail_mb,omitempty"`
+}
+
+// List returns every LV on the containers VG with usage where mounted.
+func (m *Manager) List() ([]Usage, error) {
+	cmd := exec.Command("lvs", "--noheadings", "--units", "m", "--nosuffix",
+		"-o", "lv_name,lv_size", "--select", "vg_name="+VGName)
+	cmd.Env = lvmEnv(os.Environ(), "lvs")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("volume: lvs: %w\n%s", err, string(out))
+	}
+	var vols []Usage
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		sizeMB, _ := strconv.ParseFloat(fields[1], 64)
+		u := Usage{LVName: fields[0], SizeMB: int64(sizeMB)}
+		mountPath := MountBase + "/" + strings.TrimPrefix(fields[0], "vol-")
+		var st syscall.Statfs_t
+		if isMountpoint(mountPath) && syscall.Statfs(mountPath, &st) == nil {
+			u.Mounted = true
+			bs := int64(st.Bsize)
+			total := int64(st.Blocks) * bs / (1024 * 1024)
+			avail := int64(st.Bavail) * bs / (1024 * 1024)
+			used := total - int64(st.Bfree)*bs/(1024*1024)
+			u.UsedMB, u.AvailMB = &used, &avail
+		}
+		vols = append(vols, u)
+	}
+	return vols, nil
 }
 
 // ---------------------------------------------------------------------------
