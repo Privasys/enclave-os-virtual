@@ -1292,6 +1292,19 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				MgmtURL:      l.cfg.ToolSpecMgmtURL,
 				EnclaveID:    l.cfg.ToolSpecEnclaveID,
 				EnclaveToken: l.cfg.ToolSpecEnclaveToken,
+				// Secure the LV BEFORE the DEK is created, so the two commit in
+				// an order we can recover from. A key created for a volume that
+				// then cannot be allocated (an exhausted pool is the common
+				// case) is permanently poisoned: every retry reconstructs the
+				// key, expects the data that implies, and fails closed against
+				// the missing LV — and no rotate-key can clear it, because that
+				// needs the app running. Reserving first means a capacity
+				// failure leaves no key behind and the retry starts clean; the
+				// bare LV a later failure may leave is harmless, since Create
+				// keys its format decision on the LUKS header, not on existence.
+				BeforeProvision: func() error {
+					return l.volMgr.Reserve(req.Name, req.Storage)
+				},
 			}, req.KeyHandle, req.KeyCreationGrant, digest, parseAppID(req.AppId))
 			if err != nil {
 				return nil, fmt.Errorf("launcher: vault volume key: %w", err)

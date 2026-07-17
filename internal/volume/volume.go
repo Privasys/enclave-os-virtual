@@ -33,12 +33,15 @@ package volume
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
+	"unsafe"
 
 	"go.uber.org/zap"
 )
@@ -119,6 +122,86 @@ func (m *Manager) lvremoveAudit(lvPath string) {
 	_ = run("lvremove", "-f", lvPath)
 }
 
+// Reserve allocates the LV for a container WITHOUT touching its contents, so a
+// caller can secure capacity before it commits to anything harder to undo (the
+// vault DEK: creating a key we then cannot back with an LV poisons the handle
+// forever — see Config.BeforeProvision). Idempotent: an existing LV is left
+// exactly as it is.
+//
+// A reserved-but-unformatted LV is safe to leave behind: Create keys its format
+// decision on whether the LV carries a LUKS header, not on whether it exists, so
+// the next attempt formats it in place.
+func (m *Manager) Reserve(name, size string) error {
+	if size == "" {
+		size = DefaultSize
+	}
+	lvName := "vol-" + name
+	lvPath := "/dev/" + VGName + "/" + lvName
+	if _, err := os.Stat(lvPath); err == nil {
+		return nil
+	}
+	if err := run("lvcreate", "-L", size, "-n", lvName, VGName, "-y"); err != nil {
+		// Same just-in-time growth retry as Create: the pool may not yet have
+		// grown into a disk the cloud-ops agent already resized.
+		m.log.Warn("reserve: lvcreate failed — rescanning the containers pool for a grown disk and retrying",
+			zap.String("lv", lvName), zap.String("size", size), zap.Error(err))
+		m.growPool()
+		if err := run("lvcreate", "-L", size, "-n", lvName, VGName, "-y"); err != nil {
+			return fmt.Errorf("volume: reserve %q: lvcreate failed (pool exhausted? grow the containers disk via cloud-ops, it is picked up automatically): %w", name, err)
+		}
+	}
+	m.log.Info("reserved LV ahead of key provisioning",
+		zap.String("container", name), zap.String("lv", lvName), zap.String("size", size))
+	return nil
+}
+
+// isLuks reports whether the LV already carries a LUKS header. It reads the RAW
+// LV, where there is no dm-integrity mapping yet, so unlike a probe of the
+// decrypted mapper it cannot trip an INTEGRITY AEAD ERROR on never-written
+// sectors. This — not the mere existence of the LV — is what says "this volume
+// was formatted", which keeps a bare reservation distinguishable from real data.
+func isLuks(lvPath string) bool {
+	return run("cryptsetup", "isLuks", lvPath) == nil
+}
+
+// hasExt4 reports whether the opened volume carries an ext4 superblock.
+//
+// The read is O_DIRECT and confined to the first 4KiB: buffered I/O would pull
+// the page through the cache and readahead could touch never-written sectors,
+// which on dm-integrity is a hard EIO. An unreadable or magic-less device means
+// no filesystem was ever committed here — mkfs died, or never ran — which is a
+// different thing from "the data is gone", and the caller may safely format it.
+func hasExt4(mapperPath string) bool {
+	f, err := os.OpenFile(mapperPath, os.O_RDONLY|syscall.O_DIRECT, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	// O_DIRECT needs a block-aligned buffer; over-allocate and slice to a
+	// 4096-aligned offset.
+	raw := make([]byte, 8192)
+	off := 0
+	if a := uintptr(unsafe.Pointer(&raw[0])) % 4096; a != 0 {
+		off = int(4096 - a)
+	}
+	buf := raw[off : off+4096]
+	if _, err := io.ReadFull(f, buf); err != nil {
+		return false
+	}
+	return hasExt4Magic(buf)
+}
+
+// hasExt4Magic reports whether head (the leading bytes of a volume) carries the
+// ext4 superblock magic: 0xEF53, little-endian, at s_magic — offset 0x38 within
+// the superblock, which itself begins 1024 bytes into the device.
+func hasExt4Magic(head []byte) bool {
+	const sbOffset, magicOffset = 1024, 0x38
+	if len(head) < sbOffset+magicOffset+2 {
+		return false
+	}
+	return binary.LittleEndian.Uint16(head[sbOffset+magicOffset:]) == 0xEF53
+}
+
 // expectExisting=true means the DEK was reconstructed from the constellation
 // (the key already existed), so an on-disk LV MUST be present to reattach. If it
 // is absent, Create refuses rather than mkfs'ing a fresh empty volume — that
@@ -156,7 +239,8 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 		keyOrigin = fmt.Sprintf("byok:%x", fingerprint)
 	}
 
-	// 1. Create LV (skip if already present from a previous incarnation).
+	// 1. Create the LV (skip if already present from a previous incarnation, or
+	//    reserved by Reserve ahead of key provisioning).
 	lvExisted := false
 	if _, err := os.Stat(lvPath); err == nil {
 		lvExisted = true
@@ -184,14 +268,26 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 		}
 	}
 
-	// 2. LUKS format — only on freshly created LVs.
+	// 2. LUKS format — on any LV that does not already carry a LUKS header.
+	//
+	// The trigger is the header, NOT lvExisted: a bare LV is left behind both by
+	// Reserve (capacity secured before the DEK was provisioned) and by a create
+	// that died between lvcreate and luksFormat. Keying on lvExisted skipped the
+	// format for those, and the volume then failed to open — or, worse, opened
+	// and failed to mount — for the rest of the app's life. No LUKS header means
+	// nothing was ever encrypted here, so formatting cannot lose data.
+	lvFormatted := lvExisted && isLuks(lvPath)
+	if lvExisted && !lvFormatted {
+		m.log.Warn("LV exists but carries no LUKS header (reserved, or a previous create was interrupted before luksFormat) — formatting it now",
+			zap.String("container", name), zap.String("lv", lvName))
+	}
 	//
 	// NOTE: aes-xts-plain64 is NOT an AEAD cipher; cryptsetup rejects
 	// `--integrity aead` with "Cipher aes-xts-plain64 (key size 512 bits)
 	// is not available". Use `--integrity hmac-sha256` instead, which
 	// gives per-sector authenticated encryption via dm-integrity tags.
 	// (Same fix as the host data partition luks-setup script.)
-	if !lvExisted {
+	if !lvFormatted {
 		if err := runStdin(key, "cryptsetup", "luksFormat",
 			"--type", "luks2",
 			"--cipher", "aes-xts-plain64",
@@ -236,8 +332,10 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 			// instead of failing forever: a production enclave has no SSH, so an
 			// operator cannot lvremove it by hand, and the app would be stranded.
 			// The expectExisting guard keeps the reconstructed-key path (real
-			// data) failing closed exactly as before.
-			if lvExisted && !expectExisting {
+			// data) failing closed exactly as before. Keyed on lvFormatted: an LV
+			// we formatted moments ago opens by construction, so reaching here
+			// with one means a genuine failure, not a stale generation.
+			if lvFormatted && !expectExisting {
 				m.log.Warn("existing LV cannot be opened with the freshly created key — treating it as STALE and reformatting (its key generation is gone; the data was already unrecoverable)",
 					zap.String("container", name), zap.String("lv", lvName), zap.Error(err))
 				if ferr := runStdin(key, "cryptsetup", "luksFormat",
@@ -271,7 +369,22 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 
 	// 4. Create ext4 filesystem — on freshly formatted volumes, and on a
 	// stale LV we just reformatted (it holds no readable filesystem).
-	if !lvExisted || staleReformatted {
+	// Format when the volume demonstrably carries no filesystem — not merely when
+	// the LV is new. A create that died between luksFormat and mkfs leaves an LV
+	// that opens perfectly and mounts never; keyed on lvExisted, mkfs was skipped
+	// on every retry and the app stayed undeployable for good, which on an
+	// SSH-less production enclave is unrecoverable. An opened volume with no ext4
+	// superblock has had no filesystem committed to it, so there is no data to
+	// lose. (Silent corruption is not the alternative explanation: dm-integrity
+	// turns tampering into EIO, it does not hand back a plausible zeroed
+	// superblock.)
+	needsFS := !lvFormatted || staleReformatted
+	if !needsFS && !hasExt4(mapperPath) {
+		m.log.Warn("volume opens but carries no ext4 superblock (a previous create was interrupted before mkfs completed) — creating the filesystem now; no data was ever committed here",
+			zap.String("container", name), zap.String("lv", lvName))
+		needsFS = true
+	}
+	if needsFS {
 		// dm-integrity discipline: a READ of any never-written sector is a
 		// hard EIO (INTEGRITY AEAD ERROR), and several things read sectors
 		// mkfs never wrote — udev/blkid probe the fresh mapper for

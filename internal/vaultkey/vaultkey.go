@@ -76,6 +76,18 @@ type Config struct {
 	// boot-attestation-token endpoints instead. When set, MgmtURL /
 	// EnclaveID / EnclaveToken are not required and no fetch happens.
 	AttestationToken string
+	// BeforeProvision, when set, runs after Phase 1 has established that the
+	// handle exists on NO vault and before Phase 2 creates it. Returning an
+	// error aborts with that error and the key is never created.
+	//
+	// This is the hook for work that must not be stranded by a half-done
+	// provision: creating a key the caller then cannot back with storage
+	// poisons the handle permanently, because the next attempt reconstructs it
+	// (expectExisting) and fails closed against the absent volume — and a
+	// production enclave has no SSH to repair it by hand. Callers that back a
+	// key with a resource should reserve that resource here, so a failure
+	// leaves NO key and the retry starts clean.
+	BeforeProvision func() error
 }
 
 func (c Config) threshold() int {
@@ -315,6 +327,16 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 	}
 	if grant == "" {
 		return "", "", false, fmt.Errorf("vaultkey: handle %q does not exist and no key-creation grant was supplied (the platform must mint one at deploy)", handle)
+	}
+
+	// The handle exists nowhere and we are about to create it. This is the last
+	// point at which failing leaves no trace: once the key exists, every later
+	// attempt reconstructs it and fails closed unless the backing storage is
+	// there too.
+	if cfg.BeforeProvision != nil {
+		if err := cfg.BeforeProvision(); err != nil {
+			return "", "", false, fmt.Errorf("vaultkey: refusing to create key %q: %w", handle, err)
+		}
 	}
 
 	// ---- Phase 2: first boot — generate + create -----------------------
