@@ -526,6 +526,18 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	// VMs, which never set the flag.
 	userns := m.usernsRemap
 
+	// Per-container /etc/hosts: the shared localhost entries plus THIS container's
+	// hostname on a loopback address, so gethostname() resolution (Python
+	// multiprocessing, vLLM's get_ip()) stays on loopback instead of NXDOMAINing
+	// on the bridge. Falls back to the shared file if we cannot write one.
+	hostsPath := network.HostsPath
+	if p, herr := network.WriteContainerHosts(spec.Name, spec.Hostname); herr != nil {
+		m.log.Warn("failed to write per-container /etc/hosts — falling back to the shared file",
+			zap.String("name", spec.Name), zap.Error(herr))
+	} else {
+		hostsPath = p
+	}
+
 	// Build OCI spec options.
 	opts := []oci.SpecOpts{
 		oci.WithImageConfig(img),
@@ -561,7 +573,7 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 			},
 			{
 				Destination: "/etc/hosts",
-				Source:      network.HostsPath,
+				Source:      hostsPath,
 				Type:        "bind",
 				Options:     []string{"rbind", "ro"},
 			},

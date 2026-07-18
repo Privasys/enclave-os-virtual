@@ -255,6 +255,37 @@ func writeHosts() error {
 	return os.WriteFile(HostsPath, []byte(hostsContent), 0o644)
 }
 
+// WriteContainerHosts publishes a PER-CONTAINER /etc/hosts: the shared localhost
+// entries PLUS the container's own hostname on a loopback address (Debian's
+// 127.0.1.1 convention, and what Docker/podman synthesise). Returns the path to
+// bind at /etc/hosts.
+//
+// Without the hostname line, `gethostname()` resolution — which Python's
+// multiprocessing and anything using vLLM's get_ip() perform to pick a bind
+// address — falls through to DNS on the bridge and NXDOMAINs or misroutes,
+// killing the child process. It surfaced as vLLM's multiprocessing EngineCore
+// dying at init ("Failed core proc(s): {}") for the 35B MoE model while the
+// in-process embed/rerank models, which never resolve the hostname, loaded fine.
+// The shared file (no hostname) shadowed the image's baked /etc/hosts once the
+// bind landed, so the same image regressed moving onto a host that binds it.
+func WriteContainerHosts(name, hostname string) (string, error) {
+	if hostname == "" {
+		hostname = name
+	}
+	if hostname == "" {
+		return HostsPath, nil // nothing to add — fall back to the shared file
+	}
+	if err := os.MkdirAll("/run/containers-dns", 0o755); err != nil {
+		return "", err
+	}
+	path := "/run/containers-dns/hosts-" + name
+	content := hostsContent + "127.0.1.1\t" + hostname + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 // Attach wires a freshly-created container (identified by its init PID, i.e.
 // its netns) to the bridge on its deterministic IP. Call after the containerd
 // task is created but BEFORE it is started. Returns the assigned IP.
