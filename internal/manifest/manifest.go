@@ -26,6 +26,8 @@ import (
 	"os"
 	"sort"
 
+	ratls "enclave-os-mini/clients/go/ratls"
+
 	"github.com/Privasys/enclave-os-virtual/internal/merkle"
 	"gopkg.in/yaml.v3"
 )
@@ -116,6 +118,19 @@ type Container struct {
 	// the attested container.
 	ResourceVCPUs    int   `yaml:"resource_vcpus,omitempty"`
 	ResourceMemoryMB int64 `yaml:"resource_memory_mb,omitempty"`
+
+	// IngressAllowedCallers, when non-empty, enables ingress mutual RA-TLS for
+	// this container: only callers whose attested identity (app-id OID 3.6,
+	// measurement, and required OIDs) matches one of these entries may reach the
+	// app. Every request is verified by the manager and annotated with
+	// X-Privasys-Peer-* identity headers before it is proxied to the container.
+	// This is the callee-side counterpart of a caller's egress dependency set,
+	// reusing the byte-identical DependencySet shape. Manager-owned: the app can
+	// never self-declare it (it is not sourced from the container's
+	// /.well-known extensions), so the advertised and enforced sets are one.
+	// NOT measured: whom an app is willing to accept is authorization policy,
+	// set at deploy time, not workload code identity.
+	IngressAllowedCallers *ratls.DependencySet `yaml:"ingress_allowed_callers,omitempty"`
 }
 
 // HealthCheck defines a container health check.

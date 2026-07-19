@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	ratls "enclave-os-mini/clients/go/ratls"
+
 	"github.com/Privasys/enclave-os-virtual/internal/manifest"
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
 	"go.uber.org/zap"
@@ -22,6 +24,7 @@ type fakeAppHostRouter struct {
 
 func (*fakeAppHostRouter) RegisterAppHost(string, string)                      {}
 func (*fakeAppHostRouter) UnregisterAppHost(string)                            {}
+func (*fakeAppHostRouter) RegisterIngressPolicy(string, *ratls.DependencySet)  {}
 func (*fakeAppHostRouter) SetSessionRelayIdentityKeySeed(string, []byte) error { return nil }
 func (f *fakeAppHostRouter) SetExpectedWorkloadDigest(_ string, d [32]byte) {
 	f.gotDigest = d

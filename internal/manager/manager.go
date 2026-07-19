@@ -176,6 +176,12 @@ type Server struct {
 	// runtime is not configured to settle (the reservation then expires on
 	// its own).
 	settler *attrbilling.Settler
+
+	// ingress verifies the attested caller identity on ingress mutual-RA-TLS
+	// hosts and annotates the request with X-Privasys-Peer-* headers (or
+	// rejects it). The launcher registers per-host allowed-caller policies via
+	// RegisterIngressPolicy.
+	ingress *ingressVerifier
 }
 
 // New creates a new management API Server.
@@ -197,6 +203,10 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		sessionRelay: sr,
 		settler:      attrbilling.New(attrbilling.Config{MgmtBaseURL: cfg.MgmtBaseURL, EnclaveToken: cfg.EnclaveToken}, log),
 	}
+	// Ingress mutual-RA-TLS verifier. It resolves the attestation server from
+	// the launcher (updated at runtime via PUT /api/v1/attestation-servers) and
+	// permits dev-image callers only when this VM itself runs a dev image.
+	s.ingress = newIngressVerifier(s.log, l.PrimaryAttestationServer, isDevImageProfile())
 	// Teach the launcher's image GC the FULL desired image set (every app in
 	// the registry), so a concurrent replay never prunes a sibling's cached
 	// image before that sibling loads. Without this the GC evicts an image an
@@ -304,6 +314,7 @@ func (s *Server) UnregisterAppHost(hostname string) {
 	hostname = strings.ToLower(hostname)
 	s.appHosts.Delete(hostname)
 	s.sessionRelay.ClearExpectedWorkloadDigest(hostname)
+	s.ingress.setPolicy(hostname, nil)
 	s.log.Info("app host unregistered", zap.String("hostname", hostname))
 }
 
@@ -396,6 +407,12 @@ func (s *Server) Start(ctx context.Context) error {
 	// token (loopback only); the caller can only mint its OWN identity.
 	mux.HandleFunc("POST /api/v1/vault-identity", s.handleMintVaultIdentity)
 
+	// Ingress mutual RA-TLS (app-to-app): mint the calling container's client
+	// identity bound to the channel binder of its live handshake to a sibling
+	// app. Same measured-manager minting as vault-identity, but the binder is
+	// mandatory and the server challenge optional (binder-only anti-relay).
+	mux.HandleFunc("POST /api/v1/egress-identity", s.handleMintEgressIdentity)
+
 	// TLS certificate rotation (require manager role).
 	mux.HandleFunc("PUT /api/v1/tls", s.requireAuth(s.handleUpdateTLS))
 
@@ -414,6 +431,17 @@ func (s *Server) Start(ctx context.Context) error {
 	dispatcher := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := hostOnly(r.Host)
 		if _, ok := s.lookupAppHost(host); ok {
+			// Ingress mutual RA-TLS gate: for a host that declares an
+			// allowed-caller set, verify the attested caller certificate Caddy
+			// handed over (quote signature + measurement + app-id/code-hash OIDs
+			// + channel binding) and rewrite X-Privasys-Peer-* to the verified
+			// identity, or reject with 403. Non-mutual hosts have the peer
+			// namespace scrubbed and pass through. This is the callee-side
+			// enforcement point (see peerverify.go).
+			if err := s.ingress.enforce(r); err != nil {
+				s.jsonError(w, http.StatusForbidden, "caller attestation failed: "+err.Error())
+				return
+			}
 			// Strip any client-supplied trusted voucher headers before the
 			// app can see them: only the runtime, after verifying a voucher,
 			// is allowed to assert these — otherwise a caller could forge an

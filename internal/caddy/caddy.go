@@ -61,6 +61,15 @@ type Config struct {
 type route struct {
 	Hostname string
 	Upstream string // "localhost:PORT"
+
+	// MutualAuth enables ingress mutual RA-TLS for this hostname: Caddy is
+	// configured to require a client certificate (connection policy
+	// client_authentication mode "require", permissive chain) and the
+	// privasys_peer_headers handler is inserted ahead of the reverse proxy to
+	// scrub spoofed X-Privasys-Peer-* headers and republish the verified client
+	// leaf + channel binder for the manager to verify. Off by default; every
+	// non-mutual host keeps the server-auth-only catch-all policy.
+	MutualAuth bool
 }
 
 // Client manages Caddy routes via the admin API.
@@ -105,19 +114,23 @@ func NewClient(cfg Config, log *zap.Logger) *Client {
 
 // AddRoute registers a reverse-proxy route for the given hostname,
 // forwarding traffic to the upstream address (e.g. "localhost:8000").
-// The route is protected by RA-TLS via the ra_tls issuer.
-func (c *Client) AddRoute(hostname, upstream string) error {
+// The route is protected by RA-TLS via the ra_tls issuer. When mutualAuth is
+// true the route additionally requires and exposes a client certificate for
+// ingress mutual RA-TLS (see route.MutualAuth).
+func (c *Client) AddRoute(hostname, upstream string, mutualAuth bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	c.routes[hostname] = route{
-		Hostname: hostname,
-		Upstream: upstream,
+		Hostname:   hostname,
+		Upstream:   upstream,
+		MutualAuth: mutualAuth,
 	}
 
 	c.log.Info("adding Caddy route",
 		zap.String("hostname", hostname),
-		zap.String("upstream", upstream))
+		zap.String("upstream", upstream),
+		zap.Bool("mutual_auth", mutualAuth))
 
 	return c.reload()
 }
@@ -244,34 +257,46 @@ func (c *Client) buildConfig() map[string]any {
 	sort.Strings(hostnames)
 
 	routes := make([]map[string]any, 0, len(c.routes)+1)
+	// mutualHosts collects the SNI values that need a client-auth connection
+	// policy, built alongside the routes.
+	var mutualHosts []string
 	for _, h := range hostnames {
 		r := c.routes[h]
+
+		handle := make([]map[string]any, 0, 2)
+		// Ingress mutual RA-TLS: scrub spoofed X-Privasys-Peer-* headers and
+		// republish the TLS-verified client leaf + channel binder for the
+		// manager BEFORE the request is proxied onward.
+		if r.MutualAuth {
+			handle = append(handle, map[string]any{
+				"handler": "privasys_peer_headers",
+			})
+			mutualHosts = append(mutualHosts, r.Hostname)
+		}
+		handle = append(handle, map[string]any{
+			"handler":   "reverse_proxy",
+			"upstreams": []map[string]any{{"dial": r.Upstream}},
+			// flush_interval: -1 forces Caddy to flush every upstream write to
+			// the client immediately. Caddy auto-detects text/event-stream and
+			// does this on its own, but we set it explicitly so any non-SSE
+			// streaming response (chunked JSONL, raw bytes from
+			// confidential-ai's /v1/completions, etc.) also gets per-write
+			// cadence. Removing buffering here is what makes vLLM
+			// token-by-token chat actually feel token-by-token in the browser.
+			"flush_interval": -1,
+			"transport": map[string]any{
+				"protocol":                "http",
+				"response_header_timeout": "15m",
+				"read_timeout":            "15m",
+				"write_timeout":           "15m",
+			},
+		})
+
 		routes = append(routes, map[string]any{
 			"match": []map[string]any{
 				{"host": []string{r.Hostname}},
 			},
-			"handle": []map[string]any{
-				{
-					"handler":   "reverse_proxy",
-					"upstreams": []map[string]any{{"dial": r.Upstream}},
-					// flush_interval: -1 forces Caddy to flush every
-					// upstream write to the client immediately. Caddy
-					// auto-detects text/event-stream and does this on its
-					// own, but we set it explicitly so any non-SSE
-					// streaming response (chunked JSONL, raw bytes from
-					// confidential-ai's /v1/completions, etc.) also gets
-					// per-write cadence. Removing buffering here is what
-					// makes vLLM token-by-token chat actually feel
-					// token-by-token in the browser.
-					"flush_interval": -1,
-					"transport": map[string]any{
-						"protocol":                "http",
-						"response_header_timeout": "15m",
-						"read_timeout":            "15m",
-						"write_timeout":           "15m",
-					},
-				},
-			},
+			"handle": handle,
 		})
 	}
 
@@ -312,6 +337,25 @@ func (c *Client) buildConfig() map[string]any {
 		certGetter["extensions_dir"] = c.cfg.ExtensionsDir
 	}
 
+	// Connection policies, evaluated in order (first SNI match wins). Each
+	// mutual-RA-TLS host gets a policy that requires a client certificate with
+	// a permissive chain (mode "require"): the TLS layer forces the
+	// CertificateRequest and requires a cert, but does not chain-validate it —
+	// caller certs are self-signed and, cross-VM, chain to the caller's own CA,
+	// not this VM's. Trust is rooted in the quote (verified by the manager),
+	// not the PKI. The empty catch-all policy MUST come last so it matches
+	// every other (server-auth-only) SNI, including empty-SNI handshakes.
+	connPolicies := make([]map[string]any, 0, len(mutualHosts)+1)
+	for _, h := range mutualHosts {
+		connPolicies = append(connPolicies, map[string]any{
+			"match": map[string]any{"sni": []string{h}},
+			"client_authentication": map[string]any{
+				"mode": "require",
+			},
+		})
+	}
+	connPolicies = append(connPolicies, map[string]any{})
+
 	return map[string]any{
 		"apps": map[string]any{
 			"http": map[string]any{
@@ -327,14 +371,15 @@ func (c *Client) buildConfig() map[string]any {
 						"automatic_https": map[string]any{
 							"disable": true,
 						},
-						// Empty connection policy ([{}]) matches every
-						// ClientHello, including empty-SNI handshakes from Go
-						// HTTP clients dialing https://IP:port (Go strips
-						// IP-literal SNI per RFC 6066). Without this the http
-						// server has no policy to apply when SNI is missing
-						// and rejects with TLS alert 80 before invoking the
-						// cert getter.
-						"tls_connection_policies": []map[string]any{{}},
+						// Connection policies (see connPolicies above). The
+						// trailing empty policy matches every ClientHello,
+						// including empty-SNI handshakes from Go HTTP clients
+						// dialing https://IP:port (Go strips IP-literal SNI per
+						// RFC 6066). Without it the http server has no policy to
+						// apply when SNI is missing and rejects with TLS alert 80
+						// before invoking the cert getter. Mutual-RA-TLS hosts get
+						// an earlier SNI-matched client-auth policy.
+						"tls_connection_policies": connPolicies,
 					},
 				},
 			},

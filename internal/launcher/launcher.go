@@ -40,6 +40,8 @@ import (
 	"sync"
 	"syscall"
 
+	ratls "enclave-os-mini/clients/go/ratls"
+
 	"go.uber.org/zap"
 
 	"github.com/Privasys/enclave-os-virtual/internal/caddy"
@@ -175,6 +177,13 @@ type LoadRequest struct {
 
 	// Internal marks this container as not externally accessible.
 	Internal bool `json:"internal,omitempty"`
+
+	// IngressAllowedCallers, when non-empty, enables ingress mutual RA-TLS:
+	// only callers whose attested identity matches one of these entries may
+	// reach the app, and every request is annotated with verified
+	// X-Privasys-Peer-* identity headers (see manifest.Container). Platform-
+	// supplied and manager-owned; the app can never self-declare it.
+	IngressAllowedCallers *ratls.DependencySet `json:"ingress_allowed_callers,omitempty"`
 
 	// HealthCheck defines how to verify the container is ready.
 	HealthCheck *manifest.HealthCheck `json:"health_check,omitempty"`
@@ -359,9 +368,10 @@ func (r *LoadRequest) toContainerSpec() manifest.Container {
 		Volumes:     r.Volumes,
 		Command:     r.Command,
 		Internal:    r.Internal,
-		HealthCheck: rewriteHealthCheckHost(r.HealthCheck, r.Port),
-		Storage:     r.Storage,
-		Devices:     r.Devices,
+		HealthCheck:           rewriteHealthCheckHost(r.HealthCheck, r.Port),
+		Storage:               r.Storage,
+		Devices:               r.Devices,
+		IngressAllowedCallers: r.IngressAllowedCallers,
 	}
 	if r.Resources != nil {
 		spec.ResourceVCPUs = r.Resources.VCPUs
@@ -732,7 +742,9 @@ func (l *Launcher) Run(ctx context.Context) error {
 		// the catch-all fallback below means an empty PlatformHostname is
 		// fine — every TLS SNI now resolves to the management mux.
 		if l.cfg.PlatformHostname != "" {
-			if err := l.caddyClient.AddRoute(l.cfg.PlatformHostname, "localhost:"+mgmtPort); err != nil {
+			// The management API is server-auth only (operators/mgmt-service
+			// verify the platform cert; there is no attested caller to require).
+			if err := l.caddyClient.AddRoute(l.cfg.PlatformHostname, "localhost:"+mgmtPort, false); err != nil {
 				return fmt.Errorf("launcher: failed to add management API Caddy route: %w", err)
 			}
 			l.log.Info("management API route registered in Caddy",
@@ -903,6 +915,14 @@ type TokenSource interface {
 type AppHostRouter interface {
 	RegisterAppHost(hostname, upstream string)
 	UnregisterAppHost(hostname string)
+
+	// RegisterIngressPolicy installs the per-host allowed-caller policy for an
+	// ingress mutual-RA-TLS app. The manager verifies each request's attested
+	// caller certificate (handed over by Caddy as X-Privasys-Peer-Cert-Der +
+	// X-Privasys-Peer-Channel-Binder) against this policy and annotates the
+	// request with verified X-Privasys-Peer-* identity headers, or rejects it.
+	// Passing nil disables ingress verification for the host.
+	RegisterIngressPolicy(hostname string, policy *ratls.DependencySet)
 	// SetSessionRelayIdentityKeySeed installs the vault-resolved
 	// session-relay identity key (enc_pub) for an app's Host from its
 	// 32-byte seed, so that app's enc_pub is stable across same-measurement
@@ -1091,6 +1111,19 @@ func (l *Launcher) SetAttestationServers(servers []AttestationServer) (int, stri
 	)
 
 	return len(urls), hashHex
+}
+
+// PrimaryAttestationServer returns the first configured attestation server URL
+// and its bearer token, used to verify a caller's TDX quote signature on the
+// ingress mutual-RA-TLS path. Returns ("", "") when none is configured.
+func (l *Launcher) PrimaryAttestationServer() (url, token string) {
+	l.mu.RLock()
+	servers := l.cfg.AttestationServers
+	l.mu.RUnlock()
+	if len(servers) == 0 {
+		return "", ""
+	}
+	return servers[0], l.AttestationToken(servers[0])
 }
 
 // AttestationToken returns the bearer token for the given attestation server
@@ -1508,9 +1541,17 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				// rejected, so an app code/config change re-prompts the user.
 				l.armSessionRelayWorkloadDigest(req.Name, spec.Hostname)
 			}
-			if err := l.caddyClient.AddRoute(spec.Hostname, caddyUpstream); err != nil {
+			// Ingress mutual RA-TLS is enabled for this app when it declares an
+			// allowed-caller set (manager-owned, never self-declared by the app).
+			mutualAuth := spec.IngressAllowedCallers != nil && len(spec.IngressAllowedCallers.Entries) > 0
+			if err := l.caddyClient.AddRoute(spec.Hostname, caddyUpstream, mutualAuth); err != nil {
 				l.log.Warn("failed to add Caddy route",
 					zap.String("hostname", spec.Hostname), zap.Error(err))
+			}
+			if mutualAuth {
+				// Register the per-host allowed-caller policy so the manager can
+				// verify the attested caller identity on every request to this app.
+				l.appHostRouter.RegisterIngressPolicy(spec.Hostname, spec.IngressAllowedCallers)
 			}
 		}
 	}
