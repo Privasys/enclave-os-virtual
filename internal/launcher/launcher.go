@@ -39,6 +39,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	ratls "enclave-os-mini/clients/go/ratls"
 
@@ -473,6 +474,12 @@ type Launcher struct {
 	// server URL.  Tokens are runtime secrets and are NOT hashed into the
 	// Merkle tree — only the server URL list feeds OID 2.7.
 	attestationTokens map[string]string
+
+	// ingressAttTok caches the mgmt-fetched attestation-server bearer used by
+	// the ingress mutual-RA-TLS verifier (see ingressAttestationToken), with
+	// ingressAttExp its refresh deadline.
+	ingressAttTok string
+	ingressAttExp time.Time
 
 	// tokenSource provides dynamically refreshed tokens (OIDC bootstrap).
 	// Takes precedence over attestationTokens when set.
@@ -1123,7 +1130,47 @@ func (l *Launcher) PrimaryAttestationServer() (url, token string) {
 	if len(servers) == 0 {
 		return "", ""
 	}
-	return servers[0], l.AttestationToken(servers[0])
+	tok := l.AttestationToken(servers[0])
+	if tok == "" {
+		// The static token map / OIDC token source has nothing for this server;
+		// fetch a short-lived attestation-server bearer from mgmt-service with
+		// the per-enclave credential, exactly as the vault path does (the
+		// attestation server requires an OIDC bearer and the manager has no OIDC
+		// key of its own). Cached briefly so ingress verification does not fetch
+		// on every request.
+		tok = l.ingressAttestationToken()
+	}
+	return servers[0], tok
+}
+
+// ingressAttestationToken returns a cached, mgmt-fetched attestation-server
+// bearer for the ingress mutual-RA-TLS verifier, refreshing well within the
+// token's lifetime. Returns "" when the enclave credential is not configured or
+// the fetch fails (the verifier then fails closed).
+func (l *Launcher) ingressAttestationToken() string {
+	l.mu.Lock()
+	if l.ingressAttTok != "" && time.Now().Before(l.ingressAttExp) {
+		tok := l.ingressAttTok
+		l.mu.Unlock()
+		return tok
+	}
+	mgmtURL, encID, encTok := l.cfg.ToolSpecMgmtURL, l.cfg.ToolSpecEnclaveID, l.cfg.ToolSpecEnclaveToken
+	l.mu.Unlock()
+	if mgmtURL == "" || encID == "" || encTok == "" {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tok, err := vaultkey.FetchAttestationToken(ctx, mgmtURL, encID, encTok)
+	if err != nil {
+		l.log.Warn("ingress verifier: failed to fetch attestation-server token", zap.Error(err))
+		return ""
+	}
+	l.mu.Lock()
+	l.ingressAttTok = tok
+	l.ingressAttExp = time.Now().Add(5 * time.Minute)
+	l.mu.Unlock()
+	return tok
 }
 
 // AttestationToken returns the bearer token for the given attestation server

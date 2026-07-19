@@ -116,6 +116,15 @@ func (c Config) validate() error {
 	return nil
 }
 
+// FetchAttestationToken gets a short-lived OIDC bearer from the management
+// service (authed by the per-enclave credential) for attestation-server quote
+// verification. Exported so other in-enclave verification paths — e.g. the
+// manager's ingress mutual-RA-TLS verifier, which verifies a caller's quote at
+// the attestation server — obtain the token the same way as the vault path.
+func FetchAttestationToken(ctx context.Context, mgmtURL, enclaveID, enclaveToken string) (string, error) {
+	return fetchAttestationToken(ctx, Config{MgmtURL: mgmtURL, EnclaveID: enclaveID, EnclaveToken: enclaveToken})
+}
+
 // attestationToken returns the pre-fetched bearer, or fetches one from the
 // management service with the per-enclave credential.
 func attestationToken(ctx context.Context, cfg Config) (string, error) {

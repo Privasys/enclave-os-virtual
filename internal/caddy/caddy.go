@@ -356,31 +356,45 @@ func (c *Client) buildConfig() map[string]any {
 	}
 	connPolicies = append(connPolicies, map[string]any{})
 
+	srv0 := map[string]any{
+		"listen": []string{c.cfg.ListenAddr},
+		"routes": routes,
+		// Disable Caddy's auto-HTTPS machinery: we never want Caddy to derive
+		// cert identifiers from route hosts and fall through to ACME / on-demand
+		// permission checks. All certs come from the RA-TLS get_certificate
+		// module below.
+		"automatic_https": map[string]any{
+			"disable": true,
+		},
+		// Connection policies (see connPolicies above). The trailing empty
+		// policy matches every ClientHello, including empty-SNI handshakes from
+		// Go HTTP clients dialing https://IP:port (Go strips IP-literal SNI per
+		// RFC 6066). Without it the http server has no policy to apply when SNI
+		// is missing and rejects with TLS alert 80 before invoking the cert
+		// getter. Mutual-RA-TLS hosts get an earlier SNI-matched client-auth
+		// policy.
+		"tls_connection_policies": connPolicies,
+	}
+	// When any host requires a client certificate, Caddy auto-enables
+	// StrictSNIHost (it requires the TLS SNI to equal the HTTP Host on every
+	// connection, to stop an SNI/Host client-auth bypass). That would break the
+	// management API: mgmt-service reaches the enclave by IP with an arbitrary
+	// SNI != Host (the SetFallback path), so every management request would get
+	// HTTP 421 once any app is mutual. Disable it explicitly: the ingress
+	// mutual-auth boundary is the MANAGER, which verifies the client certificate
+	// per HTTP Host (the privasys_peer_headers handler runs on the mutual host's
+	// route and the manager rejects a request that reaches a mutual host without
+	// a verified cert), so a benign-SNI + restricted-Host bypass still fails
+	// closed there — Caddy's strict SNI-host check is not what secures ingress.
+	if len(mutualHosts) > 0 {
+		srv0["strict_sni_host"] = false
+	}
+
 	return map[string]any{
 		"apps": map[string]any{
 			"http": map[string]any{
 				"servers": map[string]any{
-					"srv0": map[string]any{
-						"listen": []string{c.cfg.ListenAddr},
-						"routes": routes,
-						// Disable Caddy's auto-HTTPS machinery: we never want
-						// Caddy to derive cert identifiers from route hosts and
-						// fall through to ACME / on-demand permission checks.
-						// All certs come from the RA-TLS get_certificate
-						// module below.
-						"automatic_https": map[string]any{
-							"disable": true,
-						},
-						// Connection policies (see connPolicies above). The
-						// trailing empty policy matches every ClientHello,
-						// including empty-SNI handshakes from Go HTTP clients
-						// dialing https://IP:port (Go strips IP-literal SNI per
-						// RFC 6066). Without it the http server has no policy to
-						// apply when SNI is missing and rejects with TLS alert 80
-						// before invoking the cert getter. Mutual-RA-TLS hosts get
-						// an earlier SNI-matched client-auth policy.
-						"tls_connection_policies": connPolicies,
-					},
+					"srv0": srv0,
 				},
 			},
 			"tls": map[string]any{
