@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +46,12 @@ const (
 
 	// Namespace is the containerd namespace for all Enclave OS containers.
 	Namespace = "enclave-os"
+
+	// containerLogDir holds the per-container stdout/stderr logs. It lives
+	// under the containerd root (SSD-backed via the workspace bind mount on
+	// the GPU image; the /data PD otherwise), so it rides the same large
+	// store as the image content rather than a small volume.
+	containerLogDir = "/data/containerd/enclave-logs"
 
 	// healthCheckDefaultInterval is the default interval between health checks.
 	healthCheckDefaultInterval = 5 * time.Second
@@ -515,6 +522,31 @@ func (m *Manager) Pull(ctx context.Context, spec manifest.Container, auth *Regis
 }
 
 // Create creates and starts a container from the given spec.
+// taskIO returns the IO creator for a container task. It sends the
+// container's stdout+stderr to a per-container log file drained by the
+// containerd SHIM, never to the manager process (the old cio.WithStdio).
+//
+// Why this matters: with WithStdio the container's pipes are read by the
+// manager and forwarded to its journal. If that reader ever stalls — a
+// manager restart during bootstrap, or journal backpressure — the pipe
+// fills and EVERY writer inside the container blocks, silently wedging the
+// whole app mid-run (a model server's multi-GB startup output triggers it;
+// bugs-and-fixes #50, and it re-bit the GPU CAI host on 2026-07-22). The
+// shim owns the LogFile drain, so it survives a manager restart and writes
+// to disk rather than a manager-side pipe, removing the wedge.
+//
+// Best-effort and fail-safe: if the log dir cannot be created, fall back to
+// NullIO (discard) rather than WithStdio — never reintroduce a blocking
+// manager-side pipe. Nothing reads container stdout functionally.
+// FOLLOW-UP: the LogFile is unrotated; add size-based rotation before an
+// app can grow it past the store.
+func taskIO(name string) cio.Creator {
+	if err := os.MkdirAll(containerLogDir, 0700); err != nil {
+		return cio.NullIO
+	}
+	return cio.LogFile(filepath.Join(containerLogDir, name+".log"))
+}
+
 func (m *Manager) Create(ctx context.Context, spec manifest.Container, img client.Image) (*ManagedContainer, error) {
 	ctx = m.ctx(ctx)
 	m.log.Info("creating container", zap.String("name", spec.Name))
@@ -781,7 +813,7 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	}
 
 	// Create and start the task (== the running process).
-	task, err := container.NewTask(ctx, cio.NewCreator(cio.WithStdio))
+	task, err := container.NewTask(ctx, taskIO(spec.Name))
 	if err != nil && errdefs.IsAlreadyExists(err) {
 		// A dead-shim task record from the pre-swap boot survived (see
 		// forceRemoveOrphan). Delete it via the task service and retry.
@@ -790,7 +822,7 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		if _, derr := m.client.TaskService().Delete(ctx, &tasks.DeleteTaskRequest{ContainerID: spec.Name}); derr != nil && !errdefs.IsNotFound(derr) {
 			m.log.Warn("force-remove orphan task failed", zap.String("name", spec.Name), zap.Error(derr))
 		}
-		task, err = container.NewTask(ctx, cio.NewCreator(cio.WithStdio))
+		task, err = container.NewTask(ctx, taskIO(spec.Name))
 	}
 	if err != nil {
 		_ = container.Delete(ctx)
