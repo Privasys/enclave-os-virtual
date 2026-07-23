@@ -6,7 +6,10 @@ DefaultDependencies=no
 # /data PD. Ordered after /data and the disk/runtime init, like disk-mounter.
 After=local-fs.target data.mount cvm-runtime-init.service
 Before=containerd.service manager.service multi-user.target
-ConditionPathExists=/dev/nvme1n1
+# Run whenever any NVMe namespace is present; the setup script resolves the
+# local SSD by identity (label / controller model), so it must not be gated on
+# a fixed /dev node whose number shifts after a Spot stop/start.
+ConditionPathExistsGlob=/sys/block/nvme*n*
 
 [Service]
 Type=oneshot

@@ -1,21 +1,92 @@
 #!/usr/bin/env bash
 # Back /data/containerd with the local workspace NVMe SSD BEFORE containerd
-# starts. The encrypted /data PD is small (~2 GB); cloud-image layers are
-# several GB, so containerd's content store must live on the large local SSD.
-# Doing this in a unit ordered Before=containerd.service avoids the boot race
-# where the manager imported onto the small PD before the GCE startup-script's
-# late bind-mount ran, failing with "no space left on device".
+# starts. The encrypted /data PD is small (~10 GB) and cannot grow (LUKS2 +
+# dm-integrity); cloud-image layers are several GB, so containerd's content
+# store must live on the large local SSD. Doing this in a unit ordered
+# Before=containerd.service avoids the boot race where the manager imported
+# onto the small PD before the SSD bind-mount ran ("no space left on device").
 #
-# GPU image only. The SSD is wiped on Spot stop/start; format on first boot.
-# Idempotent.
+# GPU image only. The local SSD is wiped on Spot stop/start; format on first
+# boot. Idempotent.
+#
+# Device selection is by IDENTITY, never by a fixed /dev path: after a Spot
+# stop/start or a boot-disk swap the NVMe controller enumeration shifts, so
+# /dev/nvme1n1 is not reliably the workspace SSD. We resolve it POSITIVELY:
+# an existing "workspace" filesystem label, else a GCE local-SSD by NVMe
+# controller model ("nvme_card"; persistent disks report "nvme_card-pd"), and
+# NEVER fall back to "the largest unmounted disk", which could select and
+# reformat the encrypted /data PD. If no local SSD can be positively
+# identified we skip and let containerd use the small /data PD (degraded but
+# safe), exactly as the old hardcoded path did when the device was absent.
 set -eu
 
-WORKSPACE_DEV=/dev/nvme1n1
-[ -b "$WORKSPACE_DEV" ] || { echo "workspace-containerd: no ${WORKSPACE_DEV}; skipping"; exit 0; }
-mountpoint -q /data || { echo "workspace-containerd: /data not mounted; skipping"; exit 0; }
+log() { echo "workspace-containerd: $*"; }
+
+# Minimum plausible local-SSD size (sectors of 512 B). GCE local SSDs are
+# 375 GiB; the /data PD is ~10 GB and boot ~20 GB. A 50 GiB floor is a second
+# guard so a mis-identified small device is never formatted as the workspace.
+MIN_SECTORS=$((50 * 1024 * 1024 * 1024 / 512))
+# Size floor for the model-agnostic last-resort match (step 3): only the local
+# SSDs are this large, so it can never select the /data or boot PD.
+FALLBACK_SECTORS=$((300 * 1024 * 1024 * 1024 / 512))
+
+# Resolve the workspace block device, or print nothing.
+resolve_workspace() {
+  # 1. Already-formatted workspace (survives a soft reboot; not stop/start).
+  if dev=$(blkid -L workspace 2>/dev/null) && [ -b "$dev" ]; then
+    echo "$dev"
+    return 0
+  fi
+  # 2. A local NVMe SSD, identified by its controller model. Enumeration-
+  #    independent, and it excludes every persistent disk by model, so the
+  #    boot and /data PDs can never be selected.
+  for ns in /sys/block/nvme*n*; do
+    [ -e "$ns" ] || continue
+    disk=$(basename "$ns")
+    case "$disk" in *p[0-9]*) continue ;; esac          # skip partitions
+    model=$(tr -d ' \t\n' <"$ns/device/model" 2>/dev/null || true)
+    case "$model" in
+      *-pd|*pd|*Persistent*|*persistent*) continue ;;   # persistent disk
+      nvme_card*|*[Ll]ocal*|*[Ee]phemeral*) : ;;        # local SSD
+      *) continue ;;
+    esac
+    sectors=$(cat "$ns/size" 2>/dev/null || echo 0)
+    [ "$sectors" -ge "$MIN_SECTORS" ] || { log "skip /dev/$disk (model=$model, too small: ${sectors}s)"; continue; }
+    grep -q " /dev/$disk " /proc/mounts && { log "skip /dev/$disk (mounted)"; continue; }
+    echo "/dev/$disk"
+    return 0
+  done
+  # 3. Last resort, still safe: a BLANK, unmounted whole disk of >= 300 GiB.
+  #    Local SSDs are 375 GiB; the /data PD is ~10 GB and carries a LUKS
+  #    signature, and the boot PD ~20 GB, all excluded by size AND by the
+  #    "no existing signature" check, so this can only pick a wiped local SSD.
+  #    Covers the case where a future GCE model string escapes the match above.
+  for ns in /sys/block/nvme*n* /sys/block/sd*; do
+    [ -e "$ns" ] || continue
+    disk=$(basename "$ns")
+    case "$disk" in *p[0-9]*|sd*[0-9]) continue ;; esac  # skip partitions
+    sectors=$(cat "$ns/size" 2>/dev/null || echo 0)
+    [ "$sectors" -ge "$FALLBACK_SECTORS" ] || continue
+    grep -q " /dev/$disk " /proc/mounts && continue
+    blkid "/dev/$disk" >/dev/null 2>&1 && continue       # has a signature: not blank, leave it
+    log "no model match; using blank >=300GiB disk /dev/$disk as workspace"
+    echo "/dev/$disk"
+    return 0
+  done
+  return 1
+}
+
+mountpoint -q /data || { log "/data not mounted; skipping"; exit 0; }
+
+WORKSPACE_DEV=$(resolve_workspace || true)
+if [ -z "${WORKSPACE_DEV:-}" ] || [ ! -b "$WORKSPACE_DEV" ]; then
+  log "no local workspace SSD identified; skipping (containerd will use /data PD)"
+  exit 0
+fi
+log "workspace device = $WORKSPACE_DEV"
 
 if ! blkid "$WORKSPACE_DEV" >/dev/null 2>&1; then
-  echo "workspace-containerd: formatting ${WORKSPACE_DEV}"
+  log "formatting $WORKSPACE_DEV (blank local SSD)"
   mkfs.ext4 -F -m 0 -L workspace "$WORKSPACE_DEV" >/dev/null 2>&1 || true
 fi
 
@@ -24,4 +95,4 @@ mountpoint -q /run/workspace || mount "$WORKSPACE_DEV" /run/workspace
 
 mkdir -p /run/workspace/containerd /data/containerd
 mountpoint -q /data/containerd || mount --bind /run/workspace/containerd /data/containerd
-echo "workspace-containerd: /data/containerd backed by workspace SSD"
+log "/data/containerd backed by workspace SSD ($WORKSPACE_DEV)"
