@@ -15,7 +15,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -46,12 +45,6 @@ const (
 
 	// Namespace is the containerd namespace for all Enclave OS containers.
 	Namespace = "enclave-os"
-
-	// containerLogDir holds the per-container stdout/stderr logs. It lives
-	// under the containerd root (SSD-backed via the workspace bind mount on
-	// the GPU image; the /data PD otherwise), so it rides the same large
-	// store as the image content rather than a small volume.
-	containerLogDir = "/data/containerd/enclave-logs"
 
 	// healthCheckDefaultInterval is the default interval between health checks.
 	healthCheckDefaultInterval = 5 * time.Second
@@ -522,29 +515,31 @@ func (m *Manager) Pull(ctx context.Context, spec manifest.Container, auth *Regis
 }
 
 // Create creates and starts a container from the given spec.
-// taskIO returns the IO creator for a container task. It sends the
-// container's stdout+stderr to a per-container log file drained by the
-// containerd SHIM, never to the manager process (the old cio.WithStdio).
+// taskIO returns the IO creator for a container task: cio.NullIO, which
+// discards the container's stdout/stderr. This is the ONLY drain that
+// cannot block the container, which is what matters here.
 //
-// Why this matters: with WithStdio the container's pipes are read by the
-// manager and forwarded to its journal. If that reader ever stalls — a
-// manager restart during bootstrap, or journal backpressure — the pipe
-// fills and EVERY writer inside the container blocks, silently wedging the
-// whole app mid-run (a model server's multi-GB startup output triggers it;
-// bugs-and-fixes #50, and it re-bit the GPU CAI host on 2026-07-22). The
-// shim owns the LogFile drain, so it survives a manager restart and writes
-// to disk rather than a manager-side pipe, removing the wedge.
+// The two alternatives both wedge under a model server's multi-GB JIT/startup
+// output (bugs-and-fixes #50):
+//   - cio.WithStdio pipes stdout to the MANAGER process. If that reader
+//     stalls — a manager restart during bootstrap, journal backpressure —
+//     the pipe fills and every writer in the container blocks.
+//   - cio.LogFile has the containerd SHIM write to a per-container file. That
+//     survives a manager restart, but the file is UNROTATED: once its
+//     filesystem fills (the small /data when the workspace-SSD bind fails),
+//     the shim's write blocks and the FIFO fills — the same wedge, one layer
+//     down. Observed on a clean dev GPU host on 2026-07-23: the 35B load went
+//     unresponsive mid-JIT and never recovered.
 //
-// Best-effort and fail-safe: if the log dir cannot be created, fall back to
-// NullIO (discard) rather than WithStdio — never reintroduce a blocking
-// manager-side pipe. Nothing reads container stdout functionally.
-// FOLLOW-UP: the LogFile is unrotated; add size-based rotation before an
-// app can grow it past the store.
-func taskIO(name string) cio.Creator {
-	if err := os.MkdirAll(containerLogDir, 0700); err != nil {
-		return cio.NullIO
-	}
-	return cio.LogFile(filepath.Join(containerLogDir, name+".log"))
+// NullIO drops the bytes at the shim before any FIFO can fill, so the drain
+// can never block regardless of disk or manager state. Nothing reads
+// container stdout functionally, and apps that need their own logs keep them
+// (e.g. the confidential-AI in-process stderr ring surfaced via
+// /v1/models/status). FOLLOW-UP: if per-container logs are wanted back, use a
+// bounded/rotating sink (binary logger or a size-capped ring), never an
+// unbounded file or a manager-side pipe.
+func taskIO(_ string) cio.Creator {
+	return cio.NullIO
 }
 
 func (m *Manager) Create(ctx context.Context, spec manifest.Container, img client.Image) (*ManagedContainer, error) {
