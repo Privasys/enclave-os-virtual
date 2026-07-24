@@ -821,8 +821,10 @@ func (l *Launcher) ContainerCount() int {
 
 // ResolveAIProxyURL resolves the runtime-status proxy feed URL under
 // per-container network namespaces (#45): a raw URL addressing
-// localhost/127.0.0.1 is rewritten to the AI container's private bridge IP
-// (the in-container port — the fixed :8080 Go proxy — is kept as-is).
+// localhost/127.0.0.1 is rewritten to the AI container's private bridge IP,
+// dialling the container's ACTUAL allocated port (Spec.Port) where the
+// multi-model fleet server serves /v1/models/status — not the retired
+// single-model :8080 proxy the raw URL still names.
 // Container preference: a running "confidential-ai*" by name, else the single
 // running container (GPU enclaves are effectively dedicated). Returns "" when
 // nothing is resolvable yet (containerd still starting, no container up, or
@@ -859,6 +861,16 @@ func (l *Launcher) ResolveAIProxyURL(raw string) string {
 	}
 	if chosen == nil {
 		return ""
+	}
+	// Dial the AI container at its ACTUAL allocated port (Spec.Port), not the
+	// placeholder :8080 the caller passes. That :8080 dates to the
+	// single-model era when the fleet ran a fixed in-container :8080 proxy;
+	// the multi-model fleet server now binds its main $PORT (config Listen
+	// defaults to :$PORT) and serves /v1/models/status there. Keeping the
+	// stale :8080 meant the runtime-status sender never reached the model
+	// state, so the fleet reported no loaded model (chat stuck "reserved").
+	if chosen.Spec.Port > 0 {
+		return fmt.Sprintf("%s://%s:%d", u.Scheme, chosen.IP, chosen.Spec.Port)
 	}
 	port := u.Port()
 	if port == "" {
