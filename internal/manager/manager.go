@@ -182,6 +182,10 @@ type Server struct {
 	// rejects it). The launcher registers per-host allowed-caller policies via
 	// RegisterIngressPolicy.
 	ingress *ingressVerifier
+
+	// logPathsFn overrides container.TaskLogPaths in tests; nil in production
+	// (see container_logs.go).
+	logPathsFn func(name, stream string) []string
 }
 
 // New creates a new management API Server.
@@ -365,6 +369,8 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /readyz", s.requireAuth(s.handleReadyz))
 	mux.HandleFunc("GET /api/v1/status", s.requireAuth(s.handleStatus))
 	mux.HandleFunc("GET /api/v1/eventlog", s.requireAuth(s.handleEventLog))
+	// Tail of a container's captured stdout/stderr ring (see container_logs.go).
+	mux.HandleFunc("GET /api/v1/containers/{name}/logs", s.requireAuth(s.handleContainerLogs))
 	mux.Handle("GET /metrics", s.requireAuth(s.handleMetrics))
 
 	// Mutating endpoints (require manager role).

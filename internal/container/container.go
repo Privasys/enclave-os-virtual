@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -514,31 +515,52 @@ func (m *Manager) Pull(ctx context.Context, spec manifest.Container, auth *Regis
 	return img, digestBytes, nil
 }
 
-// Create creates and starts a container from the given spec.
-// taskIO returns the IO creator for a container task: cio.NullIO, which
-// discards the container's stdout/stderr. This is the ONLY drain that
-// cannot block the container, which is what matters here.
-//
-// The two alternatives both wedge under a model server's multi-GB JIT/startup
-// output (bugs-and-fixes #50):
+// Container log capture. The shim spawns LoggerBinary per task
+// (cio.BinaryIO); it drains the stdout/stderr FIFOs into a per-container
+// size-capped two-file ring under LogDir (see internal/container/logring and
+// cmd/container-logger). The manager serves the tail via
+// GET /api/v1/containers/{name}/logs.
+const (
+	// LoggerBinary is the containerd v2 logging binary baked into the image.
+	LoggerBinary = "/usr/bin/privasys-container-logger"
+	// LogDir is the capture root: LogDir/<namespace>/<id>/{stdout,stderr}.log
+	// (+ ".1" rotated predecessors). It lives on /data so the captured output
+	// is LUKS-encrypted at rest and bounded by the ring caps, not the disk.
+	LogDir = "/data/log/containers"
+)
+
+// TaskLogPaths returns the ring files holding one stream of a container's
+// captured output, oldest first, so a reader can concatenate then tail.
+func TaskLogPaths(name, stream string) []string {
+	base := filepath.Join(LogDir, Namespace, name)
+	return []string{
+		filepath.Join(base, stream+".log.1"),
+		filepath.Join(base, stream+".log"),
+	}
+}
+
+// taskIO returns the IO creator for a container task. The invariant that
+// matters (bugs-and-fixes #50): the drain must NEVER be able to block the
+// container. Both naive drains wedge under a model server's multi-GB
+// JIT/startup output:
 //   - cio.WithStdio pipes stdout to the MANAGER process. If that reader
 //     stalls — a manager restart during bootstrap, journal backpressure —
 //     the pipe fills and every writer in the container blocks.
-//   - cio.LogFile has the containerd SHIM write to a per-container file. That
-//     survives a manager restart, but the file is UNROTATED: once its
-//     filesystem fills (the small /data when the workspace-SSD bind fails),
-//     the shim's write blocks and the FIFO fills — the same wedge, one layer
-//     down. Observed on a clean dev GPU host on 2026-07-23: the 35B load went
-//     unresponsive mid-JIT and never recovered.
+//   - cio.LogFile has the containerd SHIM write an UNROTATED per-container
+//     file: once its filesystem fills (the small /data when the workspace-SSD
+//     bind fails), the shim's write blocks and the FIFO fills — the same
+//     wedge one layer down. Observed on a clean dev GPU host on 2026-07-23.
 //
-// NullIO drops the bytes at the shim before any FIFO can fill, so the drain
-// can never block regardless of disk or manager state. Nothing reads
-// container stdout functionally, and apps that need their own logs keep them
-// (e.g. the confidential-AI in-process stderr ring surfaced via
-// /v1/models/status). FOLLOW-UP: if per-container logs are wanted back, use a
-// bounded/rotating sink (binary logger or a size-capped ring), never an
-// unbounded file or a manager-side pipe.
+// The logging binary satisfies the invariant a third way: it reads the FIFOs
+// UNCONDITIONALLY and drops bytes whenever the capped ring cannot take them,
+// so disk state can throttle what is retained but never what is drained. It
+// also survives manager restarts (it is the shim's child, like the LogFile
+// drain was). If the binary is missing from the image, fall back to
+// cio.NullIO — discard is the safe direction, silence is not worth a wedge.
 func taskIO(_ string) cio.Creator {
+	if st, err := os.Stat(LoggerBinary); err == nil && st.Mode().IsRegular() {
+		return cio.BinaryIO(LoggerBinary, map[string]string{"dir": LogDir})
+	}
 	return cio.NullIO
 }
 

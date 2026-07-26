@@ -127,6 +127,18 @@ jobs:
             ./cmd/manager-bootstrap/
           ls -lh build/image/mkosi.extra/usr/sbin/manager-bootstrap
 
+      - name: Build container-logger binary (per-task capped log ring)
+        run: |
+          # Stock Go / CGO_ENABLED=0. The containerd v2 logging binary the
+          # shim spawns per task (see cmd/container-logger): drains
+          # stdout/stderr into a size-capped ring on /data and NEVER blocks
+          # the container — drops bytes the ring cannot take.
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+            -ldflags="-s -w" \
+            -o build/image/mkosi.extra/usr/bin/privasys-container-logger \
+            ./cmd/container-logger/
+          ls -lh build/image/mkosi.extra/usr/bin/privasys-container-logger
+
       - name: Build gpu-attest binary (NVIDIA GPU CC evidence collector)
         run: |
           # Stock Go / CGO_ENABLED=0 — NVML is bound at runtime via purego,
