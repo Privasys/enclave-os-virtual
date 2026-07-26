@@ -111,7 +111,24 @@ func (v *ingressVerifier) enforce(r *http.Request) error {
 	stripPeerHeaders(r)
 
 	if certB64 == "" {
-		return fmt.Errorf("no client certificate presented")
+		// No client certificate: an ANONYMOUS caller, not a failed one. A
+		// mutual-auth app is not necessarily an app-only app — the same
+		// hostname serves browsers, whose connections the gateway terminates
+		// and re-dials inward without a client cert (they cannot produce a
+		// TEE-bound one). This is the manager-side half of the ALPN split in
+		// caddy/ratls: RA-TLS callers are spliced through and land here with a
+		// certificate, everything else lands here without one.
+		//
+		// So pass it through with the peer namespace scrubbed (done above) and
+		// let the app's OWN authentication decide — exactly what happens on a
+		// non-mutual host. Nothing is granted: with no X-Privasys-Peer-*
+		// headers, anything the app gates on an attested caller still fails
+		// closed. Rejecting here instead would make every mutual-auth app
+		// unreachable from the web the moment allowed_callers is set.
+		//
+		// A caller that DOES present a certificate is held to the full policy
+		// below: offering a bad identity is an attack, offering none is not.
+		return nil
 	}
 	certDER, err := base64.StdEncoding.DecodeString(certB64)
 	if err != nil {

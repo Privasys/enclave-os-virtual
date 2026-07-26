@@ -55,9 +55,17 @@ func TestEnforceNonMutualHostStripsAndPasses(t *testing.T) {
 	}
 }
 
-// TestEnforceMutualHostWithoutCertRejects proves a mutual-auth host fails closed
-// when no client certificate was presented.
-func TestEnforceMutualHostWithoutCertRejects(t *testing.T) {
+// TestEnforceMutualHostWithoutCertPassesAnonymously proves the manager-side
+// half of the ALPN split: on a mutual-auth host, a request carrying NO client
+// certificate is an anonymous caller (a gateway-terminated browser, which
+// cannot produce a TEE-bound cert), not a failed one. It proceeds with the peer
+// namespace scrubbed, so the app's own authentication decides and anything
+// gated on an attested caller still fails closed.
+//
+// This is a regression guard: rejecting here would make every mutual-auth app
+// unreachable from the web the moment allowed_callers is set — which is exactly
+// what would break chat's sealed sessions to confidential-ai.
+func TestEnforceMutualHostWithoutCertPassesAnonymously(t *testing.T) {
 	v := newTestVerifier()
 	v.setPolicy("app.example", &ratls.DependencySet{
 		Entries: []ratls.DependencyEntry{{AppID: "deadbeef"}},
@@ -65,11 +73,37 @@ func TestEnforceMutualHostWithoutCertRejects(t *testing.T) {
 
 	r, _ := http.NewRequest("GET", "http://app.example/", nil)
 	r.Host = "app.example"
-	// No X-Privasys-Peer-Cert-Der header: Caddy would have set it after the TLS
-	// handshake required a client cert; its absence must be rejected.
+	// No X-Privasys-Peer-Cert-Der, and a forged verdict the caller supplied.
+	r.Header.Set("X-Privasys-Peer-Verified", "true")
+	r.Header.Set("X-Privasys-Peer-App-Id", "cafebabe")
+
+	if err := v.enforce(r); err != nil {
+		t.Fatalf("certless request on a mutual host must pass anonymously, got %v", err)
+	}
+	if got := r.Header.Get("X-Privasys-Peer-Verified"); got != "" {
+		t.Fatalf("forged peer verdict survived: %q", got)
+	}
+	if got := r.Header.Get("X-Privasys-Peer-App-Id"); got != "" {
+		t.Fatalf("forged peer app-id survived: %q", got)
+	}
+}
+
+// TestEnforceMutualHostWithBadCertRejects proves the other side of that rule:
+// presenting a certificate that fails verification is an attack, not an
+// anonymous call, and must be rejected rather than downgraded.
+func TestEnforceMutualHostWithBadCertRejects(t *testing.T) {
+	v := newTestVerifier()
+	v.setPolicy("app.example", &ratls.DependencySet{
+		Entries: []ratls.DependencyEntry{{AppID: "deadbeef"}},
+	})
+
+	r, _ := http.NewRequest("GET", "http://app.example/", nil)
+	r.Host = "app.example"
+	r.Header.Set("X-Privasys-Peer-Cert-Der", "not-base64-DER!!")
+	r.Header.Set("X-Privasys-Peer-Channel-Binder", "AAAA")
 
 	if err := v.enforce(r); err == nil {
-		t.Fatal("mutual host with no client cert should be rejected")
+		t.Fatal("an undecodable client certificate must be rejected, not downgraded to anonymous")
 	}
 }
 
