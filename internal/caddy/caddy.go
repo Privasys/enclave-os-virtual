@@ -32,6 +32,14 @@ import (
 	"go.uber.org/zap"
 )
 
+// ratlsALPN is the ALPN an RA-TLS-aware client advertises. Ingress mutual auth
+// is keyed on it so `client_authentication: require` applies only to attested
+// app-to-app callers (which the platform gateway SPLICES through at L4) and not
+// to browsers (which the gateway TERMINATES and re-dials inward without a
+// client certificate). Must match ratls.RATLSALPN in caddy/ratls — a separate
+// build-time module, not a Go dependency of the manager (see go.mod).
+const ratlsALPN = "privasys-ratls/1"
+
 // Config holds the static Caddy configuration that does not change
 // between route additions/removals.
 type Config struct {
@@ -348,7 +356,23 @@ func (c *Client) buildConfig() map[string]any {
 	connPolicies := make([]map[string]any, 0, len(mutualHosts)+1)
 	for _, h := range mutualHosts {
 		connPolicies = append(connPolicies, map[string]any{
-			"match": map[string]any{"sni": []string{h}},
+			// Match the RA-TLS ALPN as well as the SNI. A mutual host may also
+			// serve BROWSERS on the same hostname (chat's sealed session talks
+			// to confidential-ai on the very host Drive calls for embeddings),
+			// and those arrive from the gateway's TERMINATE leg with no client
+			// certificate — an SNI-only policy would demand one and break every
+			// browser the moment allowed_callers is set. The gateway already
+			// splits the two populations on this exact ALPN (splice vs
+			// terminate), so keying the policy on it enforces mutual auth for
+			// attested app-to-app callers and leaves browser traffic on the
+			// server-auth catch-all below.
+			// ratlsALPN below must stay in step with ratls.RATLSALPN in
+			// caddy/ratls (a separate build-time module, deliberately not a Go
+			// dependency of the manager — see go.mod).
+			"match": map[string]any{
+				"sni":           []string{h},
+				"privasys_alpn": []string{ratlsALPN},
+			},
 			"client_authentication": map[string]any{
 				"mode": "require",
 			},

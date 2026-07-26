@@ -59,6 +59,20 @@ func TestBuildConfigStrictSNIHostOnlyWithMutual(t *testing.T) {
 	if len(pols[1]) != 0 {
 		t.Fatal("last policy must be the empty catch-all")
 	}
+	// The mutual policy MUST also be keyed on the RA-TLS ALPN. A mutual host
+	// can serve browsers on the same hostname (chat's sealed session and
+	// Drive's embeddings both address confidential-ai), and those arrive from
+	// the gateway's terminate leg with no client certificate. An SNI-only match
+	// would demand one and make the app unreachable from the web the moment
+	// allowed_callers is set, so this is a regression guard, not a style check.
+	m, ok := first["match"].(map[string]any)
+	if !ok {
+		t.Fatalf("mutual policy match must be a map, got %T", first["match"])
+	}
+	alpn, ok := m["privasys_alpn"].([]string)
+	if !ok || len(alpn) != 1 || alpn[0] != ratlsALPN {
+		t.Fatalf("mutual policy must match the RA-TLS ALPN so browser (terminated) connections fall through to the catch-all; got %v", m["privasys_alpn"])
+	}
 }
 
 // TestBuildConfigMutualRouteHasPeerHandler proves the privasys_peer_headers
