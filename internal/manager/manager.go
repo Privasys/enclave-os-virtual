@@ -907,12 +907,24 @@ func (s *Server) handleUnloadContainer(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if err := s.launcher.Unload(r.Context(), name); err != nil {
-		s.log.Error("failed to unload container",
+		// "Not loaded" is not necessarily a failure, and treating it as one
+		// made ORPHANS unremovable: a container whose load never completed
+		// (its app or version is gone, so replay fails every boot) has no live
+		// spec, yet its PERSISTED registry entry keeps re-creating it. Bailing
+		// out here skipped the registry purge below, so the entry survived
+		// forever — and production enclaves have no shell to clear it by hand.
+		// Fall through and purge instead, which also makes DELETE idempotent.
+		if !errors.Is(err, launcher.ErrNotLoaded) {
+			s.log.Error("failed to unload container",
+				zap.String("name", name),
+				zap.Error(err),
+			)
+			s.jsonError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		s.log.Warn("container has no live spec; purging any stale registry entry",
 			zap.String("name", name),
-			zap.Error(err),
 		)
-		s.jsonError(w, http.StatusInternalServerError, err.Error())
-		return
 	}
 
 	if err := s.registry.Remove(name); err != nil {

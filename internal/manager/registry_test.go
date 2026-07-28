@@ -78,3 +78,45 @@ func TestRegistry_SaveReplaceRemove(t *testing.T) {
 		t.Fatalf("Remove unknown: %v", err)
 	}
 }
+
+// TestRegistryPurgedForOrphan proves the orphan-cleanup contract that the
+// unload handler depends on: an entry whose container has NO live spec must
+// still be removable from the persisted registry.
+//
+// This is the regression that made orphans permanent. The handler used to
+// return as soon as launcher.Unload reported "not loaded", so registry.Remove
+// never ran; the entry survived, replayed on every boot, and could not be
+// cleared by hand because production enclaves ship no shell. The handler now
+// treats launcher.ErrNotLoaded as "nothing to stop, still purge" — this test
+// pins the registry half of that, and errors.Is(err, launcher.ErrNotLoaded)
+// is what lets the handler tell this case apart from a real failure.
+func TestRegistryPurgedForOrphan(t *testing.T) {
+	dir := t.TempDir()
+	r := newRegistry(filepath.Join(dir, "manager-apps.json"))
+
+	if err := r.Save(launcher.LoadRequest{Name: "release-probe-d"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	if err := r.Save(launcher.LoadRequest{Name: "keep-me"}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	// The orphan never loads, so nothing else will ever remove this entry.
+	if err := r.Remove("release-probe-d"); err != nil {
+		t.Fatalf("remove orphan: %v", err)
+	}
+
+	got, err := r.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "keep-me" {
+		t.Fatalf("registry = %+v, want only keep-me (the orphan must not replay again)", got)
+	}
+
+	// Idempotent: removing it again is not an error, so a repeated DELETE
+	// after the entry is already gone still reports success.
+	if err := r.Remove("release-probe-d"); err != nil {
+		t.Fatalf("second remove should be a no-op, got %v", err)
+	}
+}

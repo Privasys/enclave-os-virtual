@@ -30,6 +30,7 @@ import (
 	"encoding/asn1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -1627,13 +1628,20 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	return digest, nil
 }
 
+// ErrNotLoaded reports that no live spec exists for the named container.
+// Callers distinguish it because it is not always a failure: a container whose
+// load never completed leaves a PERSISTED registry entry with no live spec, and
+// the only way to stop it replaying on every boot is to purge that entry — see
+// the unload handler.
+var ErrNotLoaded = errors.New("container not loaded")
+
 // Unload stops and removes a container, then recomputes attestation.
 func (l *Launcher) Unload(ctx context.Context, name string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	if _, exists := l.specs[name]; !exists {
-		return fmt.Errorf("launcher: container %q not loaded", name)
+		return fmt.Errorf("launcher: container %q: %w", name, ErrNotLoaded)
 	}
 
 	// Remove Caddy route and extensions before cleaning state.
