@@ -374,7 +374,26 @@ func (c *Client) buildConfig() map[string]any {
 				"privasys_alpn": []string{ratlsALPN},
 			},
 			"client_authentication": map[string]any{
-				"mode": "require",
+				// "request", NOT "require": ask every RA-TLS caller for a
+				// certificate, but let the handshake succeed without one.
+				//
+				// "require" rejected at the TLS layer, which broke every
+				// attested-but-certificate-less client — the wallet and the
+				// CLI both advertise this ALPN to reach the spliced enclave,
+				// and neither can produce a TEE-bound client certificate. On
+				// 2026-07-28 that locked users out of Drive entirely
+				// ("certificate required" during login) the moment
+				// allowed_callers was set.
+				//
+				// Asking instead defers the decision to the manager, which is
+				// the only place with enough context to make it: a caller that
+				// PRESENTS a certificate is fully verified (quote,
+				// measurements, allowed-callers pin, channel binder) and gets
+				// X-Privasys-Peer-*; a caller that presents none proceeds with
+				// that namespace scrubbed and faces the app's own
+				// authentication. Nothing is weakened — anything gated on an
+				// attested peer still fails closed without those headers.
+				"mode": "request",
 			},
 		})
 	}

@@ -52,9 +52,15 @@ func TestBuildConfigStrictSNIHostOnlyWithMutual(t *testing.T) {
 	if _, hasMatch := first["match"]; !hasMatch {
 		t.Fatal("mutual policy must carry an SNI match")
 	}
+	// "request", never "require". A mutual host still serves clients that
+	// speak RA-TLS but cannot hold a TEE-bound certificate — the wallet and
+	// the CLI both do — and "require" rejects those at the TLS layer, which
+	// locked users out of Drive's login entirely on 2026-07-28. Asking for a
+	// certificate lets the manager decide per connection: verified peer, or
+	// anonymous with the peer headers scrubbed.
 	ca, ok := first["client_authentication"].(map[string]any)
-	if !ok || ca["mode"] != "require" {
-		t.Fatalf("mutual policy must require a client cert, got %v", first["client_authentication"])
+	if !ok || ca["mode"] != "request" {
+		t.Fatalf("mutual policy must REQUEST (not require) a client cert, got %v", first["client_authentication"])
 	}
 	if len(pols[1]) != 0 {
 		t.Fatal("last policy must be the empty catch-all")
