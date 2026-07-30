@@ -1535,9 +1535,11 @@ func matchesConfigAPI(spec *launcher.ConfigAPISpec, r *http.Request) bool {
 // id nor an owners list are admitted with a warning — enforcement becomes
 // possible when the control plane redeploys them with the new envelope.
 // Everything else fails closed. Note the sealed-relay X-Privasys-Sub is
-// deliberately NOT accepted: it asserts a subject but carries no roles, and
-// configure is not a sealed-session flow (portal and CLI both present the
-// user's platform bearer).
+// deliberately NOT accepted: it asserts a subject but carries no roles. That
+// holds whether or not the call arrived sealed — a browser configuring an app
+// does so over a sealed session now, and the relay unwraps before this gate
+// runs, so the inner request must still carry the user's platform bearer. The
+// authority is the bearer's role, never the relay's assertion.
 func (s *Server) authorizeConfigure(r *http.Request, containerName string, st launcher.FreezeState) error {
 	if st.AppID == "" && len(st.Owners) == 0 {
 		s.log.Warn("configure gate: legacy load without app id or owners team — admitting",
