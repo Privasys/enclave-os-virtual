@@ -157,6 +157,14 @@ type Config struct {
 type ConfigAPISpec struct {
 	Method string `json:"method"` // e.g. "POST"
 	Path   string `json:"path"`   // e.g. "/configure"
+
+	// Optional marks a configure endpoint that has a usable default: the
+	// owner/admin-only authz gate still guards it on every call, but the
+	// freeze never engages — the app serves from the start. Without this,
+	// optional-configure apps had NO config_api armed at all, which left
+	// their config surface open to any caller the transport let through
+	// (found on the lightpanda /configure, 2026-07-30).
+	Optional bool `json:"optional,omitempty"`
 }
 
 // LoadRequest is the API request to load a container.

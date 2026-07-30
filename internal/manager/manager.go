@@ -492,7 +492,7 @@ func (s *Server) Start(ctx context.Context) error {
 						}
 						return
 					}
-				} else if st.ConfigAPI != nil && !st.Configured {
+				} else if st.ConfigAPI != nil && !st.ConfigAPI.Optional && !st.Configured {
 					w.Header().Set("Retry-After", "5")
 					s.jsonError(w, http.StatusServiceUnavailable, "container is awaiting initial configuration")
 					return
