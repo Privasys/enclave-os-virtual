@@ -1,0 +1,424 @@
+{
+  "configure": {
+    "name": "configure",
+    "title": "Load CSCA trust anchors",
+    "endpoint": "/configure",
+    "description": "Provision the CSCA trust anchors from a raw ICAO Master List and lift the configure-then-freeze gate. The verifier validates the list's CMS signature and that it chains to the pinned ICAO/UN CSCA root before accepting it; raw/unsigned anchors are rejected. Needed on first provisioning or after a data-volume wipe; anchors persist on the sealed volume and reload on restart. Every other endpoint returns HTTP 503 until configured.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "master_list_cms": {
+          "type": "string",
+          "description": "Raw ICAO CSCA Master List (.ml file), base64-encoded. A CMS SignedData wrapping CscaMasterListData (ICAO Doc 9303 Part 12), e.g. the quarterly list from icao.int. The verifier checks the CMS signature and the ML-signer chain to the pinned ICAO/UN root, then extracts the CSCA certificates. SHA-256 of the resulting anchor set is committed to the RA-TLS leaf at the Identity Trust Anchors OID (1.3.6.1.4.1.65230.3.5.1) so relying parties can pin which anchors were in force.",
+          "x-privasys": {
+            "label": "ICAO CSCA Master List",
+            "help": "Upload the raw .ml download (a CMS SignedData wrapping CscaMasterListData). The browser encodes it and sends it over a sealed session direct to the enclave, so the control-plane 1 MiB proxy cap no longer applies.",
+            "accept": ".ml,.p7b"
+          },
+          "contentEncoding": "base64",
+          "contentMediaType": "application/pkcs7-mime"
+        }
+      },
+      "required": [
+        "master_list_cms"
+      ]
+    }
+  },
+  "tools": [
+    {
+      "name": "configure",
+      "role": "config",
+      "title": "Load CSCA trust anchors",
+      "endpoint": "/configure",
+      "description": "Provision the CSCA trust anchors from a raw ICAO Master List and lift the configure-then-freeze gate. Validates the list's CMS signature and its chain to the pinned ICAO/UN CSCA root; extracts and persists the CSCA certificates on the sealed volume. Returns {status: \"configured\", trust_anchors_digest} - the digest is reproducible for the same anchor set and is attested at OID 1.3.6.1.4.1.65230.3.5.1.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "master_list_cms": {
+            "type": "string",
+            "description": "Raw ICAO CSCA Master List (.ml file), base64-encoded. A CMS SignedData wrapping CscaMasterListData (ICAO Doc 9303 Part 12). The verifier checks the CMS signature and the ML-signer chain to the pinned ICAO/UN root, then extracts the CSCA certificates.",
+            "x-privasys": {
+              "label": "ICAO CSCA Master List (base64 .ml)",
+              "help": "Base64 of the raw .ml download. Larger than the control-plane 1 MiB proxy cap - send over RA-TLS (privasys apps call identity-verifier configure)."
+            }
+          }
+        },
+        "required": [
+          "master_list_cms"
+        ]
+      }
+    },
+    {
+      "name": "read_mrz",
+      "title": "Read data-page MRZ (pre-NFC)",
+      "endpoint": "/read-mrz",
+      "description": "OCR a passport data-page photo inside the enclave and return the three BAC/PACE chip-access fields: document_number, date_of_birth and date_of_expiry (raw YYMMDD MRZ form, check-digit validated), plus is_screenshot (replay heuristic). Use this before the NFC read: the fields derive the key that unlocks the chip. Returns HTTP 422 when no check-digit-valid MRZ can be read (retake the photo). The image is processed in memory for this call only; nothing is persisted.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "doc_image": {
+            "type": "string",
+            "description": "Photo of the document's data page (the page with the two machine-readable OCR-B lines), base64-encoded JPEG or PNG.",
+            "x-privasys": {
+              "label": "Data-page photo (base64)"
+            }
+          }
+        },
+        "required": [
+          "doc_image"
+        ]
+      }
+    },
+    {
+      "name": "aa_challenge",
+      "title": "Active Authentication challenge",
+      "endpoint": "/aa-challenge",
+      "description": "Issue a fresh 8-byte Active Authentication challenge for the passport chip to sign (anti-clone check). Returns {challenge, token}: challenge is base64url for the chip's INTERNAL AUTHENTICATE, token is a short-lived enclave-signed JWS binding the challenge so its freshness is verified statelessly when the signature comes back in verify_identity's aa block. Needed only by clients that drive the chip APDUs themselves; readers that issue their own per-read challenge (e.g. iOS NFCPassportReader) skip this and send their challenge without a token.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "verify_identity",
+      "title": "Verify passport + holder (issue IVR)",
+      "endpoint": "/verify-identity",
+      "x-privasys": {
+        "price": {
+          "credits": 100000,
+          "payer": "caller",
+          "free_for": ["wallet"]
+        }
+      },
+      "description": "The one heavy verification: authenticate an eMRTD chip read (ICAO 9303 Passive Authentication against the loaded CSCA anchors, plus Active Authentication when DG15 is present) and check the holder's live selfie against the chip portrait (face match + liveness). Fails closed on an expired document, an untrusted chain, a cloned chip, or a face mismatch. On success returns {ivr, salts, fields, viz_match}: ivr is the signed Identity Verification Receipt (per-field SHA-256 commitments, validity results, holder binding, enclave measurement); salts and fields stay with the client so later prove_* calls can re-open exactly one commitment. Raw document and biometric data are processed in memory and never stored.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "holder_pub": {
+            "type": "string",
+            "description": "Holder hardware public key: base64url, uncompressed SEC1 P-256 point (0x04 || X || Y). The IVR binds to SHA-256 of this key, so disclosures can only be derived by this device.",
+            "x-privasys": {
+              "label": "Holder public key (base64url SEC1 P-256)"
+            }
+          },
+          "sod": {
+            "type": "string",
+            "description": "EF.SOD (Document Security Object) read from the chip, base64-encoded. Its CMS signature and DSC-to-CSCA chain are verified against the loaded trust anchors; every supplied data group is hash-checked against it."
+          },
+          "data_groups": {
+            "type": "object",
+            "description": "Map of data-group number to base64 raw DG bytes, e.g. {\"1\": ..., \"2\": ...}. DG1 (MRZ) is required; DG2 (portrait) enables the face match; DG11 (optional) adds personal details; DG15 present makes Active Authentication mandatory (aa block required). Skip DG3/DG4 (EAC-protected)."
+          },
+          "aa": {
+            "type": "object",
+            "description": "Active Authentication proof, required when DG15 is supplied. challenge (base64url) is what the chip signed; signature (base64url) is the chip's response; token is the enclave JWS from aa_challenge when the enclave issued the challenge (omit when the NFC reader issued its own per-read challenge).",
+            "properties": {
+              "challenge": {
+                "type": "string",
+                "description": "base64url challenge the chip signed (8 bytes)."
+              },
+              "signature": {
+                "type": "string",
+                "description": "base64url chip signature from INTERNAL AUTHENTICATE."
+              },
+              "token": {
+                "type": "string",
+                "description": "Enclave challenge-binding JWS from aa_challenge; omit for reader-issued challenges."
+              }
+            },
+            "required": [
+              "challenge",
+              "signature"
+            ]
+          },
+          "live_image": {
+            "type": "string",
+            "description": "Live selfie capture of the holder, base64-encoded JPEG or PNG. Matched against the DG2 chip portrait (embedding distance + liveness). Required when the biometric models are provisioned - a deployed verifier fails closed without it."
+          },
+          "doc_image": {
+            "type": "string",
+            "description": "Optional data-page photo (base64). When supplied, the enclave OCRs the visual MRZ and cross-references it against the authenticated chip DG1 (GPG45 box 3); the result is recorded as viz_match (fraud signal, not a hard gate)."
+          }
+        },
+        "required": [
+          "holder_pub",
+          "sod",
+          "data_groups"
+        ]
+      }
+    },
+    {
+      "name": "prove_age_over",
+      "title": "Prove age over N",
+      "endpoint": "/prove/age-over",
+      "description": "Derive a passport-certified yes/no proof that the holder is at least N years old, without revealing the birth date. Verifies the IVR, re-opens only the birthdate commitment, and returns {token}: a short-lived SD-JWT VC (typ dc+sd-jwt) with claim age_over_N, assurance gov, audience-bound to rp_id and subject-bound to the pairwise sub. Relying parties verify it against the enclave's published JWKS (/.well-known/jwt-vc-issuer) plus its attestation; they never see the receipt or any raw data.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ivr": {
+            "type": "string",
+            "description": "Identity Verification Receipt (compact JWS) returned by verify_identity."
+          },
+          "sub": {
+            "type": "string",
+            "description": "Pairwise subject for this relying party (computed by the wallet as SHA-256(pairwiseSeed || rp_id)). Becomes the token's sub, so apps cannot correlate the same user across services."
+          },
+          "rp_id": {
+            "type": "string",
+            "description": "Relying-party identifier the token is for, e.g. shop.example. Becomes the token's aud; the token is unusable elsewhere."
+          },
+          "nonce": {
+            "type": "string",
+            "description": "Fresh random nonce, part of the holder-signed message (replay protection)."
+          },
+          "ts": {
+            "type": "integer",
+            "description": "Request Unix time in seconds; rejected when more than 300 s from enclave time."
+          },
+          "holder_pub": {
+            "type": "string",
+            "description": "Holder hardware public key (base64url SEC1 P-256); must hash to the IVR's holder_binding."
+          },
+          "holder_sig": {
+            "type": "string",
+            "description": "base64url ES256 signature by the holder hardware key over canonical JSON {ivr: <jti>, nonce, rp_id, ts}. Proves the request comes from the device the IVR is bound to; a stolen IVR is useless without it."
+          },
+          "birthdate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Birth date (YYYY-MM-DD) exactly as certified in verify_identity's fields; re-hashed against the IVR's birthdate commitment, so a wrong value is rejected."
+          },
+          "salt": {
+            "type": "string",
+            "description": "base64url salt for the birthdate commitment, from verify_identity's salts.birthdate."
+          },
+          "threshold": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 150,
+            "description": "Age threshold N in years, e.g. 18. The token asserts age_over_N = true/false."
+          }
+        },
+        "required": [
+          "ivr",
+          "sub",
+          "rp_id",
+          "nonce",
+          "ts",
+          "holder_pub",
+          "holder_sig",
+          "birthdate",
+          "salt",
+          "threshold"
+        ]
+      }
+    },
+    {
+      "name": "prove_age_band",
+      "title": "Prove age band",
+      "endpoint": "/prove/age-band",
+      "description": "Like prove_age_over but the returned SD-JWT VC asserts an age band label (e.g. \"18-20\" or \"65+\") instead of a single threshold. Band boundaries are lower-inclusive; the default set is [0, 13, 16, 18, 21, 25, 65]. The birth date itself is never revealed.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ivr": {
+            "type": "string",
+            "description": "Identity Verification Receipt (compact JWS) returned by verify_identity."
+          },
+          "sub": {
+            "type": "string",
+            "description": "Pairwise subject for this relying party (token sub)."
+          },
+          "rp_id": {
+            "type": "string",
+            "description": "Relying-party identifier (token aud)."
+          },
+          "nonce": {
+            "type": "string",
+            "description": "Fresh random nonce (replay protection)."
+          },
+          "ts": {
+            "type": "integer",
+            "description": "Request Unix time in seconds (max 300 s skew)."
+          },
+          "holder_pub": {
+            "type": "string",
+            "description": "Holder hardware public key (base64url SEC1 P-256)."
+          },
+          "holder_sig": {
+            "type": "string",
+            "description": "base64url holder signature over canonical JSON {ivr: <jti>, nonce, rp_id, ts}."
+          },
+          "birthdate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Certified birth date (YYYY-MM-DD); checked against the IVR commitment."
+          },
+          "salt": {
+            "type": "string",
+            "description": "base64url salt for the birthdate commitment."
+          },
+          "bands": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            },
+            "default": [
+              0,
+              13,
+              16,
+              18,
+              21,
+              25,
+              65
+            ],
+            "description": "Optional lower-inclusive band boundaries in years, e.g. [0, 18, 65] yields bands 0-17, 18-64, 65+."
+          }
+        },
+        "required": [
+          "ivr",
+          "sub",
+          "rp_id",
+          "nonce",
+          "ts",
+          "holder_pub",
+          "holder_sig",
+          "birthdate",
+          "salt"
+        ]
+      }
+    },
+    {
+      "name": "prove_field",
+      "title": "Prove one certified field",
+      "endpoint": "/prove/field",
+      "description": "Derive a passport-certified disclosure of exactly one document field (e.g. family_name or nationality). Re-opens only that field's commitment and returns {token}: a short-lived, audience-bound SD-JWT VC carrying the field as claim/value with assurance gov. Each call discloses one value - minimal disclosure by construction.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ivr": {
+            "type": "string",
+            "description": "Identity Verification Receipt (compact JWS) returned by verify_identity."
+          },
+          "sub": {
+            "type": "string",
+            "description": "Pairwise subject for this relying party (token sub)."
+          },
+          "rp_id": {
+            "type": "string",
+            "description": "Relying-party identifier (token aud)."
+          },
+          "nonce": {
+            "type": "string",
+            "description": "Fresh random nonce (replay protection)."
+          },
+          "ts": {
+            "type": "integer",
+            "description": "Request Unix time in seconds (max 300 s skew)."
+          },
+          "holder_pub": {
+            "type": "string",
+            "description": "Holder hardware public key (base64url SEC1 P-256)."
+          },
+          "holder_sig": {
+            "type": "string",
+            "description": "base64url holder signature over canonical JSON {ivr: <jti>, nonce, rp_id, ts}."
+          },
+          "field": {
+            "type": "string",
+            "enum": [
+              "given_name",
+              "family_name",
+              "birthdate",
+              "nationality",
+              "document_number",
+              "document_type",
+              "issuing_state",
+              "sex"
+            ],
+            "description": "Which certified document field to disclose."
+          },
+          "value": {
+            "type": "string",
+            "description": "The field's value exactly as returned in verify_identity's fields; re-hashed against the IVR commitment, so it cannot be altered."
+          },
+          "salt": {
+            "type": "string",
+            "description": "base64url salt for this field's commitment, from verify_identity's salts."
+          }
+        },
+        "required": [
+          "ivr",
+          "sub",
+          "rp_id",
+          "nonce",
+          "ts",
+          "holder_pub",
+          "holder_sig",
+          "field",
+          "value",
+          "salt"
+        ]
+      }
+    },
+    {
+      "name": "prove_document_valid",
+      "title": "Prove a valid document was verified",
+      "endpoint": "/prove/document-valid",
+      "description": "Zero-disclosure proof-of-personhood: returns {token}, a short-lived SD-JWT VC asserting only that a genuine, unexpired government document was verified for this holder (claim document_valid = true). No document field or biometric detail is revealed - useful for \"is a real person with a real ID\" checks.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ivr": {
+            "type": "string",
+            "description": "Identity Verification Receipt (compact JWS) returned by verify_identity."
+          },
+          "sub": {
+            "type": "string",
+            "description": "Pairwise subject for this relying party (token sub)."
+          },
+          "rp_id": {
+            "type": "string",
+            "description": "Relying-party identifier (token aud)."
+          },
+          "nonce": {
+            "type": "string",
+            "description": "Fresh random nonce (replay protection)."
+          },
+          "ts": {
+            "type": "integer",
+            "description": "Request Unix time in seconds (max 300 s skew)."
+          },
+          "holder_pub": {
+            "type": "string",
+            "description": "Holder hardware public key (base64url SEC1 P-256)."
+          },
+          "holder_sig": {
+            "type": "string",
+            "description": "base64url holder signature over canonical JSON {ivr: <jti>, nonce, rp_id, ts}."
+          }
+        },
+        "required": [
+          "ivr",
+          "sub",
+          "rp_id",
+          "nonce",
+          "ts",
+          "holder_pub",
+          "holder_sig"
+        ]
+      }
+    },
+    {
+      "name": "trust_anchors_status",
+      "role": "status",
+      "title": "Trust-anchor status",
+      "endpoint": "/trust-anchors/status",
+      "description": "Report the active trust-anchor set: digest (SHA-256 of the anchors, hex), count (number of CSCA certificates) and oid (the attestation OID publishing the digest). Compare digest with the value pinned in the RA-TLS policy to confirm which anchors are in force.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ]
+}
