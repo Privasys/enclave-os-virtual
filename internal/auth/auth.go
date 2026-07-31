@@ -266,6 +266,27 @@ func (v *Verifier) AuthenticateUser(tokenStr string) (sub string, roles []string
 	return sub, collectRoles(claims, v.oidc.RoleClaim), nil
 }
 
+// AuthenticateCaller validates an OIDC bearer like AuthenticateUser but
+// returns the billing-relevant facts: the subject and whether the token
+// carries the IdP's wallet-class marker (`wallet` claim, boolean true or
+// the string "true" — the same acceptance rule as the wasm runtime). Used
+// by the per-call API-fee gate to attribute a charge and to apply
+// free_for:["wallet"] exemptions.
+func (v *Verifier) AuthenticateCaller(tokenStr string) (sub string, wallet bool, err error) {
+	claims, err := v.verifyClaims(tokenStr)
+	if err != nil {
+		return "", false, err
+	}
+	sub, _ = claims["sub"].(string)
+	switch w := claims["wallet"].(type) {
+	case bool:
+		wallet = w
+	case string:
+		wallet = w == "true"
+	}
+	return sub, wallet, nil
+}
+
 // Audience returns the expected OIDC audience — also the namespace prefix
 // of the app-scoped roles this verifier's tokens can carry.
 func (v *Verifier) Audience() string { return v.oidc.Audience }

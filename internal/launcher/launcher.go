@@ -46,6 +46,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/Privasys/enclave-os-virtual/internal/apifees"
 	"github.com/Privasys/enclave-os-virtual/internal/caddy"
 	"github.com/Privasys/enclave-os-virtual/internal/container"
 	"github.com/Privasys/enclave-os-virtual/internal/extensions"
@@ -553,6 +554,14 @@ type Launcher struct {
 	// token). Guarded by freezeMu, like configAPI.
 	configOwners map[string][]string
 
+	// prices is the per-container API-fee table (path → priced tool),
+	// parsed at Load time from the image's org.privasys.manifest label —
+	// a measured input (the label is inside the digest-pinned image
+	// config). Guarded by freezeMu, like configAPI: the manager reads it
+	// on every app request and must not block on l.mu across a
+	// multi-minute image import.
+	prices map[string]apifees.Table
+
 	// freezeMu guards configAPI + configured. Always acquired AFTER l.mu
 	// when both are held (writers inside Load/Unload); Statuses takes it
 	// alone.
@@ -631,6 +640,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		configAPI:         make(map[string]*ConfigAPISpec),
 		configured:        make(map[string]bool),
 		configOwners:      make(map[string][]string),
+		prices:            make(map[string]apifees.Table),
 		failures:          make(map[string]string),
 		billingFrozen:     make(map[string]string),
 		containerTokens:   make(map[string]string),
@@ -1367,6 +1377,34 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		zap.String("digest", hex.EncodeToString(digest)),
 	)
 
+	// Per-endpoint API fees (x-privasys.price): read the app's MCP manifest
+	// from the image's org.privasys.manifest label. The label is inside the
+	// digest-pinned image config we just verified, so the enforced price set
+	// is measured — changing a price changes the attested image digest, the
+	// container counterpart of a wasm price moving configuration_hash. A
+	// missing or unparsable label prices nothing (unpriced is safe,
+	// mis-priced is not).
+	var priceTable apifees.Table
+	if labels, lerr := l.mgr.ImageLabels(ctx, img); lerr != nil {
+		l.log.Warn("image labels unreadable; app runs unpriced",
+			zap.String("name", req.Name), zap.Error(lerr))
+	} else if raw := labels[apifees.ManifestLabel]; raw != "" {
+		tbl, perr := apifees.ParseManifest(raw)
+		if perr != nil {
+			l.log.Warn("org.privasys.manifest label unparsable; app runs unpriced",
+				zap.String("name", req.Name), zap.Error(perr))
+		} else if len(tbl) > 0 {
+			priceTable = tbl
+			for path, pt := range tbl {
+				l.log.Info("priced endpoint armed",
+					zap.String("name", req.Name),
+					zap.String("path", path),
+					zap.String("tool", pt.Tool),
+					zap.Uint64("credits", pt.Rule.Credits))
+			}
+		}
+	}
+
 	// Provision per-container encrypted volume if requested. With a
 	// KeyHandle the DEK comes from (or, on first boot, is filled into)
 	// the vault constellation, so the volume survives host reboots and
@@ -1561,6 +1599,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		l.configured[req.Name] = true
 	}
 	l.configOwners[req.Name] = req.Owners
+	if len(priceTable) > 0 {
+		l.prices[req.Name] = priceTable
+	} else {
+		delete(l.prices, req.Name) // idempotent reload with prices removed
+	}
 	l.freezeMu.Unlock()
 	l.clearFailure(req.Name)
 	l.containerTokens[req.Name] = containerToken
@@ -1699,6 +1742,7 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	delete(l.configAPI, name)
 	delete(l.configured, name)
 	delete(l.configOwners, name)
+	delete(l.prices, name)
 	l.freezeMu.Unlock()
 	l.clearFailure(name)
 	delete(l.containerTokens, name)
@@ -2268,6 +2312,15 @@ type FreezeState struct {
 	// fallback. Both come from the persisted LoadRequest.
 	AppID  string
 	Owners []string
+}
+
+// ContainerPrices returns the API-fee table for a container (path →
+// priced tool), parsed at Load time from the measured image manifest
+// label. Nil when the container declares no enforceable prices.
+func (l *Launcher) ContainerPrices(name string) apifees.Table {
+	l.freezeMu.RLock()
+	defer l.freezeMu.RUnlock()
+	return l.prices[name]
 }
 
 // ContainerFreezeState reports the current freeze state for the given

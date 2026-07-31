@@ -24,6 +24,7 @@
 // GET    /healthz                    - liveness probe (always 200)
 // GET    /readyz                     - readiness probe (200 when all containers healthy)
 // GET    /api/v1/status              - JSON array of container statuses
+// GET    /api/v1/api-fees            - per-call API-fee event ring (x-privasys.price)
 // GET    /api/v1/eventlog            - TCG2 event log for RTMR verification (base64)
 // POST   /api/v1/containers          - load a container (JSON body: LoadRequest)
 // DELETE /api/v1/containers/{name}   - unload a container
@@ -45,6 +46,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +55,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
+	"github.com/Privasys/enclave-os-virtual/internal/apifees"
 	"github.com/Privasys/enclave-os-virtual/internal/attrbilling"
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
@@ -177,6 +180,12 @@ type Server struct {
 	// its own).
 	settler *attrbilling.Settler
 
+	// apiFees is the per-call fee-event ring (x-privasys.price): the
+	// dispatcher records a fee on every successful priced call and the
+	// management-service pulls them via GET /api/v1/api-fees. Persisted
+	// next to the app registry on /data; memory-only in dev/test.
+	apiFees *apifees.Store
+
 	// ingress verifies the attested caller identity on ingress mutual-RA-TLS
 	// hosts and annotates the request with X-Privasys-Peer-* headers (or
 	// rejects it). The launcher registers per-host allowed-caller policies via
@@ -198,6 +207,10 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		resolver := &sessionrelay.HTTPJWKSResolver{Issuer: cfg.IdpIssuer}
 		sr.SetEncAuthVerifier(&sessionrelay.DefaultEncAuthVerifier{Resolver: resolver})
 	}
+	feesPath := ""
+	if cfg.RegistryPath != "" {
+		feesPath = filepath.Join(filepath.Dir(cfg.RegistryPath), "manager-api-fees.json")
+	}
 	s := &Server{
 		cfg:          cfg,
 		log:          log.Named("manager"),
@@ -206,6 +219,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		registry:     newRegistry(cfg.RegistryPath),
 		sessionRelay: sr,
 		settler:      attrbilling.New(attrbilling.Config{MgmtBaseURL: cfg.MgmtBaseURL, EnclaveToken: cfg.EnclaveToken}, log),
+		apiFees:      apifees.Open(feesPath, log),
 	}
 	// Ingress mutual-RA-TLS verifier. It resolves the attestation server from
 	// the launcher (updated at runtime via PUT /api/v1/attestation-servers) and
@@ -262,6 +276,15 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 			pr.Out.URL.Host = upstream
 			pr.Out.Host = pr.In.Host
 			pr.SetXForwarded()
+		},
+		// Billing headers are runtime-asserted, never app-asserted: scrub
+		// whatever the container set so an app cannot forge a charge or a
+		// price. The billed writer re-stamps the runtime's own
+		// X-Billing-Charged after this scrub (see apifee.go).
+		ModifyResponse: func(resp *http.Response) error {
+			resp.Header.Del(billingChargedHeader)
+			resp.Header.Del(billingPriceHeader)
+			return nil
 		},
 		// Stream SSE / chunked bodies promptly (e.g. /v1/chat/completions).
 		FlushInterval: -1,
@@ -368,6 +391,9 @@ func (s *Server) Start(ctx context.Context) error {
 	// Monitoring endpoints (require monitoring or manager role).
 	mux.HandleFunc("GET /readyz", s.requireAuth(s.handleReadyz))
 	mux.HandleFunc("GET /api/v1/status", s.requireAuth(s.handleStatus))
+	// Per-call API-fee events (x-privasys.price) for the management-service
+	// pull path; the puller keeps its own seq cursor (see apifee.go).
+	mux.HandleFunc("GET /api/v1/api-fees", s.requireAuth(s.handleAPIFees))
 	mux.HandleFunc("GET /api/v1/eventlog", s.requireAuth(s.handleEventLog))
 	// Tail of a container's captured stdout/stderr ring (see container_logs.go).
 	mux.HandleFunc("GET /api/v1/containers/{name}/logs", s.requireAuth(s.handleContainerLogs))
@@ -498,7 +524,10 @@ func (s *Server) Start(ctx context.Context) error {
 					return
 				}
 			}
-			s.serveAppWithVoucher(w, r)
+			// Per-call API fee (x-privasys.price): consent gate + charge
+			// recording around the app proxy, from the measured price
+			// table (see apifee.go). Unpriced requests pass through.
+			s.serveAppBilled(w, r, containerName)
 			return
 		}
 		mux.ServeHTTP(w, r)

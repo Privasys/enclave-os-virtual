@@ -1193,6 +1193,18 @@ func (m *Manager) ContainerdVersionHash(ctx context.Context) ([]byte, error) {
 	return h[:], nil
 }
 
+// ImageLabels returns the config labels of a pulled image. The labels live
+// in the image config blob, so they are covered by the digest pin the
+// launcher verifies — a measured input, unlike anything the platform sends
+// in a load request.
+func (m *Manager) ImageLabels(ctx context.Context, img client.Image) (map[string]string, error) {
+	spec, err := img.Spec(m.ctx(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("container: failed to read image spec: %w", err)
+	}
+	return spec.Config.Labels, nil
+}
+
 // ImageDescriptor returns the OCI descriptor for a pulled image.
 func (m *Manager) ImageDescriptor(ctx context.Context, ref string) (*ocispec.Descriptor, error) {
 	ctx = m.ctx(ctx)
