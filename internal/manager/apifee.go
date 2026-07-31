@@ -49,16 +49,17 @@ func (s *Server) priceForRequest(containerName string, r *http.Request) (apifees
 	return pt, ok
 }
 
-// callerIdentity resolves who is calling, for charge attribution and the
-// wallet exemption. A verified platform bearer wins — it is the only
-// carrier of the IdP's wallet-class marker and its sub is the
-// platform-pairwise one the ledger can map to an account. Fallback is the
-// relay-asserted X-Privasys-Sub: set exclusively by the session-relay
-// middleware after an EncAuth (wallet-voucher) bootstrap, so it is a
-// trustworthy subject — but it carries no wallet claim, so it never grants
-// the fee exemption on its own (conservative until the wallet class is
-// WIA-grade end to end).
-func (s *Server) callerIdentity(r *http.Request) (sub string, wallet bool) {
+// callerIdentity resolves who is calling, for charge attribution. A
+// verified platform bearer wins: its sub is the platform-pairwise one the
+// ledger can map to an account. Fallback is the relay-asserted
+// X-Privasys-Sub, set exclusively by the session-relay middleware after an
+// EncAuth bootstrap.
+//
+// Deliberately NOT a source of the wallet exemption. A session that a
+// wallet once approved is an ordinary paying caller; only a call the
+// wallet app itself makes is exempt, and that is proved per request (see
+// walletCall).
+func (s *Server) callerIdentity(r *http.Request) string {
 	tok := ""
 	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
 		tok = strings.TrimPrefix(authz, "Bearer ")
@@ -66,14 +67,11 @@ func (s *Server) callerIdentity(r *http.Request) (sub string, wallet bool) {
 		tok = x
 	}
 	if tok != "" && s.verifier != nil {
-		if bsub, bw, err := s.verifier.AuthenticateCaller(tok); err == nil && bsub != "" {
-			return bsub, bw
+		if sub, _, err := s.verifier.AuthenticateCaller(tok); err == nil && sub != "" {
+			return sub
 		}
 	}
-	if relaySub := r.Header.Get("X-Privasys-Sub"); relaySub != "" {
-		return relaySub, false
-	}
-	return "", false
+	return r.Header.Get("X-Privasys-Sub")
 }
 
 // serveAppBilled applies the API-fee gate around the ordinary app proxy
@@ -81,18 +79,32 @@ func (s *Server) callerIdentity(r *http.Request) (sub string, wallet bool) {
 func (s *Server) serveAppBilled(w http.ResponseWriter, r *http.Request, containerName string) {
 	pt, priced := s.priceForRequest(containerName, r)
 	if !priced {
+		stripWalletProof(r)
 		s.serveAppWithVoucher(w, r)
 		return
 	}
 	rule := pt.Rule
-	sub, wallet := s.callerIdentity(r)
 
-	// Exempt callers are neither asked for consent nor charged.
-	if wallet && rule.FreeForWallet() {
-		r.Header.Del(billingApprovedHeader)
-		s.serveAppWithVoucher(w, r)
-		return
+	// Wallet-originated calls: the wallet app proves per request that it is
+	// an attested instance (WIA + holder-key proof bound to this method and
+	// path). Exempt callers are neither asked for consent nor charged, and
+	// need no account — nobody is billed, and the wallet's app calls are
+	// deliberately token-less so the callee never learns the user's
+	// account. The proof headers are stripped so the app cannot replay them.
+	if rule.FreeForWallet() {
+		if instance, ok := s.walletCall.IsWalletCall(r); ok {
+			s.log.Info("wallet-originated call exempted",
+				zap.String("container", containerName),
+				zap.String("tool", pt.Tool),
+				zap.String("instance", instance))
+			stripWalletProof(r)
+			r.Header.Del(billingApprovedHeader)
+			s.serveAppWithVoucher(w, r)
+			return
+		}
 	}
+	stripWalletProof(r)
+	sub := s.callerIdentity(r)
 
 	expected := fmt.Sprintf("%d credits", rule.Credits)
 
@@ -133,6 +145,14 @@ func (s *Server) serveAppBilled(w http.ResponseWriter, r *http.Request, containe
 			zap.Uint64("credits", rule.Credits),
 			zap.Uint64("seq", ev.Seq))
 	}
+}
+
+// stripWalletProof removes the wallet-call proof headers before the app
+// sees the request. They are a billing credential for the runtime, not
+// something an app should receive or be able to relay onwards.
+func stripWalletProof(r *http.Request) {
+	r.Header.Del(auth.WalletAttestationHeader)
+	r.Header.Del(auth.WalletProofHeader)
 }
 
 // consentRefusal returns the 402 refusal message for a missing or

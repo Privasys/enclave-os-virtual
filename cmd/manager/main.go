@@ -113,6 +113,10 @@ func runServe(args []string) error {
 		"OIDC issuer URL for bearer token verification (required, e.g. https://auth.example.com)")
 	oidcAudience := fs.String("oidc-audience", "enclave-os-virtual",
 		"Expected OIDC audience claim")
+	walletProviderJWKS := fs.String("wallet-provider-jwks", os.Getenv("WALLET_PROVIDER_JWKS"),
+		"Wallet-provider JWKS URL used to verify wallet-originated call proofs "+
+			"(the free_for:[\"wallet\"] API-fee exemption). Defaults to "+
+			"<oidc-issuer>/wallet-provider/jwks. Empty disables the exemption.")
 	oidcManagerRole := fs.String("oidc-manager-role", "privasys-platform:manager",
 		"OIDC role required for mutating operations (load/unload)")
 	oidcMonitoringRole := fs.String("oidc-monitoring-role", "privasys-platform:monitoring",
@@ -264,6 +268,10 @@ func runServe(args []string) error {
 		// the EncAuth IdP: the session-relay middleware uses it to
 		// fetch the JWKS that signs silent-rebind vouchers.
 		IdpIssuer: *oidcIssuer,
+		// Verifies the wallet's per-call proof (WIA + holder-key signature)
+		// behind the free_for:["wallet"] exemption. The wallet provider is
+		// the IdP, so derive the JWKS from the issuer unless overridden.
+		WalletProviderJWKS: walletJWKSURL(*walletProviderJWKS, *oidcIssuer),
 		// Settlement channel for paid attribute disclosures: reuses the
 		// fleet mgmt URL + enclave bearer (same credential as check-in).
 		MgmtBaseURL:  *rsMgmtURL,
@@ -354,4 +362,17 @@ func newLogger(level string) (*zap.Logger, error) {
 	}
 
 	return cfg.Build()
+}
+
+// walletJWKSURL resolves the wallet-provider JWKS endpoint used to verify
+// wallet-originated call proofs. An explicit override wins; otherwise it is
+// derived from the OIDC issuer, which is also the wallet provider.
+func walletJWKSURL(override, issuer string) string {
+	if override != "" {
+		return override
+	}
+	if issuer == "" {
+		return ""
+	}
+	return strings.TrimRight(issuer, "/") + "/wallet-provider/jwks"
 }

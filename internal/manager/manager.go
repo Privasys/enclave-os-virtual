@@ -140,6 +140,14 @@ type Config struct {
 	// `encauth` field on /__privasys/session-bootstrap.
 	IdpIssuer string
 
+	// WalletProviderJWKS is the wallet-provider JWKS URL used to verify
+	// wallet-ORIGINATED call proofs (the free_for:["wallet"] API-fee
+	// exemption), e.g. "https://privasys.id/wallet-provider/jwks". Empty
+	// disables the exemption: no call is ever treated as wallet-made, so
+	// priced calls are charged normally. A wrong anchor can only make calls
+	// free, never overcharge.
+	WalletProviderJWKS string
+
 	// MgmtBaseURL and EnclaveToken address the management-service and carry
 	// the enclave bearer used to settle/release paid attribute disclosures.
 	// When either is empty the runtime verifies vouchers but does not report
@@ -186,6 +194,12 @@ type Server struct {
 	// next to the app registry on /data; memory-only in dev/test.
 	apiFees *apifees.Store
 
+	// walletCall verifies wallet-ORIGINATED call proofs (WIA + request-bound
+	// holder-key signature), the free_for:["wallet"] exemption. nil when no
+	// wallet-provider JWKS is configured, which simply means no call is ever
+	// exempt — fail-closed for a discount.
+	walletCall *auth.WalletCallVerifier
+
 	// ingress verifies the attested caller identity on ingress mutual-RA-TLS
 	// hosts and annotates the request with X-Privasys-Peer-* headers (or
 	// rejects it). The launcher registers per-host allowed-caller policies via
@@ -220,6 +234,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		sessionRelay: sr,
 		settler:      attrbilling.New(attrbilling.Config{MgmtBaseURL: cfg.MgmtBaseURL, EnclaveToken: cfg.EnclaveToken}, log),
 		apiFees:      apifees.Open(feesPath, log),
+		walletCall:   auth.NewWalletCallVerifier(cfg.WalletProviderJWKS, log),
 	}
 	// Ingress mutual-RA-TLS verifier. It resolves the attestation server from
 	// the launcher (updated at runtime via PUT /api/v1/attestation-servers) and
