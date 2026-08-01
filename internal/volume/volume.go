@@ -314,8 +314,25 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 	}
 
 	// 3. Open LUKS (skip if mapper already exists from prior open).
+	//
+	// A LUKS-headered LV that this key cannot open FAILS CLOSED — always.
+	// There used to be a "stale-LV recovery" here: when the key was freshly
+	// created (not reconstructed), the header was presumed to belong to a
+	// discarded key generation and the LV was REFORMATTED. That inference is
+	// unsound: "every vault reported the handle absent" is exactly what a
+	// transient vault outage, a directory/addressing slip, or a half-migrated
+	// constellation ALSO produce — while the data behind the header is intact
+	// and recoverable the moment the vaults answer again. The LUKS header
+	// itself is the strongest evidence there IS data; destroying it on a
+	// key-fetch anomaly is the one outcome the vault architecture exists to
+	// prevent (suspected in prod on the identity-verifier, 2026-08-01).
+	//
+	// The stranded-app concern that motivated the auto-reformat has a proper
+	// answer now: the owner explicitly deletes the volume
+	// (DELETE /api/v1/volumes/{id} on mgmt → DELETE /api/v1/volumes/{name}
+	// here) and redeploys — a deliberate, audited act of data destruction,
+	// not a side effect of a deploy.
 	mapperExisted := false
-	staleReformatted := false
 	if _, err := os.Stat(mapperPath); err == nil {
 		mapperExisted = true
 		m.log.Info("LUKS mapper already open — reusing", zap.String("mapper", mapperName))
@@ -323,52 +340,23 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 		if err := runStdin(key, "cryptsetup", "luksOpen",
 			lvPath, mapperName, "--key-file=-",
 		); err != nil {
-			// STALE-LV recovery. A key that was freshly CREATED (not
-			// reconstructed) means every vault reported the handle absent, so
-			// nothing was ever encrypted under it. If an LV nonetheless exists
-			// and this key cannot open it, that LV belongs to a superseded key
-			// generation which no longer exists (e.g. a clean vault-constellation
-			// cutover discarded it) — its data is ALREADY unrecoverable. Reformat
-			// instead of failing forever: a production enclave has no SSH, so an
-			// operator cannot lvremove it by hand, and the app would be stranded.
-			// The expectExisting guard keeps the reconstructed-key path (real
-			// data) failing closed exactly as before. Keyed on lvFormatted: an LV
-			// we formatted moments ago opens by construction, so reaching here
-			// with one means a genuine failure, not a stale generation.
-			if lvFormatted && !expectExisting {
-				m.log.Warn("existing LV cannot be opened with the freshly created key — treating it as STALE and reformatting (its key generation is gone; the data was already unrecoverable)",
-					zap.String("container", name), zap.String("lv", lvName), zap.Error(err))
-				if ferr := runStdin(key, "cryptsetup", "luksFormat",
-					"--type", "luks2",
-					"--cipher", "aes-xts-plain64",
-					"--key-size", "512",
-					"--hash", "sha256",
-					"--integrity", "hmac-sha256",
-					"--sector-size", "4096", // 4k alignment — see the primary luksFormat above
-					"--iter-time", "2000",
-					"--key-file=-",
-					"--batch-mode",
-					lvPath,
-				); ferr != nil {
-					return nil, fmt.Errorf("volume: stale LV reformat failed: %w", ferr)
-				}
-				if oerr := runStdin(key, "cryptsetup", "luksOpen",
-					lvPath, mapperName, "--key-file=-",
-				); oerr != nil {
-					return nil, fmt.Errorf("volume: luksOpen after stale reformat failed: %w", oerr)
-				}
-				staleReformatted = true
-			} else {
-				if !lvExisted {
-					m.lvremoveAudit(lvPath)
-				}
+			if !lvExisted {
+				// We created this LV moments ago and formatted it with this
+				// very key; an open failure here is a genuine cryptsetup
+				// problem, and the empty LV is safe to clean up.
+				m.lvremoveAudit(lvPath)
 				return nil, fmt.Errorf("volume: luksOpen failed: %w", err)
 			}
+			if !expectExisting {
+				m.log.Error("existing LUKS volume cannot be opened with a freshly created key — failing closed (the header proves data exists; if the vaults answer 'handle absent' this is a vault reachability/addressing problem, not proof the data is stale). To deliberately discard the volume, delete it via the volumes API and redeploy",
+					zap.String("container", name), zap.String("lv", lvName), zap.Error(err))
+				return nil, fmt.Errorf("volume: %q has an existing encrypted volume this (freshly created) key cannot open — refusing to touch it. Likely cause: the vault constellation did not return the app's key handle at deploy time (outage/addressing), so a NEW key generation was minted. Retry the deploy once the vaults are healthy; to deliberately DISCARD the volume's data instead, delete the volume via the volumes API and redeploy", name)
+			}
+			return nil, fmt.Errorf("volume: luksOpen failed: %w", err)
 		}
 	}
 
-	// 4. Create ext4 filesystem — on freshly formatted volumes, and on a
-	// stale LV we just reformatted (it holds no readable filesystem).
+	// 4. Create ext4 filesystem — on freshly formatted volumes.
 	// Format when the volume demonstrably carries no filesystem — not merely when
 	// the LV is new. A create that died between luksFormat and mkfs leaves an LV
 	// that opens perfectly and mounts never; keyed on lvExisted, mkfs was skipped
@@ -378,7 +366,7 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 	// lose. (Silent corruption is not the alternative explanation: dm-integrity
 	// turns tampering into EIO, it does not hand back a plausible zeroed
 	// superblock.)
-	needsFS := !lvFormatted || staleReformatted
+	needsFS := !lvFormatted
 	if !needsFS && !hasExt4(mapperPath) {
 		m.log.Warn("volume opens but carries no ext4 superblock (a previous create was interrupted before mkfs completed) — creating the filesystem now; no data was ever committed here",
 			zap.String("container", name), zap.String("lv", lvName))
@@ -466,7 +454,7 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 	// the mapper and filesystem up now that the volume is open and mounted.
 	// Both commands are cheap no-ops when nothing changed, and ext4 grows
 	// online (never shrinks — the resize API is grow-only).
-	if lvExisted && !staleReformatted {
+	if lvExisted {
 		m.growInnerLayers(mapperName, mapperPath, key)
 	}
 
