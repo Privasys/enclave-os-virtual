@@ -209,6 +209,12 @@ func (c *Client) Reload() error {
 // second gap that flakes e2e runs and drops runtime-status pushes). A
 // non-200 response is a real config error and is returned immediately.
 func (c *Client) reload() error {
+	// A zero-value Client has no HTTP client; refuse rather than panic, so a
+	// mis-wired caller degrades to "config not pushed" instead of taking the
+	// manager down.
+	if c == nil || c.client == nil {
+		return fmt.Errorf("caddy: client is not initialised (use NewClient)")
+	}
 	cfg := c.buildConfig()
 
 	body, err := json.Marshal(cfg)

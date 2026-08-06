@@ -2330,6 +2330,15 @@ func (l *Launcher) SetDependencies(containerName string, set *ratls.DependencySe
 		if err := l.writeContainerExtensions(containerName, spec.Hostname, spec.Port); err != nil {
 			return nil, fmt.Errorf("re-mint extensions: %w", err)
 		}
+		// Force Caddy to re-issue: the RA-TLS module caches the issued leaf,
+		// so writing the extensions file alone leaves the OLD dependency set
+		// on the wire until the cached cert expires (observed on dev
+		// 2026-08-06). A dependency change must be visible to verifiers —
+		// and to the wallet's re-consent prompt — immediately.
+		if err := l.caddyClient.Reload(); err != nil {
+			l.log.Warn("caddy reload after dependency update failed; the new set lands on the next cert issuance",
+				zap.String("container", containerName), zap.Error(err))
+		}
 	}
 
 	l.log.Info("container dependency set updated",
