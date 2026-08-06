@@ -131,6 +131,22 @@ type Container struct {
 	// NOT measured: whom an app is willing to accept is authorization policy,
 	// set at deploy time, not workload code identity.
 	IngressAllowedCallers *ratls.DependencySet `yaml:"ingress_allowed_callers,omitempty"`
+
+	// Dependencies is the container's set of DIRECT attested cross-enclave
+	// dependencies (the egress counterpart of IngressAllowedCallers, same
+	// DependencySet shape). When non-empty the manager stamps its canonical
+	// encoding into the container's serving certificate at OID
+	// 1.3.6.1.4.1.65230.6.1, so verifiers (wallet consent, dependents) read
+	// the declared set off the attested leaf. Manager-owned: the platform
+	// supplies it at deploy (or via the set-dependencies API) and the
+	// issuance filter drops any self-declared 6.* extension, so the
+	// advertised set and the platform-declared set are one object.
+	// NOT measured into the config Merkle tree: like the WASM runtime's
+	// 6.1 re-mint, a dependency change re-mints the leaf (wallets see a
+	// dependency change and re-consent) without changing the container's
+	// code identity — the identity FOLD computed by mgmt/wallets is what
+	// makes deep dependency changes ripple.
+	Dependencies *ratls.DependencySet `yaml:"dependencies,omitempty"`
 }
 
 // HealthCheck defines a container health check.

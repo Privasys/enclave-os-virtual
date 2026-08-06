@@ -196,6 +196,13 @@ type LoadRequest struct {
 	// supplied and manager-owned; the app can never self-declare it.
 	IngressAllowedCallers *ratls.DependencySet `json:"ingress_allowed_callers,omitempty"`
 
+	// Dependencies is the container's DIRECT attested dependency set,
+	// stamped into the serving leaf at OID 65230.6.1 (see
+	// manifest.Container.Dependencies). Platform-supplied and
+	// manager-owned; updatable at runtime via the set-dependencies API,
+	// which re-mints the leaf without restarting the container.
+	Dependencies *ratls.DependencySet `json:"dependencies,omitempty"`
+
 	// HealthCheck defines how to verify the container is ready.
 	HealthCheck *manifest.HealthCheck `json:"health_check,omitempty"`
 
@@ -383,6 +390,7 @@ func (r *LoadRequest) toContainerSpec() manifest.Container {
 		Storage:               r.Storage,
 		Devices:               r.Devices,
 		IngressAllowedCallers: r.IngressAllowedCallers,
+		Dependencies:          r.Dependencies,
 	}
 	if r.Resources != nil {
 		spec.ResourceVCPUs = r.Resources.VCPUs
@@ -2251,6 +2259,15 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string, port
 	// never the container's self-declared /.well-known extensions.
 	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc, l.appIDs[containerName])
 
+	// Attested dependency set (OID 6.1): the platform-declared DIRECT
+	// dependencies, canonical SDK encoding. Manager-owned — the issuance
+	// filter drops any 6.* the container self-declares, so the set on the
+	// leaf is exactly the set the platform installed.
+	if spec.Dependencies != nil && len(spec.Dependencies.Entries) > 0 {
+		exts = append(exts, oids.Extension(oids.AttestedDependencySet,
+			ratls.EncodeDependencySet(*spec.Dependencies)))
+	}
+
 	// Per-app SDK-set X.509 attestation extensions (OIDs under
 	// 1.3.6.1.4.1.65230.3.5.*). Sourced from the in-process oidExts
 	// map (replayed at Load time and updated via the SDK
@@ -2278,6 +2295,66 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string, port
 	// this upstream; the container is on its private bridge IP now (#45).
 	upstream := fmt.Sprintf("http://%s:%d", network.ContainerIP(port), port)
 	return extensions.Write(l.cfg.ExtensionsDir, hostname, exts, upstream)
+}
+
+// SetDependencies replaces a running container's attested dependency set
+// and re-mints its serving-certificate extensions in place — the runtime
+// equivalent of the WASM `wasm_set_dependencies` verb. The next RA-TLS
+// certificate Caddy issues for the app's hostname carries the new OID 6.1
+// value; the container is not restarted and its measured identity does not
+// change (see manifest.Container.Dependencies). An empty set (zero entries)
+// clears the extension. Returns the canonical encoding that is now
+// advertised (nil when cleared).
+func (l *Launcher) SetDependencies(containerName string, set *ratls.DependencySet) ([]byte, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	spec, ok := l.specs[containerName]
+	if !ok {
+		return nil, fmt.Errorf("container %q not loaded", containerName)
+	}
+	if set != nil && len(set.Entries) == 0 {
+		set = nil
+	}
+	spec.Dependencies = set
+	l.specs[containerName] = spec
+
+	var encoded []byte
+	if set != nil {
+		encoded = ratls.EncodeDependencySet(*set)
+	}
+
+	// Internal containers have no serving certificate; the set still lives
+	// on the spec so GetDependencies serves it to the app for enforcement.
+	if spec.Hostname != "" && !spec.Internal && l.caddyClient != nil {
+		if err := l.writeContainerExtensions(containerName, spec.Hostname, spec.Port); err != nil {
+			return nil, fmt.Errorf("re-mint extensions: %w", err)
+		}
+	}
+
+	l.log.Info("container dependency set updated",
+		zap.String("name", containerName),
+		zap.Int("entries", func() int {
+			if set == nil {
+				return 0
+			}
+			return len(set.Entries)
+		}()),
+		zap.Int("encoded_bytes", len(encoded)))
+	return encoded, nil
+}
+
+// GetDependencies returns a container's current attested dependency set
+// (nil when none is declared). Serves the read side of the local
+// dependency-set API: the app enforces exactly what the runtime declares.
+func (l *Launcher) GetDependencies(containerName string) (*ratls.DependencySet, error) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	spec, ok := l.specs[containerName]
+	if !ok {
+		return nil, fmt.Errorf("container %q not loaded", containerName)
+	}
+	return spec.Dependencies, nil
 }
 
 // AppHostnameToContainer returns the container name registered under

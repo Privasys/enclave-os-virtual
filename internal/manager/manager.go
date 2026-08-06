@@ -51,6 +51,7 @@ import (
 	"sync"
 	"time"
 
+	ratls "enclave-os-mini/clients/go/ratls"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -422,6 +423,21 @@ func (s *Server) Start(ctx context.Context) error {
 	// container without tearing it down. Manager-role only.
 	mux.HandleFunc("POST /api/v1/containers/{name}/freeze", s.requireAuth(s.handleFreezeContainer))
 	mux.HandleFunc("POST /api/v1/containers/{name}/rotate-key", s.requireAuth(s.handleRotateKey))
+
+	// Attested dependency set (OID 65230.6.1): the platform installs or
+	// replaces a running container's declared dependencies; the manager
+	// re-mints the serving-cert extensions in place (no restart, no
+	// measurement change) — the container equivalent of the WASM
+	// `wasm_set_dependencies` verb. Manager-role only; the app itself can
+	// only READ its set (below) — declared and enforced stay one object.
+	mux.HandleFunc("PUT /api/v1/containers/{name}/dependencies",
+		s.requireAuth(s.handleSetDependencies))
+
+	// The read side for the app: a container fetches the dependency set the
+	// runtime declared for it, to source its egress pins from. Container
+	// token auth (the caller reads only its OWN set).
+	mux.HandleFunc("GET /api/v1/containers/{name}/dependencies",
+		s.requireContainerSelf(s.handleGetDependencies))
 
 	// First-class volumes: inventory/usage, online grow, and owner-requested
 	// deletion (refused while the container is loaded). Named by container.
@@ -1273,6 +1289,79 @@ func (s *Server) handleSetAttestationExtension(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handleSetDependencies handles
+// PUT /api/v1/containers/{name}/dependencies.
+// Body: {"dependencies": {"entries": [...]}} — the key is REQUIRED and the
+// set must be wrapped: a bare or key-less body is rejected rather than
+// treated as empty, so a malformed request can never silently CLEAR the
+// declared set (the allowed-callers PATCH lesson). An explicit
+// {"dependencies":{"entries":[]}} clears it. The launcher re-mints the
+// serving-cert extensions in place; the response echoes the canonical
+// OID 6.1 encoding now advertised.
+func (s *Server) handleSetDependencies(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.jsonError(w, http.StatusBadRequest, "container name is required")
+		return
+	}
+	var req struct {
+		Dependencies json.RawMessage `json:"dependencies"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if len(req.Dependencies) == 0 || string(req.Dependencies) == "null" {
+		s.jsonError(w, http.StatusBadRequest,
+			`the "dependencies" key is required (send {"dependencies":{"entries":[]}} to clear the set explicitly)`)
+		return
+	}
+	var set ratls.DependencySet
+	if err := json.Unmarshal(req.Dependencies, &set); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid dependency set: "+err.Error())
+		return
+	}
+	encoded, err := s.launcher.SetDependencies(name, &set)
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.log.Info("dependency set installed",
+		zap.String("container", name),
+		zap.Int("entries", len(set.Entries)))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":        "ok",
+		"entries":       len(set.Entries),
+		"canonical_b64": base64.StdEncoding.EncodeToString(encoded),
+	})
+}
+
+// handleGetDependencies handles
+// GET /api/v1/containers/{name}/dependencies — the app-facing read side.
+// A container sources its egress pins from here, so what it enforces is
+// exactly what the runtime declared (and stamped at OID 6.1).
+func (s *Server) handleGetDependencies(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if name == "" {
+		s.jsonError(w, http.StatusBadRequest, "container name is required")
+		return
+	}
+	set, err := s.launcher.GetDependencies(name)
+	if err != nil {
+		s.jsonError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	resp := map[string]any{"dependencies": set}
+	if set != nil && len(set.Entries) > 0 {
+		resp["canonical_b64"] = base64.StdEncoding.EncodeToString(ratls.EncodeDependencySet(*set))
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handleSetConfigComplete handles
