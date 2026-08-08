@@ -140,7 +140,7 @@ func (c *Client) AddRoute(hostname, upstream string, mutualAuth bool) error {
 		zap.String("upstream", upstream),
 		zap.Bool("mutual_auth", mutualAuth))
 
-	return c.reload()
+	return c.reload(false)
 }
 
 // RemoveRoute removes the reverse-proxy route for the given hostname.
@@ -157,7 +157,7 @@ func (c *Client) RemoveRoute(hostname string) error {
 	c.log.Info("removing Caddy route",
 		zap.String("hostname", hostname))
 
-	return c.reload()
+	return c.reload(false)
 }
 
 // RouteCount returns the number of active routes.
@@ -182,15 +182,32 @@ func (c *Client) SetFallback(upstream string) error {
 	c.fallback = upstream
 	c.log.Info("setting Caddy fallback upstream",
 		zap.String("upstream", upstream))
-	return c.reload()
+	return c.reload(false)
 }
 
-// Reload forces a full Caddy config reload. This is used after updating
-// the CA certificate/key so the RA-TLS module picks up the new files.
+// Reload pushes the current Caddy config. Caddy SKIPS the reload when the
+// posted config is byte-identical to the running one, so this is only enough
+// when the caller actually changed the config (a route add/remove).
 func (c *Client) Reload() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.reload()
+	return c.reload(false)
+}
+
+// ReloadForce pushes the config and makes Caddy apply it even when it is
+// unchanged, by sending the documented "Cache-Control: must-revalidate".
+//
+// Needed whenever state OUTSIDE the Caddy JSON changed and the RA-TLS module
+// has to re-read it: the per-host extensions file (a dependency-set update) and
+// the CA cert/key both live on disk, so the generated config is identical and a
+// plain Reload is a silent no-op — the module keeps serving the cached leaf and
+// the new OID 6.1 never reaches the wire. Observed in prod 2026-08-08: the
+// manager returned 200 and the extensions file was rewritten, but the leaf kept
+// its original NotBefore and advertised no dependency set.
+func (c *Client) ReloadForce() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reload(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -208,7 +225,7 @@ func (c *Client) Reload() error {
 // the manager (it self-heals on the systemd restart, but with a multi-
 // second gap that flakes e2e runs and drops runtime-status pushes). A
 // non-200 response is a real config error and is returned immediately.
-func (c *Client) reload() error {
+func (c *Client) reload(force bool) error {
 	// A zero-value Client has no HTTP client; refuse rather than panic, so a
 	// mis-wired caller degrades to "config not pushed" instead of taking the
 	// manager down.
@@ -231,7 +248,17 @@ func (c *Client) reload() error {
 	deadline := time.Now().Add(adminReadyTimeout)
 
 	for attempt := 1; ; attempt++ {
-		resp, err := c.client.Post(url, "application/json", bytes.NewReader(body))
+		req, rerr := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+		if rerr != nil {
+			return fmt.Errorf("caddy: build /load request: %w", rerr)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if force {
+			// Caddy skips a /load whose body matches the running config
+			// unless this header is present.
+			req.Header.Set("Cache-Control", "must-revalidate")
+		}
+		resp, err := c.client.Do(req)
 		if err != nil {
 			// A transport error means the admin endpoint isn't reachable
 			// yet (boot ordering race, or Caddy mid-restart). Retry until

@@ -937,7 +937,7 @@ func (l *Launcher) ReloadCA(certPEM, keyPEM []byte) error {
 
 	// Reload Caddy so it picks up the new CA.
 	if l.caddyClient != nil {
-		if err := l.caddyClient.Reload(); err != nil {
+		if err := l.caddyClient.ReloadForce(); err != nil {
 			l.log.Warn("failed to reload Caddy after CA update (will use new CA on next route change)",
 				zap.Error(err),
 			)
@@ -2335,7 +2335,7 @@ func (l *Launcher) SetDependencies(containerName string, set *ratls.DependencySe
 		// on the wire until the cached cert expires (observed on dev
 		// 2026-08-06). A dependency change must be visible to verifiers —
 		// and to the wallet's re-consent prompt — immediately.
-		if err := l.caddyClient.Reload(); err != nil {
+		if err := l.caddyClient.ReloadForce(); err != nil {
 			l.log.Warn("caddy reload after dependency update failed; the new set lands on the next cert issuance",
 				zap.String("container", containerName), zap.Error(err))
 		}
@@ -2572,7 +2572,7 @@ func (l *Launcher) SetAttestationExtension(name, oid string, value []byte) error
 		// post-Load SetAttestationExtension (e.g. the identity-verifier
 		// publishing its trust-anchor hash at /configure) never reached the
 		// leaf. Same pattern as the CA-update path.
-		if err := l.caddyClient.Reload(); err != nil {
+		if err := l.caddyClient.ReloadForce(); err != nil {
 			l.log.Warn("failed to reload Caddy after attestation-extension update (leaf updates on next route change)",
 				zap.String("name", name), zap.String("oid", oid), zap.Error(err))
 		}
