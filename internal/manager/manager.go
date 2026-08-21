@@ -29,6 +29,7 @@
 // POST   /api/v1/containers          - load a container (JSON body: LoadRequest)
 // DELETE /api/v1/containers/{name}   - unload a container
 // POST   /api/v1/containers/{name}/rotate-key - rotate the volume KEK (one phase)
+// POST   /api/v1/containers/{name}/sovereign-seal - version-bound sealing key S_N (container token, self only)
 // PUT    /api/v1/tls                 - rotate the intermediary CA cert+key
 // PUT    /api/v1/attestation-servers  - update attestation servers and tokens
 // GET    /metrics                    - Prometheus metrics
@@ -206,6 +207,10 @@ type Server struct {
 	// rejects it). The launcher registers per-host allowed-caller policies via
 	// RegisterIngressPolicy.
 	ingress *ingressVerifier
+
+	// sovereignSealFn overrides the launcher's SovereignSealKey in tests;
+	// nil in production (the handler falls back to s.launcher).
+	sovereignSealFn func(name string) (key, imageDigest []byte, err error)
 
 	// logPathsFn overrides container.TaskLogPaths in tests; nil in production
 	// (see container_logs.go).
@@ -460,6 +465,16 @@ func (s *Server) Start(ctx context.Context) error {
 	// requests on any path are forwarded normally. Idempotent.
 	mux.HandleFunc("POST /api/v1/containers/{name}/config-complete",
 		s.requireContainerSelf(s.handleSetConfigComplete))
+
+	// Sovereign sealing key (sovereign-data framework, Phase 1): a container
+	// app fetches S_N, the sealing key bound to ITS currently-running image
+	// digest, under which it keeps each data owner's wallet-delivered key
+	// element. The manager derives S_N one-way from the app's vault-backed
+	// volume DEK and serves it only to the calling container for the digest
+	// it is running — an upgraded image receives a different key, making an
+	// app upgrade a consent boundary. Container token auth (self only).
+	mux.HandleFunc("POST /api/v1/containers/{name}/sovereign-seal",
+		s.requireContainerSelf(s.handleSovereignSeal))
 
 	// Vault identity minting: a container app calls this over loopback to have
 	// the manager mint a one-shot RA-TLS client identity for the vault, bound to

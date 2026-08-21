@@ -542,6 +542,14 @@ type Launcher struct {
 	// container-name → oid → raw value bytes (already base64-decoded).
 	oidExts map[string]map[string][]byte
 
+	// sovereignBranches holds, per container, the one-way HKDF branch of the
+	// app's vault-backed volume DEK from which version-bound sovereign
+	// sealing keys (S_N) are derived on demand (the sovereign-data
+	// framework, Phase 1). Exposing S_N can never reveal the DEK. Only
+	// vault-backed volumes get a branch: an ephemeral DEK would make S_N
+	// die with the VM and silently defeat its purpose.
+	sovereignBranches map[string][]byte
+
 	// configAPI tracks the optional config-API decoration per container.
 	// nil entries (or a missing key) mean the container is not frozen.
 	// Guarded by freezeMu (NOT l.mu): Statuses() must stay readable while
@@ -653,6 +661,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		billingFrozen:     make(map[string]string),
 		containerTokens:   make(map[string]string),
 		attestationTokens: make(map[string]string),
+		sovereignBranches: make(map[string][]byte),
 		readyCh:           make(chan struct{}),
 	}
 
@@ -1420,6 +1429,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// one, a throwaway in-enclave DEK is generated (volume dies with the
 	// VM).
 	var volEncryption string
+	var sovereignBranch []byte
 	if req.Storage != "" {
 		if l.volMgr == nil {
 			return nil, fmt.Errorf("launcher: encrypted storage requested but no 'containers' VG available")
@@ -1459,6 +1469,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 			volumeKey = keyHex
 			volOrigin = origin
 			volReconstructed = reconstructed
+			// One-way branch for version-bound sovereign sealing keys
+			// (S_N). Derived here, while the DEK is in hand, so serving
+			// S_N later needs no vault round-trip; the DEK itself is
+			// still dropped after luksOpen as before.
+			sovereignBranch = deriveSovereignBranch(keyHex)
 		}
 		vi, err := l.volMgr.Create(req.Name, req.Storage, volumeKey, volReconstructed)
 		if err != nil {
@@ -1598,6 +1613,9 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// A vault-keyed volume persists across unload/upgrade (see Unload).
 	if req.KeyHandle != "" {
 		l.persistentVolume[req.Name] = true
+	}
+	if sovereignBranch != nil {
+		l.sovereignBranches[req.Name] = sovereignBranch
 	}
 	l.freezeMu.Lock()
 	if req.ConfigAPI != nil {
@@ -1746,6 +1764,7 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	delete(l.volumeEncryption, name)
 	delete(l.persistentVolume, name)
 	delete(l.oidExts, name)
+	delete(l.sovereignBranches, name)
 	l.freezeMu.Lock()
 	delete(l.configAPI, name)
 	delete(l.configured, name)
