@@ -42,3 +42,21 @@ if [ "$profile" = "production" ]; then
         exit 1
     fi
 fi
+
+# First-boot dm-integrity format budget for the data PD. Same drop-in the
+# base image installs (build/image/mkosi.postinst.chroot): the What= device
+# of data.mount appears only after luks-data.service finishes, which on a
+# FIRST boot includes the multi-minute dm-integrity format (~1 min per
+# 13 GB). Without this, the GPU image waited systemd's default ~90 s and
+# every first-boot GPU provisioning lost the race by design — observed on
+# m4-tdx-gpu-netherlands 2026-08-24: data.mount dep-failed while luks-data
+# was still formatting, the sealed bootstrap payload had nowhere to
+# persist, and the enclave wedged (token consumed, config lost). The
+# escaped unit name cannot live in mkosi.extra on a Windows checkout,
+# hence postinst. PDs beyond ~200 GB need a bump.
+mkdir -p '/usr/lib/systemd/system/dev-mapper-data\x2dcrypt.device.d'
+cat > '/usr/lib/systemd/system/dev-mapper-data\x2dcrypt.device.d/50-luks-format-timeout.conf' <<'DROPIN'
+[Unit]
+JobRunningTimeoutSec=15min
+DROPIN
+echo "data-crypt device timeout drop-in installed (gpu)"
