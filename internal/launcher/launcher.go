@@ -992,6 +992,17 @@ type AppHostRouter interface {
 	// code/config change wakes the user. The launcher computes the digest
 	// from the container's stamped OID values on Load.
 	SetExpectedWorkloadDigest(host string, digest [32]byte)
+
+	// SetStaticUnsealedPrefixes declares path prefixes for a Host that the
+	// session-relay may serve in the CLEAR on the gateway-terminated leg
+	// (GET/HEAD only), overriding the require-sealed default. Intended for an
+	// app that serves its own public browser UI from inside the enclave: the
+	// HTML/JS/CSS shell is public measured code and carries no user data, but
+	// the sealed default 403s it, leaving the page unloadable. The app opts in
+	// via the measured image label org.privasys.static-unsealed-prefixes; the
+	// data plane (/api and any non-declared path) stays sealed. Never exempts
+	// /api* (the manager hard-excludes it).
+	SetStaticUnsealedPrefixes(host string, prefixes []string)
 }
 
 // SetAppHostRouter wires the manager API server's host router. When set,
@@ -1101,6 +1112,47 @@ func (l *Launcher) armSessionRelayWorkloadDigest(containerName, host string) {
 	l.appHostRouter.SetExpectedWorkloadDigest(host, digest)
 	l.log.Info("session-relay workload-digest wake armed",
 		zap.String("host", host), zap.String("workload_digest", hex.EncodeToString(digest[:])))
+}
+
+// staticUnsealedPrefixesLabel is the measured image label by which an app
+// opts its public browser-UI shell paths out of require-sealed on the
+// gateway-terminated leg. Comma-separated path prefixes (an entry of exactly
+// "/" matches the root document only). Measured: it rides the image config,
+// so changing it changes the attested image digest — a verifier sees exactly
+// which paths this app serves in the clear.
+const staticUnsealedPrefixesLabel = "org.privasys.static-unsealed-prefixes"
+
+// armStaticUnsealedPrefixes reads the opt-in image label and hands the parsed
+// prefixes to the manager, which serves matching GET/HEAD requests in the
+// clear (public UI code) while keeping the data plane sealed. Best-effort:
+// an unreadable label leaves the app fully sealed (safe default), which only
+// costs an enclave-served UI its browser reachability, never confidentiality.
+func (l *Launcher) armStaticUnsealedPrefixes(ctx context.Context, img client.Image, host string) {
+	if l.appHostRouter == nil || host == "" || img == nil {
+		return
+	}
+	labels, err := l.mgr.ImageLabels(ctx, img)
+	if err != nil {
+		l.log.Warn("image labels unreadable; static-unsealed prefixes not armed",
+			zap.String("host", host), zap.Error(err))
+		return
+	}
+	raw := labels[staticUnsealedPrefixesLabel]
+	if raw == "" {
+		return
+	}
+	var prefixes []string
+	for _, p := range strings.Split(raw, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			prefixes = append(prefixes, p)
+		}
+	}
+	if len(prefixes) == 0 {
+		return
+	}
+	l.appHostRouter.SetStaticUnsealedPrefixes(host, prefixes)
+	l.log.Info("static-unsealed UI prefixes armed",
+		zap.String("host", host), zap.Strings("prefixes", prefixes))
 }
 
 // SetTokenSource sets a dynamic token source that takes precedence over
@@ -1677,6 +1729,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				// field-4 digest no longer matches this app's measurement is
 				// rejected, so an app code/config change re-prompts the user.
 				l.armSessionRelayWorkloadDigest(req.Name, spec.Hostname)
+				// Arm public static-UI prefixes (opt-in, measured image label):
+				// an app that serves its own browser UI from the enclave marks
+				// the HTML/JS/CSS shell paths served in the clear so the page
+				// can load before a sealed session exists. Data stays sealed.
+				l.armStaticUnsealedPrefixes(ctx, img, spec.Hostname)
 			}
 			// Ingress mutual RA-TLS is enabled for this app when it declares an
 			// allowed-caller set (manager-owned, never self-declared by the app).

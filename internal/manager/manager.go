@@ -179,6 +179,15 @@ type Server struct {
 	// "localhost:8000"). Populated by the launcher via RegisterAppHost.
 	appHosts sync.Map // map[string]string
 
+	// staticUnsealed maps lowercased Hostname → []string path prefixes that
+	// the session-relay may serve in the CLEAR on the gateway-terminated leg
+	// (GET/HEAD only). Opt-in per app via the measured image label
+	// org.privasys.static-unsealed-prefixes, armed by the launcher. Lets an
+	// app serve its own public browser-UI shell (HTML/JS/CSS — measured code,
+	// no user data) so the page loads before a sealed session exists; the data
+	// plane (/api, and any non-declared path) stays sealed.
+	staticUnsealed sync.Map // map[string][]string
+
 	// appProxy reverse-proxies non-platform Host requests to the upstream
 	// looked up in appHosts. Wrapped by sessionRelay.Middleware so that
 	// SDK clients can run sealed-CBOR sessions against any container host
@@ -287,6 +296,15 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 			(r.URL.Path == "/healthz" || r.URL.Path == "/readiness") {
 			return false
 		}
+		// Opt-in public static UI: an app that serves its own browser shell
+		// from the enclave declares its HTML/JS/CSS prefixes (measured image
+		// label). Those GET/HEAD loads are public code with no user data, so
+		// serve them in the clear — otherwise the page cannot load before a
+		// sealed session exists (chicken-and-egg). The data plane stays sealed.
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+			s.isStaticUnsealedPath(hostOnly(r.Host), r.URL.Path) {
+			return false
+		}
 		return !strings.HasPrefix(r.URL.Path, "/.well-known/")
 	})
 	s.appProxy = &httputil.ReverseProxy{
@@ -361,9 +379,56 @@ func (s *Server) RegisterAppHost(hostname, upstream string) {
 func (s *Server) UnregisterAppHost(hostname string) {
 	hostname = strings.ToLower(hostname)
 	s.appHosts.Delete(hostname)
+	s.staticUnsealed.Delete(hostname)
 	s.sessionRelay.ClearExpectedWorkloadDigest(hostname)
 	s.ingress.setPolicy(hostname, nil)
 	s.log.Info("app host unregistered", zap.String("hostname", hostname))
+}
+
+// SetStaticUnsealedPrefixes records the path prefixes this Host may serve in
+// the clear on the gateway-terminated leg (GET/HEAD only) — the app's public
+// browser-UI shell. Opt-in via the measured image label, armed by the
+// launcher. Passing an empty slice clears the exemption.
+func (s *Server) SetStaticUnsealedPrefixes(hostname string, prefixes []string) {
+	hostname = strings.ToLower(hostname)
+	if len(prefixes) == 0 {
+		s.staticUnsealed.Delete(hostname)
+		return
+	}
+	cp := make([]string, len(prefixes))
+	copy(cp, prefixes)
+	s.staticUnsealed.Store(hostname, cp)
+}
+
+// isStaticUnsealedPath reports whether path is one of host's declared public
+// static-UI prefixes and may therefore be served unsealed. The data plane is
+// never exempt: /api* is hard-excluded regardless of what a Host declares, and
+// a lone "/" entry matches only the root document (not every path).
+func (s *Server) isStaticUnsealedPath(hostname, path string) bool {
+	// Hard exclusion: the data plane is never served in the clear, even if an
+	// app mistakenly declares an over-broad prefix.
+	if path == "/api" || strings.HasPrefix(path, "/api/") {
+		return false
+	}
+	v, ok := s.staticUnsealed.Load(strings.ToLower(hostname))
+	if !ok {
+		return false
+	}
+	for _, p := range v.([]string) {
+		if p == "" {
+			continue
+		}
+		if p == "/" {
+			if path == "/" {
+				return true
+			}
+			continue
+		}
+		if path == p || strings.HasPrefix(path, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetExpectedWorkloadDigest arms the session-relay per-app workload-digest
