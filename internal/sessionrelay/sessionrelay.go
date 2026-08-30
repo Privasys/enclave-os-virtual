@@ -59,17 +59,22 @@ const (
 	hkdfInfo                = "privasys-session/v1"
 	dirInfoC2S              = "privasys-dir/c2s"
 	dirInfoS2C              = "privasys-dir/s2c"
-	// The sealed WebSocket channel shares the session AEAD key but derives
-	// its OWN per-direction nonce prefixes, so its counters never collide
-	// with the HTTP request/response nonces (AES-GCM nonce reuse is fatal).
-	// Must match the SDK's DIR_WS_* HKDF labels (auth/sdk enclave-session.ts).
+	// Sealed WebSocket streams share the session AEAD key but derive
+	// PER-STREAM per-direction nonce prefixes: the stream's hex id is
+	// folded into these labels ("privasys-dir/ws-c2s/<streamHex>", see
+	// Session.wsStreamPrefixes), so many concurrent streams on one session
+	// never collide with each other or with the HTTP request/response
+	// nonces (AES-GCM nonce reuse is fatal). Must match the SDK's DIR_WS_*
+	// HKDF labels (auth/sdk enclave-session.ts).
 	dirInfoWSC2S = "privasys-dir/ws-c2s"
 	dirInfoWSS2C = "privasys-dir/ws-s2c"
 	// sealedWSSubprotocol marks a sealed session-relay WebSocket. A browser
-	// WebSocket cannot set an Authorization header, so the client advertises
-	// [sealedWSSubprotocol, <sessionId>] in Sec-WebSocket-Protocol; the relay
-	// validates the id and echoes back only this marker. Must match the SDK's
-	// SEALED_WS_SUBPROTOCOL.
+	// WebSocket cannot set an Authorization header, so the SDK advertises
+	// [sealedWSSubprotocol, <sessionId>, <streamHex>] in
+	// Sec-WebSocket-Protocol. The GATEWAY terminates such sockets and
+	// relays their frames over the privasys-mux/1 leg (mux.go); one that
+	// reaches the enclave directly is refused. Must match the SDK's
+	// SEALED_WS_SUBPROTOCOL and the gateway's wsmux.
 	sealedWSSubprotocol = "privasys.sealed.v1"
 	// sealedWSMaxMessage bounds a single sealed WebSocket message, matching
 	// the 16 MiB sealed-HTTP body cap.
@@ -145,13 +150,13 @@ type Manager struct {
 	requireSealed func(*http.Request) bool
 
 	// wsUpstream resolves a request Host to the plaintext app-container
-	// endpoint ("host:port") the sealed WebSocket is proxied to. Set via
-	// SetWSUpstream; nil disables sealed WebSockets (501).
+	// endpoint ("host:port") sealed WebSocket streams are relayed to. Set
+	// via SetWSUpstream; nil disables the mux (501).
 	wsUpstream func(host string) (string, bool)
-	// activeWS tracks session ids with a live sealed WebSocket so at most one
-	// runs per session (its counters restart at 0 under a fixed nonce prefix,
-	// so a second concurrent WS would reuse nonces). Guarded by mu.
-	activeWS map[string]struct{}
+	// muxSessionStreams counts live mux streams per session id, bounding
+	// how many concurrent WebSocket streams one session may hold open
+	// (muxMaxStreamsPerSession). Guarded by mu.
+	muxSessionStreams map[string]int
 }
 
 type rebindWindow struct {
@@ -165,10 +170,13 @@ type Session struct {
 	Aead      cipher.AEAD
 	C2SPrefix [4]byte
 	S2CPrefix [4]byte
-	// Nonce prefixes for the sealed-WebSocket channel (see dirInfoWS*). The
-	// WS reuses Aead but keeps its own counters under these prefixes.
-	WSC2SPrefix [4]byte
-	WSS2CPrefix [4]byte
+	// IKM/Salt are the HKDF inputs (ECDH shared secret, session-id bytes)
+	// retained so WebSocket streams can derive PER-STREAM nonce prefixes on
+	// demand (wsStreamPrefixes): a session runs many concurrent streams and
+	// each needs an independent keystream, so the prefixes cannot be
+	// derived up front.
+	IKM  []byte
+	Salt []byte
 	S2CCtr    uint64
 	C2SNext   uint64 // smallest acceptable c2s ctr; rejects replay incl. the last frame
 	ExpiresAt time.Time
@@ -191,7 +199,7 @@ func NewManager() *Manager {
 		rebinds:                make(map[string]*rebindWindow),
 		expectedWorkloadDigest: make(map[string][32]byte),
 		encKeys:                make(map[string]*ecdh.PrivateKey),
-		activeWS:               make(map[string]struct{}),
+		muxSessionStreams:      make(map[string]int),
 		ttl:                    defaultTTL,
 		now:                    time.Now,
 	}
@@ -345,15 +353,24 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 			m.handleInit(w, r)
 			return
 		}
-		// WebSocket upgrades are intercepted before the sealed/requireSealed
-		// branches: they carry no sealed Content-Type but must not be refused
-		// as "unsealed". A sealed WS (advertising the sealedWSSubprotocol) is
-		// terminated + proxied here; a plain WS with no marker follows the
-		// normal path — refused on the terminate leg, passed through to next
-		// (the app proxy) for RA-TLS-direct clients whose TLS ends at the
-		// enclave.
+		// Gateway-side mux leg (mux.go): a mux-capable gateway terminates
+		// browser WebSockets itself and carries them as framed streams over
+		// a few long-lived connections, so the enclave's transport footprint
+		// stays bounded by the gateway pool instead of the client count.
+		if isMuxUpgrade(r) {
+			m.handleMux(w, r)
+			return
+		}
+		// A sealed WebSocket (advertising the sealedWSSubprotocol) never
+		// terminates at the enclave: the gateway owns the browser socket and
+		// relays its frames over the mux above. One arriving here directly
+		// (an old gateway, or a client bypassing the gateway) is refused —
+		// there is no 1:1 path. A plain WS with no marker follows the normal
+		// flow: refused on the terminate leg by requireSealed, passed
+		// through to next (the app proxy) for RA-TLS-direct clients whose
+		// TLS ends at the enclave.
 		if isWebSocketUpgrade(r) && hasSealedWSSubprotocol(r) {
-			m.handleSealedWebSocket(w, r)
+			http.Error(w, "sealed websockets are carried over the gateway mux", http.StatusUpgradeRequired)
 			return
 		}
 		ct := r.Header.Get("Content-Type")
@@ -529,8 +546,6 @@ func buildSession(id string, salt, shared []byte, ttl time.Duration, now func() 
 	aeadKey := hkdf(shared, salt, []byte(hkdfInfo), 32)
 	c2s := hkdf(shared, salt, []byte(dirInfoC2S), 4)
 	s2c := hkdf(shared, salt, []byte(dirInfoS2C), 4)
-	wsC2S := hkdf(shared, salt, []byte(dirInfoWSC2S), 4)
-	wsS2C := hkdf(shared, salt, []byte(dirInfoWSS2C), 4)
 	block, err := aes.NewCipher(aeadKey)
 	if err != nil {
 		return nil, err
@@ -539,12 +554,28 @@ func buildSession(id string, salt, shared []byte, ttl time.Duration, now func() 
 	if err != nil {
 		return nil, err
 	}
-	s := &Session{ID: id, Aead: gcm, ExpiresAt: now().Add(ttl)}
+	s := &Session{
+		ID:        id,
+		Aead:      gcm,
+		IKM:       append([]byte(nil), shared...),
+		Salt:      append([]byte(nil), salt...),
+		ExpiresAt: now().Add(ttl),
+	}
 	copy(s.C2SPrefix[:], c2s)
 	copy(s.S2CPrefix[:], s2c)
-	copy(s.WSC2SPrefix[:], wsC2S)
-	copy(s.WSS2CPrefix[:], wsS2C)
 	return s, nil
+}
+
+// wsStreamPrefixes derives the per-stream WebSocket nonce prefixes for a
+// mux stream. Folding the stream id into the HKDF info gives every stream
+// its own keystream, so many streams can run concurrently on one session
+// without nonce reuse (the v1 session-wide prefixes allow only one). The
+// labels must match the SDK's v2 derivation (enclave-session.ts):
+// "privasys-dir/ws-c2s/<streamHex>" and "privasys-dir/ws-s2c/<streamHex>".
+func (s *Session) wsStreamPrefixes(streamHex string) (c2s, s2c [4]byte) {
+	copy(c2s[:], hkdf(s.IKM, s.Salt, []byte(dirInfoWSC2S+"/"+streamHex), 4))
+	copy(s2c[:], hkdf(s.IKM, s.Salt, []byte(dirInfoWSS2C+"/"+streamHex), 4))
+	return c2s, s2c
 }
 
 func (m *Manager) handleSealed(w http.ResponseWriter, r *http.Request, next http.Handler) {
@@ -651,18 +682,25 @@ func (m *Manager) lookupByID(id string) (*Session, bool) {
 	}
 	if m.now().After(sess.ExpiresAt) {
 		m.mu.Lock()
-		delete(m.sessions, id)
+		m.evictLocked(id)
 		m.mu.Unlock()
 		return nil, false
 	}
 	return sess, true
 }
 
+// evictLocked removes a session and every per-session bookkeeping entry
+// keyed by it. Caller holds m.mu.
+func (m *Manager) evictLocked(id string) {
+	delete(m.sessions, id)
+	delete(m.muxSessionStreams, id)
+}
+
 func (m *Manager) gcLocked() {
 	now := m.now()
 	for id, s := range m.sessions {
 		if now.After(s.ExpiresAt) {
-			delete(m.sessions, id)
+			m.evictLocked(id)
 		}
 	}
 }
