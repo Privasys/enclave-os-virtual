@@ -9,6 +9,7 @@ go 1.25.0
 require (
 	enclave-os-mini/clients/go v0.0.0
 	github.com/Privasys/enclave-vaults-client/go v0.0.0
+	github.com/coder/websocket v1.8.15
 	github.com/containerd/containerd/api v1.8.0
 	github.com/containerd/containerd/v2 v2.0.4
 	github.com/containerd/errdefs v1.0.0

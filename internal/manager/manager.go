@@ -307,6 +307,13 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		}
 		return !strings.HasPrefix(r.URL.Path, "/.well-known/")
 	})
+	// Sealed WebSocket relay: resolve a request Host to the app container's
+	// plaintext WebSocket endpoint. The relay terminates the sealed WS from
+	// the browser and pumps unsealed frames to this upstream (see
+	// sessionrelay/websocket.go).
+	sr.SetWSUpstream(func(host string) (string, bool) {
+		return s.lookupAppHost(host)
+	})
 	s.appProxy = &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			host := hostOnly(pr.In.Host)
@@ -1634,6 +1641,14 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+// Unwrap exposes the underlying ResponseWriter so http.ResponseController (and
+// thus the sealed-WebSocket relay's websocket.Accept) can reach the base
+// http.Hijacker to take over the connection for a WebSocket upgrade. Without
+// this, the metrics wrapper masks Hijack and the upgrade fails.
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
 }
 
 // Disclosure-voucher headers. A relying party's wallet presents the signed

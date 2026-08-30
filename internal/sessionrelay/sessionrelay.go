@@ -59,6 +59,21 @@ const (
 	hkdfInfo                = "privasys-session/v1"
 	dirInfoC2S              = "privasys-dir/c2s"
 	dirInfoS2C              = "privasys-dir/s2c"
+	// The sealed WebSocket channel shares the session AEAD key but derives
+	// its OWN per-direction nonce prefixes, so its counters never collide
+	// with the HTTP request/response nonces (AES-GCM nonce reuse is fatal).
+	// Must match the SDK's DIR_WS_* HKDF labels (auth/sdk enclave-session.ts).
+	dirInfoWSC2S = "privasys-dir/ws-c2s"
+	dirInfoWSS2C = "privasys-dir/ws-s2c"
+	// sealedWSSubprotocol marks a sealed session-relay WebSocket. A browser
+	// WebSocket cannot set an Authorization header, so the client advertises
+	// [sealedWSSubprotocol, <sessionId>] in Sec-WebSocket-Protocol; the relay
+	// validates the id and echoes back only this marker. Must match the SDK's
+	// SEALED_WS_SUBPROTOCOL.
+	sealedWSSubprotocol = "privasys.sealed.v1"
+	// sealedWSMaxMessage bounds a single sealed WebSocket message, matching
+	// the 16 MiB sealed-HTTP body cap.
+	sealedWSMaxMessage = 16 * 1024 * 1024
 	// defaultTTL is a sliding inactivity window: every successfully
 	// authenticated sealed request extends the session by this much.
 	// Aligned with the IdP's 15-minute access-token cadence; idle
@@ -128,6 +143,15 @@ type Manager struct {
 	// bodies on an intermediary-terminated leg" (the gateway marks that
 	// leg with X-Privasys-Edge: terminate). Set via SetRequireSealed.
 	requireSealed func(*http.Request) bool
+
+	// wsUpstream resolves a request Host to the plaintext app-container
+	// endpoint ("host:port") the sealed WebSocket is proxied to. Set via
+	// SetWSUpstream; nil disables sealed WebSockets (501).
+	wsUpstream func(host string) (string, bool)
+	// activeWS tracks session ids with a live sealed WebSocket so at most one
+	// runs per session (its counters restart at 0 under a fixed nonce prefix,
+	// so a second concurrent WS would reuse nonces). Guarded by mu.
+	activeWS map[string]struct{}
 }
 
 type rebindWindow struct {
@@ -141,6 +165,10 @@ type Session struct {
 	Aead      cipher.AEAD
 	C2SPrefix [4]byte
 	S2CPrefix [4]byte
+	// Nonce prefixes for the sealed-WebSocket channel (see dirInfoWS*). The
+	// WS reuses Aead but keeps its own counters under these prefixes.
+	WSC2SPrefix [4]byte
+	WSS2CPrefix [4]byte
 	S2CCtr    uint64
 	C2SNext   uint64 // smallest acceptable c2s ctr; rejects replay incl. the last frame
 	ExpiresAt time.Time
@@ -163,6 +191,7 @@ func NewManager() *Manager {
 		rebinds:                make(map[string]*rebindWindow),
 		expectedWorkloadDigest: make(map[string][32]byte),
 		encKeys:                make(map[string]*ecdh.PrivateKey),
+		activeWS:               make(map[string]struct{}),
 		ttl:                    defaultTTL,
 		now:                    time.Now,
 	}
@@ -314,6 +343,17 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 		r.Header.Del(relaySubHeader)
 		if r.URL.Path == initPath && r.Method == http.MethodPost {
 			m.handleInit(w, r)
+			return
+		}
+		// WebSocket upgrades are intercepted before the sealed/requireSealed
+		// branches: they carry no sealed Content-Type but must not be refused
+		// as "unsealed". A sealed WS (advertising the sealedWSSubprotocol) is
+		// terminated + proxied here; a plain WS with no marker follows the
+		// normal path — refused on the terminate leg, passed through to next
+		// (the app proxy) for RA-TLS-direct clients whose TLS ends at the
+		// enclave.
+		if isWebSocketUpgrade(r) && hasSealedWSSubprotocol(r) {
+			m.handleSealedWebSocket(w, r)
 			return
 		}
 		ct := r.Header.Get("Content-Type")
@@ -489,6 +529,8 @@ func buildSession(id string, salt, shared []byte, ttl time.Duration, now func() 
 	aeadKey := hkdf(shared, salt, []byte(hkdfInfo), 32)
 	c2s := hkdf(shared, salt, []byte(dirInfoC2S), 4)
 	s2c := hkdf(shared, salt, []byte(dirInfoS2C), 4)
+	wsC2S := hkdf(shared, salt, []byte(dirInfoWSC2S), 4)
+	wsS2C := hkdf(shared, salt, []byte(dirInfoWSS2C), 4)
 	block, err := aes.NewCipher(aeadKey)
 	if err != nil {
 		return nil, err
@@ -500,6 +542,8 @@ func buildSession(id string, salt, shared []byte, ttl time.Duration, now func() 
 	s := &Session{ID: id, Aead: gcm, ExpiresAt: now().Add(ttl)}
 	copy(s.C2SPrefix[:], c2s)
 	copy(s.S2CPrefix[:], s2c)
+	copy(s.WSC2SPrefix[:], wsC2S)
+	copy(s.WSS2CPrefix[:], wsS2C)
 	return s, nil
 }
 
@@ -589,7 +633,16 @@ func (m *Manager) lookup(r *http.Request) (*Session, bool) {
 	if !strings.HasPrefix(auth, authScheme+" ") {
 		return nil, false
 	}
-	id := strings.TrimSpace(strings.TrimPrefix(auth, authScheme+" "))
+	return m.lookupByID(strings.TrimSpace(strings.TrimPrefix(auth, authScheme+" ")))
+}
+
+// lookupByID resolves a live session by its id (evicting it if expired). The
+// sealed-WebSocket path uses this because a browser WebSocket carries the id
+// in Sec-WebSocket-Protocol, not the Authorization header.
+func (m *Manager) lookupByID(id string) (*Session, bool) {
+	if id == "" {
+		return nil, false
+	}
 	m.mu.RLock()
 	sess, ok := m.sessions[id]
 	m.mu.RUnlock()
