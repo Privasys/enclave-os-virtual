@@ -280,6 +280,44 @@ func TestMuxRejects(t *testing.T) {
 		}
 	})
 
+	t.Run("replayed stream id", func(t *testing.T) {
+		c := dialMux(t, relayHost)
+		sealer := newStreamSealer(sess, "/live", 11)
+		open := c.openPayload("h", "/live", sealer.seal([]byte("open"), 0))
+		c.write(muxTypeOpen, sess.ID, 11, open)
+		typ, _, _, payload := c.read()
+		if typ != muxTypeData {
+			t.Fatalf("expected ack, got type %d", typ)
+		}
+		sealer.unseal(t, payload, 0)
+		c.write(muxTypeClose, sess.ID, 11, encodeMuxClose(websocket.StatusNormalClosure, ""))
+		// Wait for teardown so the replay hits the single-use guard, not
+		// the duplicate-live-stream check.
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			m.mu.RLock()
+			n := m.muxSessionStreams[sess.ID]
+			m.mu.RUnlock()
+			if n == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("stream did not tear down")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		// Byte-exact replay of the recorded OPEN must be refused: stream
+		// ids are single-use per session.
+		c.write(muxTypeOpen, sess.ID, 11, open)
+		typ, _, _, payload = c.read()
+		if typ != muxTypeClose {
+			t.Fatalf("replayed OPEN accepted (type %d)", typ)
+		}
+		if code, _ := parseMuxClose(payload); code != websocket.StatusPolicyViolation {
+			t.Fatalf("replay close code = %d, want %d", code, websocket.StatusPolicyViolation)
+		}
+	})
+
 	t.Run("data for unopened stream", func(t *testing.T) {
 		c := dialMux(t, relayHost)
 		c.write(muxTypeData, sess.ID, 42, []byte{0x01})

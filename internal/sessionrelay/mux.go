@@ -80,6 +80,11 @@ const (
 	// muxMaxStreamsPerSession bounds concurrent streams one session may
 	// hold, so a single client cannot exhaust the per-conn budget.
 	muxMaxStreamsPerSession = 32
+	// muxMaxStreamsPerSessionLifetime bounds how many stream ids one
+	// session may consume in total (ids are single-use — the replay guard
+	// remembers each one, so the set must stay bounded). At this point the
+	// SDK re-establishes the session, which resets everything.
+	muxMaxStreamsPerSessionLifetime = 4096
 	// muxStreamQueue is the per-stream inbound buffer (frames): the mux
 	// reader must never block on one slow app socket, so overflow closes
 	// that stream instead of stalling the shared connection.
@@ -303,6 +308,27 @@ func (mc *muxConn) handleOpen(sid string, stream uint64, payload []byte) {
 		_ = mc.writeClose(sid, stream, websocket.StatusTryAgainLater, "session stream limit reached")
 		return
 	}
+	// Stream ids are single-use per session: a recorded OPEN cannot be
+	// replayed as a fresh stream (its per-stream counters would otherwise
+	// restart and the enclave would re-execute the recorded frames).
+	used := mc.m.muxUsedStreams[sid]
+	if used == nil {
+		used = make(map[uint64]struct{})
+		mc.m.muxUsedStreams[sid] = used
+	}
+	if _, replayed := used[stream]; replayed {
+		mc.m.mu.Unlock()
+		mc.smu.Unlock()
+		_ = mc.writeClose(sid, stream, websocket.StatusPolicyViolation, "stream id already used")
+		return
+	}
+	if len(used) >= muxMaxStreamsPerSessionLifetime {
+		mc.m.mu.Unlock()
+		mc.smu.Unlock()
+		_ = mc.writeClose(sid, stream, websocket.StatusTryAgainLater, "session stream budget exhausted; re-establish the session")
+		return
+	}
+	used[stream] = struct{}{}
 	mc.m.muxSessionStreams[sid]++
 	mc.m.mu.Unlock()
 

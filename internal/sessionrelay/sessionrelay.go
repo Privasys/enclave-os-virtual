@@ -157,6 +157,14 @@ type Manager struct {
 	// how many concurrent WebSocket streams one session may hold open
 	// (muxMaxStreamsPerSession). Guarded by mu.
 	muxSessionStreams map[string]int
+	// muxUsedStreams records every stream id a session has EVER opened:
+	// stream ids are single-use, so a recorded OPEN+frames sequence cannot
+	// be replayed as a fresh stream by a malicious gateway (the per-stream
+	// counters only order frames WITHIN one stream instance; this is the
+	// cross-instance equivalent of the HTTP path's C2SNext). Bounded by
+	// muxMaxStreamsPerSessionLifetime and cleared on session eviction.
+	// Guarded by mu.
+	muxUsedStreams map[string]map[uint64]struct{}
 }
 
 type rebindWindow struct {
@@ -200,6 +208,7 @@ func NewManager() *Manager {
 		expectedWorkloadDigest: make(map[string][32]byte),
 		encKeys:                make(map[string]*ecdh.PrivateKey),
 		muxSessionStreams:      make(map[string]int),
+		muxUsedStreams:         make(map[string]map[uint64]struct{}),
 		ttl:                    defaultTTL,
 		now:                    time.Now,
 	}
@@ -694,6 +703,7 @@ func (m *Manager) lookupByID(id string) (*Session, bool) {
 func (m *Manager) evictLocked(id string) {
 	delete(m.sessions, id)
 	delete(m.muxSessionStreams, id)
+	delete(m.muxUsedStreams, id)
 }
 
 func (m *Manager) gcLocked() {
