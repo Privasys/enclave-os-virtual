@@ -16,7 +16,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const depOID61 = "1.3.6.1.4.1.65230.6.1"
+const depOID61 = "1.3.6.1.4.1.65230.7.1" // attested dependency set (scheme v2)
 
 func depTestSet() *ratls.DependencySet {
 	return &ratls.DependencySet{Entries: []ratls.DependencyEntry{{
@@ -27,7 +27,7 @@ func depTestSet() *ratls.DependencySet {
 			RTMR2: strings.Repeat("ef", 48),
 		}}},
 		RequiredOids: []ratls.ExpectedOid{{
-			OID:           "1.3.6.1.4.1.65230.3.2",
+			OID:           "1.3.6.1.4.1.65230.4.2",
 			ExpectedValue: bytes.Repeat([]byte{7}, 32),
 		}},
 	}}}
@@ -83,7 +83,7 @@ func readExtValue(t *testing.T, extDir, host, oid string) ([]byte, bool) {
 }
 
 // TestWriteContainerExtensionsStampsDependencySet pins the WS2 core: a spec
-// with a dependency set gets OID 65230.6.1 on its serving-cert extensions,
+// with a dependency set gets OID 65230.7.1 on its serving-cert extensions,
 // value byte-identical to the SDK's canonical encoding.
 func TestWriteContainerExtensionsStampsDependencySet(t *testing.T) {
 	dir := t.TempDir()
@@ -99,14 +99,14 @@ func TestWriteContainerExtensionsStampsDependencySet(t *testing.T) {
 
 	got, found := readExtValue(t, dir, "app1.apps.privasys.org", depOID61)
 	if !found {
-		t.Fatal("OID 6.1 missing from the extensions file")
+		t.Fatal("OID 7.1 missing from the extensions file")
 	}
 	if want := ratls.EncodeDependencySet(*set); !bytes.Equal(got, want) {
-		t.Fatalf("6.1 value != canonical SDK encoding:\n got %x\nwant %x", got, want)
+		t.Fatalf("7.1 value != canonical SDK encoding:\n got %x\nwant %x", got, want)
 	}
 }
 
-// TestWriteContainerExtensionsOmits61WhenNoDeps: no declared set → no 6.1
+// TestWriteContainerExtensionsOmits61WhenNoDeps: no declared set → no 7.1
 // extension (absence, not an empty value).
 func TestWriteContainerExtensionsOmits61WhenNoDeps(t *testing.T) {
 	dir := t.TempDir()
@@ -119,7 +119,7 @@ func TestWriteContainerExtensionsOmits61WhenNoDeps(t *testing.T) {
 		t.Fatalf("writeContainerExtensions: %v", err)
 	}
 	if _, found := readExtValue(t, dir, "app1.apps.privasys.org", depOID61); found {
-		t.Fatal("OID 6.1 present with no declared dependencies")
+		t.Fatal("OID 7.1 present with no declared dependencies")
 	}
 }
 
@@ -140,7 +140,7 @@ func TestSetDependenciesReMintsInPlace(t *testing.T) {
 	}
 	got, found := readExtValue(t, dir, "app1.apps.privasys.org", depOID61)
 	if !found || !bytes.Equal(got, encoded) {
-		t.Fatalf("re-minted file missing/mismatched 6.1 (found=%v)", found)
+		t.Fatalf("re-minted file missing/mismatched 7.1 (found=%v)", found)
 	}
 	stored, err := l.GetDependencies("app1")
 	if err != nil || stored == nil || len(stored.Entries) != 1 {
@@ -156,7 +156,7 @@ func TestSetDependenciesReMintsInPlace(t *testing.T) {
 		t.Fatalf("clear should return nil encoding, got %x", cleared)
 	}
 	if _, found := readExtValue(t, dir, "app1.apps.privasys.org", depOID61); found {
-		t.Fatal("OID 6.1 still present after explicit clear")
+		t.Fatal("OID 7.1 still present after explicit clear")
 	}
 	stored, err = l.GetDependencies("app1")
 	if err != nil || stored != nil {
