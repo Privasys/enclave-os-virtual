@@ -5,29 +5,76 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/sha512"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/asn1"
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"sync"
 	"time"
+
+	ratls "enclave-os-mini/clients/go/ratls"
 
 	"github.com/Privasys/enclave-os-virtual/internal/oids"
 	"github.com/Privasys/enclave-os-virtual/internal/tdx"
 )
 
-// MintIdentity mints a one-shot RA-TLS vault client certificate bound to the
-// vault's challenge, carrying a fresh TDX quote plus the container's image
-// digest (OID 3.2) and app id (OID 3.6). This is the exported entry point the
-// manager uses to mint an identity for a calling container on demand: an app
-// never mints its own identity, so the measured manager remains the sole minter
-// and the app id it stamps is trustworthy. It is the same identity minted for
-// the per-app data key.
-func MintIdentity(challenge, channelBinder, imageDigest, appID []byte) (*tls.Certificate, error) {
-	return mintIdentity(challenge, channelBinder, imageDigest, appID)
+// RA-TLS v2 client identity of a container (and of the manager's own vault
+// leg): a leaf key, the container's code digest (OID 4.2) and app id (OID
+// 4.1), no evidence. Evidence is minted per connection, after the handshake,
+// with report_data committing to the leaf key, the vault's client_context and
+// the connection's exporter value (ClientEvidence).
+
+// identityLifetime is the validity of a minted client identity.
+const identityLifetime = time.Hour
+
+// Identity is a minted client identity with its SPKI hash.
+type Identity struct {
+	Cert     *tls.Certificate
+	SPKIHash [32]byte
+	NotAfter time.Time
+}
+
+// MintIdentity mints a client identity carrying imageDigest and appID. The
+// measured manager is the sole minter, so the app id it stamps is trustworthy.
+func MintIdentity(imageDigest, appID []byte) (*Identity, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("vaultkey: generate identity key: %w", err)
+	}
+	spki, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		return nil, fmt.Errorf("vaultkey: marshal SPKI: %w", err)
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 64))
+	if err != nil {
+		return nil, fmt.Errorf("vaultkey: serial: %w", err)
+	}
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "enclave-os-virtual client"},
+		NotBefore:    now.Add(-1 * time.Minute),
+		NotAfter:     now.Add(identityLifetime),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		ExtraExtensions: []pkix.Extension{
+			oids.Extension(oids.WorkloadCodeHash, imageDigest),
+		},
+	}
+	if len(appID) > 0 {
+		tmpl.ExtraExtensions = append(tmpl.ExtraExtensions, oids.Extension(oids.WorkloadAppID, appID))
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return nil, fmt.Errorf("vaultkey: create certificate: %w", err)
+	}
+	return &Identity{
+		Cert:     &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key},
+		SPKIHash: sha256.Sum256(spki),
+		NotAfter: tmpl.NotAfter,
+	}, nil
 }
 
 // EncodeIdentityPEM PEM-encodes a minted identity's certificate and private key
@@ -45,73 +92,47 @@ func EncodeIdentityPEM(cert *tls.Certificate) (certPEM, keyPEM []byte, err error
 	return certPEM, keyPEM, nil
 }
 
-// tdxQuoteOID is the Intel-standard X.509 extension OID carrying a raw
-// TDX quote (same arc the Caddy RA-TLS issuer uses on serving certs).
-var tdxQuoteOID = asn1.ObjectIdentifier{1, 2, 840, 113741, 1, 5, 5, 1, 6}
+// identityCache keeps the manager's own client identities (one per
+// digest+appID) for their validity.
+var identityCache = struct {
+	mu sync.Mutex
+	m  map[string]*Identity
+}{m: map[string]*Identity{}}
 
-// mintIdentity builds a one-shot RA-TLS client certificate bound to the
-// vault's challenge nonce:
-//
-//	ReportData = SHA-512( SHA-256(SPKI_DER) || challenge || channelBinder )
-//
-// (the platform-wide binding formula; the vault recomputes it in
-// verify_challenge_binding). channelBinder is the 32-byte RA-TLS channel binder
-// of the live vault handshake, so the quote commits to this exact TLS session
-// and a relayed client cert fails closed. It is empty only on a non-TLS-1.3
-// handshake. The self-signed leaf carries the raw TDX quote plus the container's
-// image digest at OID 3.2 and (for MR_APP keys) its app-id at OID 3.6, which is
-// what the vault's Principal::Tee profile pins (the enclave-upgrade + MR_APP design).
-func mintIdentity(challenge, channelBinder, imageDigest, appID []byte) (*tls.Certificate, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("vaultkey: generate identity key: %w", err)
+// clientCertificateFn returns the GetClientCertificate callback for the
+// manager's vault leg: the cached identity for (imageDigest, appID), minted
+// on first use and re-minted when it nears expiry.
+func clientCertificateFn(imageDigest, appID []byte) func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+	key := string(imageDigest) + "|" + string(appID)
+	return func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+		identityCache.mu.Lock()
+		defer identityCache.mu.Unlock()
+		if id := identityCache.m[key]; id != nil && time.Now().Add(time.Minute).Before(id.NotAfter) {
+			return id.Cert, nil
+		}
+		id, err := MintIdentity(imageDigest, appID)
+		if err != nil {
+			return nil, err
+		}
+		identityCache.m[key] = id
+		return id.Cert, nil
 	}
-	spki, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("vaultkey: marshal SPKI: %w", err)
-	}
+}
 
-	spkiHash := sha256.Sum256(spki)
-	preimage := make([]byte, 0, len(spkiHash)+len(challenge)+len(channelBinder))
-	preimage = append(preimage, spkiHash[:]...)
-	preimage = append(preimage, challenge...)
-	preimage = append(preimage, channelBinder...)
-	reportData := sha512.Sum512(preimage)
-
-	quote, err := tdx.GetQuote(reportData)
-	if err != nil {
-		return nil, fmt.Errorf("vaultkey: TDX quote: %w", err)
+// clientEvidenceFn returns the ClientEvidenceSource of the manager's own vault
+// leg: a TDX quote over the report_data the SDK computed for the connection.
+func clientEvidenceFn() ratls.ClientEvidenceSource {
+	return func(req ratls.ClientEvidenceRequest) (*ratls.ClientEvidence, error) {
+		var rd [64]byte
+		copy(rd[:], req.ReportData)
+		quote, err := tdx.GetQuote(rd)
+		if err != nil {
+			return nil, fmt.Errorf("vaultkey: TDX quote: %w", err)
+		}
+		return &ratls.ClientEvidence{
+			TEE:       "tdx",
+			Quote:     quote,
+			QuoteTime: time.Now().UTC().Format(ratls.QuoteTimeLayout),
+		}, nil
 	}
-
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 64))
-	if err != nil {
-		return nil, fmt.Errorf("vaultkey: serial: %w", err)
-	}
-	now := time.Now()
-	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "enclave-os-virtual vault client"},
-		NotBefore:    now.Add(-1 * time.Minute),
-		NotAfter:     now.Add(1 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		ExtraExtensions: []pkix.Extension{
-			oids.Extension(tdxQuoteOID, quote),
-			oids.Extension(oids.ContainerImageDigest, imageDigest),
-		},
-	}
-	// MR_APP: bind this identity to the specific app. Omitted (MR_ENCLAVE) when
-	// the platform did not supply an app-id, keeping old deployments working.
-	if len(appID) > 0 {
-		tmpl.ExtraExtensions = append(tmpl.ExtraExtensions,
-			oids.Extension(oids.ContainerAppId, appID))
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		return nil, fmt.Errorf("vaultkey: create certificate: %w", err)
-	}
-	return &tls.Certificate{
-		Certificate: [][]byte{der},
-		PrivateKey:  key,
-	}, nil
 }

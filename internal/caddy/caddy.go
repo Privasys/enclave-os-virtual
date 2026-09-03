@@ -304,7 +304,14 @@ func (c *Client) buildConfig() map[string]any {
 	for _, h := range hostnames {
 		r := c.routes[h]
 
-		handle := make([]map[string]any, 0, 2)
+		handle := make([]map[string]any, 0, 3)
+		// RA-TLS v2 evidence endpoint (POST /__privasys/attest) and the
+		// per-connection attestation tag, on every route. The manager verifies
+		// client evidence of mutual hosts (peer-evidence).
+		handle = append(handle, map[string]any{
+			"handler":     "privasys_attest",
+			"manager_url": "http://" + r.Upstream,
+		})
 		// Ingress mutual RA-TLS: scrub spoofed X-Privasys-Peer-* headers and
 		// republish the TLS-verified client leaf + channel binder for the
 		// manager BEFORE the request is proxied onward.
@@ -347,6 +354,10 @@ func (c *Client) buildConfig() map[string]any {
 	if c.fallback != "" {
 		routes = append(routes, map[string]any{
 			"handle": []map[string]any{
+				{
+					"handler":     "privasys_attest",
+					"manager_url": "http://" + c.fallback,
+				},
 				{
 					"handler":        "reverse_proxy",
 					"upstreams":      []map[string]any{{"dial": c.fallback}},

@@ -1,118 +1,44 @@
-// Package ratls implements a Caddy TLS issuance module ("ra_tls") that
-// produces RA-TLS certificates for Confidential VMs.
+// Package ratls implements the Caddy modules that make an enclave-os-virtual
+// VM an RA-TLS v2 server (see ra-tls-clients/docs/ratls-v2.md).
 //
-// It generates ECDSA P-256 key pairs and issues X.509 certificates signed by a
-// private-PKI intermediary CA. Each certificate embeds hardware attestation
-// evidence (a quote/report) in a custom X.509 extension whose OID is
-// determined by the selected backend.
+// # Certificate
 //
-// # Backends
+// The serving certificate identifies the enclave and carries no attestation
+// evidence: an ECDSA P-256 leaf key generated inside the TEE, a chain to the
+// Privasys intermediate CA of this environment, and the Privasys OID
+// extensions written by the measured manager (per hostname, in ExtensionsDir).
+// The leaf key lives for 24 hours and is kept across re-mints that only change
+// extension values (a deploy, a configuration change), so a deterministic quote
+// minted for the key stays valid across such a re-mint. Leaves are served per
+// SNI by the "tls.get_certificate.ra_tls" module (RATLSCertGetter).
 //
-// Hardware-specific logic is abstracted behind the Attester interface (see
-// attester.go). The backend is selected via the "backend" configuration
-// field. Currently supported:
+// # Evidence
 //
-//   - "tdx" -- Intel TDX via Linux configfs-tsm (attester_tdx.go)
-//   - "sgx" -- Intel SGX via Gramine DCAP (attester_sgx.go)
+// A client that wants evidence asks for it after the handshake, on the same
+// connection, with POST /__privasys/attest, served by the
+// "http.handlers.privasys_attest" module (see attest.go). The quote's
+// report_data commits to the leaf key and either a minute timestamp
+// (deterministic mode, cached for 24 hours per key) or the client's context and
+// this connection's RFC 8446 exporter value (challenge mode, Level 3 binding):
 //
-// Planned:
+//	deterministic: SHA-512( SHA-256(SPKI_DER) || quote_time )
+//	challenge:     SHA-512( SHA-256(SPKI_DER) || context || hctx )
+//	               hctx = TLS-Exporter("EXPORTER-privasys-ratls-attest-v2", context, 32)
 //
-//   - "sev-snp" -- AMD SEV-SNP
-//
-// # Report Data
-//
-// The quote's 64-byte ReportData field is:
-//
-// SHA-512( SHA-256(DER public key) || creation_time )
-//
-// where creation_time is the certificate's NotBefore value truncated to
-// 1-minute precision, formatted as the UTC string "2006-01-02T15:04Z"
-// (deterministic mode), or the client's ClientHello challenge nonce
-// (challenge mode). This allows a verifier to reproduce the ReportData from
-// the certificate alone: read the public key and NotBefore, apply the same
-// formula, and compare against the quote.
-//
-// When the certificate ALSO carries the NVIDIA GPU CC evidence extension
-// (OID 1.3.6.1.4.1.65230.5.1, the tdx-gpu combined case), the binding is
-// extended so the fresh quote commits to the exact GPU evidence:
-//
-// SHA-512( SHA-256(DER public key) || B || SHA-256(gpu_evidence) )
-//
-// where B is the mode value above and gpu_evidence is the raw bytes of the
-// 5.1 extension (see gpu_evidence.go, internal/gpuattest). A verifier that
-// sees the 5.1 extension MUST use this extended form.
-//
-// # Trust Model
-//
-// Certificates are signed by a user-provided intermediary CA (private PKI).
-// The attestation evidence embedded in the certificate provides hardware-
-// rooted proof that the public key was generated inside a genuine Confidential
-// VM. A relying party should:
-//
-//  1. Validate the certificate chain back to the trusted root CA.
-//  2. Extract and verify the attestation evidence against the hardware
-//     vendor's attestation infrastructure.
-//  3. Recompute SHA-512(SHA-256(pub key) || NotBefore as "2006-01-02T15:04Z")
-//     and confirm it matches the quote's ReportData.
-//
-// # Attestation Paths
-//
-// The module supports two attestation modes:
-//
-//   - Deterministic (Issue path): ReportData = SHA-512(SHA-256(pubkey) || time).
-//     Certificates are cached and auto-renewed by certmagic. A verifier
-//     reproduces the ReportData from the certificate's public key and NotBefore.
-//
-//   - Challenge-Response (GetCertificate path): When the client's TLS
-//     ClientHello contains a RA-TLS challenge extension (0xffbb), a fresh
-//     ephemeral certificate is generated with
-//     ReportData = SHA-512(SHA-256(pubkey) || nonce || binder). This certificate
-//     is not cached. The 32-byte binder is the TLS session channel binder,
-//     derived from the handshake key schedule; the Privasys/go fork re-invokes
-//     GetCertificate at the TLS 1.3 Certificate-emit seam with the binder set on
-//     ClientHelloInfo, so the quote commits to this exact session (channel
-//     binding). To read the challenge payload and the binder, build with the
-//     Privasys/go fork (https://github.com/Privasys/go/tree/release-branch.go1.26). With standard
-//     Go the extension is detected but the payload cannot be read, so the module
-//     falls back to the deterministic certificate.
-//
-// # Private Key Sensitivity
-//
-// The ECDSA private key is generated inside the TEE and protected by hardware
-// memory encryption. It should be treated as highly sensitive:
-//
-//   - It is held in an in-memory sync.Map only between GenerateKey and Issue,
-//     then immediately deleted from the map after use.
-//   - certmagic will still PEM-encode and persist the key via its Storage backend.
-//     To avoid writing it to unencrypted disk, configure Caddy with an encrypted
-//     or in-memory storage backend.
-//
-// # Caddyfile Example
-//
-//	example.com {
-//	   tls {
-//	       issuer ra_tls {
-//	           backend tdx
-//	           ca_cert /path/to/intermediate-ca.crt
-//	           ca_key  /path/to/intermediate-ca.key
-//	       }
-//	   }
-//	   respond "Hello from a Confidential VM!"
-//	}
+// with SHA-256(gpu_evidence) appended to the binding on a GPU host (the
+// "tdx-gpu" evidence family).
 //
 // # Build
 //
 //	xcaddy build --with github.com/Privasys/enclave-os-virtual/caddy/ratls=.
+//
+// Stock Go: nothing here needs a TLS extension or a fork.
 package ratls
 
 import (
 	"context"
 	"crypto"
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
-	"crypto/sha512"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -128,6 +54,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -137,319 +64,266 @@ import (
 )
 
 func init() {
-	caddy.RegisterModule(RATLSIssuer{})
 	caddy.RegisterModule(RATLSCertGetter{})
 }
 
-// reportTimeFormat is the deterministic format used when encoding the
-// certificate creation time into the ReportData hash. It yields minute-
-// precision UTC strings like "2026-02-18T14:30Z", which a verifier can
-// reproduce from the certificate's NotBefore field.
-const reportTimeFormat = "2006-01-02T15:04Z"
+// leafLifetime is the validity of a serving certificate and the lifetime of
+// its key.
+const leafLifetime = 24 * time.Hour
 
-// RATLSIssuer is a Caddy TLS issuance module that produces RA-TLS
-// certificates for Confidential VMs.
-//
-// It implements:
-//   - certmagic.KeyGenerator -- generates ECDSA P-256 key pairs.
-//   - certmagic.Issuer       -- issues CA-signed certificates with embedded attestation evidence.
-//   - certmagic.Manager      -- serves challenge-response certs for RA-TLS clients.
-//   - caddy.Provisioner      -- verifies hardware availability and loads the CA.
-//   - caddyfile.Unmarshaler  -- parses the "ra_tls" Caddyfile directive.
-type RATLSIssuer struct {
-	// Backend selects the confidential computing hardware backend.
-	// Supported values: "tdx". Planned: "sev-snp", "sgx".
+// RATLSCertGetter serves the RA-TLS v2 leaf of every SNI. It is registered
+// under "tls.get_certificate" so Caddy calls GetCertificate on every handshake.
+type RATLSCertGetter struct {
+	// Backend selects the confidential computing hardware backend ("tdx").
 	Backend string `json:"backend"`
-
-	// CACertPath is the path to the PEM-encoded intermediary CA certificate
-	// used to sign issued RA-TLS certificates.
+	// CACertPath is the PEM intermediary CA certificate that signs leaves.
 	CACertPath string `json:"ca_cert_path"`
-
-	// CAKeyPath is the path to the PEM-encoded private key of the
-	// intermediary CA.
+	// CAKeyPath is the PEM private key of the intermediary CA.
 	CAKeyPath string `json:"ca_key_path"`
-
-	// ExtensionsDir is the directory containing per-hostname OID extension
-	// files (<hostname>.json). Each file is a JSON array of {oid, value}
-	// objects that are added to the certificate alongside the attestation
-	// quote. Written by the workload manager.
+	// ExtensionsDir holds the per-hostname OID extension files
+	// (<hostname>.json) written by the workload manager.
 	ExtensionsDir string `json:"extensions_dir,omitempty"`
-
 	// GPUEvidenceDir is where the gpu-attest daemon writes the cached NVIDIA
-	// GPU CC attestation evidence (gpu-evidence.bin). When present it is
-	// added as the OID-5.1 extension and its SHA-256 is folded into the
-	// quote REPORTDATA (plan D1). Empty ⇒ /run. Absent file ⇒ no GPU
-	// extension (byte-identical to a non-GPU cert).
+	// GPU CC evidence (gpu-evidence.bin). Empty means /run.
 	GPUEvidenceDir string `json:"gpu_evidence_dir,omitempty"`
 
-	// attester is the hardware-specific attestation provider, created from
-	// the Backend configuration during Provision.
 	attester Attester
+	caCert   *x509.Certificate
+	caKey    crypto.Signer
+	logger   *zap.Logger
 
-	// caCert is the parsed intermediary CA certificate.
-	caCert *x509.Certificate
-
-	// caKey is the parsed intermediary CA private key.
-	caKey crypto.Signer
-
-	logger *zap.Logger
-
-	// keys temporarily holds private keys between GenerateKey and Issue,
-	// indexed by the SHA-512 fingerprint of their DER-encoded PKIX public
-	// key. Keys are removed (LoadAndDelete) as soon as Issue consumes them.
-	keys sync.Map
+	mu    *sync.RWMutex
+	cache map[string]*cachedCert // by SNI, this module instance only
 }
 
-// ---------------------------------------------------------------------------
-// caddy.Module
-// ---------------------------------------------------------------------------
+// cachedCert is one minted leaf: it is served while its key is current and
+// it has not expired.
+type cachedCert struct {
+	cert     *tls.Certificate
+	spkiHash [32]byte
+	notAfter time.Time
+}
+
+// current is the provisioned getter the attest handler uses to reach the
+// attester, the GPU evidence and the CA. Caddy re-provisions modules on every
+// config load; the handler always sees the latest instance.
+var current atomic.Pointer[RATLSCertGetter]
 
 // CaddyModule returns the Caddy module information.
-func (RATLSIssuer) CaddyModule() caddy.ModuleInfo {
+func (RATLSCertGetter) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
-		ID:  "tls.issuance.ra_tls",
-		New: func() caddy.Module { return new(RATLSIssuer) },
+		ID:  "tls.get_certificate.ra_tls",
+		New: func() caddy.Module { return new(RATLSCertGetter) },
 	}
 }
 
-// ---------------------------------------------------------------------------
-// caddy.Provisioner
-// ---------------------------------------------------------------------------
+// Provision validates configuration, loads the intermediary CA and initialises
+// the attestation backend.
+func (g *RATLSCertGetter) Provision(ctx caddy.Context) error {
+	g.logger = ctx.Logger()
+	g.cache = make(map[string]*cachedCert)
+	g.mu = new(sync.RWMutex)
 
-// Provision validates configuration, loads the intermediary CA, and
-// initialises the hardware-specific attestation backend.
-func (iss *RATLSIssuer) Provision(ctx caddy.Context) error {
-	iss.logger = ctx.Logger()
-
-	// -- Validate configuration --------------------------------
-	if iss.Backend == "" {
+	if g.Backend == "" {
 		return fmt.Errorf("ra_tls: backend is required")
 	}
-	if iss.CACertPath == "" {
+	if g.CACertPath == "" {
 		return fmt.Errorf("ra_tls: ca_cert_path is required")
 	}
-	if iss.CAKeyPath == "" {
+	if g.CAKeyPath == "" {
 		return fmt.Errorf("ra_tls: ca_key_path is required")
 	}
 
-	// -- Load intermediary CA certificate ----------------------
-	caCertPEM, err := os.ReadFile(iss.CACertPath)
+	caCertPEM, err := os.ReadFile(g.CACertPath)
 	if err != nil {
-		return fmt.Errorf("ra_tls: failed to read CA certificate from %q: %w", iss.CACertPath, err)
+		return fmt.Errorf("ra_tls: failed to read CA certificate from %q: %w", g.CACertPath, err)
 	}
 	caCertBlock, _ := pem.Decode(caCertPEM)
 	if caCertBlock == nil {
-		return fmt.Errorf("ra_tls: no PEM block found in CA certificate file %q", iss.CACertPath)
+		return fmt.Errorf("ra_tls: no PEM block found in CA certificate file %q", g.CACertPath)
 	}
-	iss.caCert, err = x509.ParseCertificate(caCertBlock.Bytes)
+	g.caCert, err = x509.ParseCertificate(caCertBlock.Bytes)
 	if err != nil {
 		return fmt.Errorf("ra_tls: failed to parse CA certificate: %w", err)
 	}
-	if !iss.caCert.IsCA {
-		return fmt.Errorf("ra_tls: certificate in %q is not a CA certificate (BasicConstraints.IsCA=false)", iss.CACertPath)
+	if !g.caCert.IsCA {
+		return fmt.Errorf("ra_tls: certificate in %q is not a CA certificate", g.CACertPath)
 	}
 
-	// -- Load intermediary CA private key ----------------------
-	caKeyPEM, err := os.ReadFile(iss.CAKeyPath)
+	caKeyPEM, err := os.ReadFile(g.CAKeyPath)
 	if err != nil {
-		return fmt.Errorf("ra_tls: failed to read CA key from %q: %w", iss.CAKeyPath, err)
+		return fmt.Errorf("ra_tls: failed to read CA key from %q: %w", g.CAKeyPath, err)
 	}
 	caKeyBlock, _ := pem.Decode(caKeyPEM)
 	if caKeyBlock == nil {
-		return fmt.Errorf("ra_tls: no PEM block found in CA key file %q", iss.CAKeyPath)
+		return fmt.Errorf("ra_tls: no PEM block found in CA key file %q", g.CAKeyPath)
 	}
 	caKeyRaw, err := x509.ParsePKCS8PrivateKey(caKeyBlock.Bytes)
 	if err != nil {
-		// Fall back to SEC 1 (EC) or PKCS#1 (RSA) formats.
 		caKeyRaw, err = x509.ParseECPrivateKey(caKeyBlock.Bytes)
 		if err != nil {
 			return fmt.Errorf("ra_tls: failed to parse CA private key (tried PKCS#8 and SEC1): %w", err)
 		}
 	}
 	var ok bool
-	iss.caKey, ok = caKeyRaw.(crypto.Signer)
+	g.caKey, ok = caKeyRaw.(crypto.Signer)
 	if !ok {
 		return fmt.Errorf("ra_tls: CA private key type %T does not implement crypto.Signer", caKeyRaw)
 	}
 
-	iss.logger.Info("intermediary CA loaded",
-		zap.String("ca_cert", iss.CACertPath),
-		zap.String("ca_subject", iss.caCert.Subject.String()))
-
-	// -- Initialise the attestation backend --------------------
-	attester, err := newAttester(iss.Backend)
+	attester, err := newAttester(g.Backend)
 	if err != nil {
 		return fmt.Errorf("ra_tls: %w", err)
 	}
-	if err := attester.Provision(iss.logger); err != nil {
-		return fmt.Errorf("ra_tls[%s]: %w", iss.Backend, err)
+	if err := attester.Provision(g.logger); err != nil {
+		return fmt.Errorf("ra_tls[%s]: %w", g.Backend, err)
 	}
-	iss.attester = attester
+	g.attester = attester
 
-	iss.logger.Info("RA-TLS issuer provisioned successfully",
-		zap.String("backend", iss.Backend))
+	current.Store(g)
+	g.logger.Info("RA-TLS v2 certificate getter provisioned",
+		zap.String("backend", g.Backend),
+		zap.String("ca_subject", g.caCert.Subject.String()))
+	return nil
+}
+
+// GetCertificate implements certmagic.Manager: the v2 leaf for the SNI, from
+// this instance's cache when its key is still current, minted otherwise. A
+// config reload (new instance) re-mints with the same key, so extension
+// changes never rotate the key before its 24 hours are up.
+func (g *RATLSCertGetter) GetCertificate(_ context.Context, hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	sni := hello.ServerName
+	lk := leafKeyFor(sni)
+
+	g.mu.RLock()
+	c, ok := g.cache[sni]
+	g.mu.RUnlock()
+	if ok && c.spkiHash == lk.spkiHash && time.Now().Before(c.notAfter) {
+		return c.cert, nil
+	}
+
+	cert, notAfter, err := g.mint(lk, hello)
+	if err != nil {
+		return nil, err
+	}
+	g.mu.Lock()
+	g.cache[sni] = &cachedCert{cert: cert, spkiHash: lk.spkiHash, notAfter: notAfter}
+	g.mu.Unlock()
+	return cert, nil
+}
+
+// mint signs a leaf for lk carrying the hostname's OID extensions and no
+// evidence.
+func (g *RATLSCertGetter) mint(lk *leafKey, hello *tls.ClientHelloInfo) (*tls.Certificate, time.Time, error) {
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("ra_tls: serial number generation failed: %w", err)
+	}
+	hostExts, err := g.loadHostnameExtensions(hello.ServerName)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+
+	// Resolve the cert name. Empty ServerName means the client did not send
+	// SNI (a Go HTTP client dialling https://IP:port strips IP literals per
+	// RFC 6066); Caddy then keys the lookup on the connection's LocalAddr.IP
+	// and rejects a cert whose SANs do not contain it.
+	certCN := hello.ServerName
+	var dnsNames []string
+	var ipSANs []net.IP
+	if certCN != "" {
+		if ip := net.ParseIP(certCN); ip != nil {
+			ipSANs = append(ipSANs, ip)
+		} else {
+			dnsNames = []string{certCN}
+		}
+	}
+	if hello.Conn != nil {
+		if local, ok := hello.Conn.LocalAddr().(*net.TCPAddr); ok && local.IP != nil {
+			ipSANs = append(ipSANs, local.IP)
+			if certCN == "" {
+				certCN = local.IP.String()
+			}
+		}
+	}
+	if certCN == "" {
+		certCN = "enclave-default"
+	}
+
+	now := time.Now().UTC().Truncate(time.Minute)
+	notAfter := lk.created.Add(leafLifetime)
+	template := &x509.Certificate{
+		SerialNumber:          serialNumber,
+		Subject:               pkix.Name{CommonName: certCN},
+		DNSNames:              dnsNames,
+		IPAddresses:           ipSANs,
+		NotBefore:             now.Add(-time.Minute),
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		ExtraExtensions:       hostExts,
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, g.caCert, &lk.key.PublicKey, g.caKey)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("ra_tls: CA-signed certificate creation failed: %w", err)
+	}
+	tlsCert := &tls.Certificate{
+		Certificate: [][]byte{certDER, g.caCert.Raw},
+		PrivateKey:  lk.key,
+	}
+
+	g.logger.Info("RA-TLS v2 certificate issued",
+		zap.String("server_name", hello.ServerName),
+		zap.String("leaf", base64.RawURLEncoding.EncodeToString(lk.spkiHash[:])),
+		zap.Int("extensions", len(hostExts)),
+		zap.Time("not_after", notAfter))
+	return tlsCert, notAfter, nil
+}
+
+// UnmarshalCaddyfile parses the "ra_tls" get_certificate directive.
+func (g *RATLSCertGetter) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
+	d.Next()
+	if d.NextArg() {
+		return d.ArgErr()
+	}
+	for d.NextBlock(0) {
+		switch d.Val() {
+		case "backend":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			g.Backend = d.Val()
+		case "ca_cert":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			g.CACertPath = d.Val()
+		case "ca_key":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			g.CAKeyPath = d.Val()
+		case "extensions_dir":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			g.ExtensionsDir = d.Val()
+		case "gpu_evidence_dir":
+			if !d.NextArg() {
+				return d.ArgErr()
+			}
+			g.GPUEvidenceDir = d.Val()
+		default:
+			return d.Errf("unrecognised sub-directive: %s", d.Val())
+		}
+	}
 	return nil
 }
 
 // ---------------------------------------------------------------------------
-// certmagic.KeyGenerator
+// Per-hostname OID extensions (written by the measured manager)
 // ---------------------------------------------------------------------------
-
-// GenerateKey generates an ECDSA P-256 key pair and stores it temporarily so
-// that the subsequent call to Issue can retrieve it for signing by the
-// intermediary CA.
-//
-// The returned crypto.PrivateKey is an *ecdsa.PrivateKey (which also
-// implements crypto.Signer). Because the key is generated inside a TEE, it
-// should be treated as sensitive -- configure an encrypted or in-memory
-// storage backend in Caddy to avoid persisting it in plaintext.
-func (iss *RATLSIssuer) GenerateKey() (crypto.PrivateKey, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("ra_tls: ECDSA P-256 key generation failed: %w", err)
-	}
-
-	fp, err := pubKeyFingerprint(&key.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("ra_tls: public key fingerprinting failed: %w", err)
-	}
-	iss.keys.Store(fp, key)
-
-	iss.logger.Debug("generated ECDSA P-256 key pair (TEE-sensitive)")
-	return key, nil
-}
-
-// ---------------------------------------------------------------------------
-// certmagic.Issuer
-// ---------------------------------------------------------------------------
-
-// Issue creates a CA-signed X.509 certificate with embedded attestation
-// evidence from the configured hardware backend.
-//
-// Steps performed:
-//  1. Validate the CSR signature.
-//  2. Determine the creation time (NotBefore), truncated to 1-minute precision.
-//  3. Compute ReportData = SHA-512( SHA-256(DER public key) || creation_time ).
-//  4. Request attestation evidence from the backend with the ReportData.
-//  5. Build a certificate template carrying the evidence in a backend-
-//     specific extension and sign it with the intermediary CA key.
-func (iss *RATLSIssuer) Issue(ctx context.Context, csr *x509.CertificateRequest) (*certmagic.IssuedCertificate, error) {
-	// -- 1. Validate CSR --------------------------------------
-	if err := csr.CheckSignature(); err != nil {
-		return nil, fmt.Errorf("ra_tls: CSR signature verification failed: %w", err)
-	}
-
-	// -- 2. Creation time, truncated to the minute -------------
-	creationTime := time.Now().UTC().Truncate(time.Minute)
-	creationTimeStr := creationTime.Format(reportTimeFormat)
-
-	// -- 3. ReportData = SHA-512( SHA-256(pubkey) || creation_time )
-	pubKeyDER, err := x509.MarshalPKIXPublicKey(csr.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("ra_tls: failed to marshal CSR public key: %w", err)
-	}
-	gpuEv, gpuSum, gpuOK := loadGPUEvidence(iss.GPUEvidenceDir)
-	reportData := computeReportData(pubKeyDER, gpuBinding([]byte(creationTimeStr), gpuSum, gpuOK))
-
-	// -- 4. Generate attestation evidence ---------------------
-	rawQuote, err := iss.attester.Quote(reportData)
-	if err != nil {
-		return nil, fmt.Errorf("ra_tls[%s]: %w", iss.attester.Name(), err)
-	}
-	iss.logger.Info("attestation evidence generated",
-		zap.String("backend", iss.attester.Name()),
-		zap.Int("quote_bytes", len(rawQuote)),
-		zap.String("creation_time", creationTimeStr),
-		zap.String("report_data_algo", "SHA-512(SHA-256(pubkey) || time)"))
-
-	// -- 5. Verify the CSR carries an ECDSA public key --------
-	if _, ok := csr.PublicKey.(*ecdsa.PublicKey); !ok {
-		return nil, fmt.Errorf("ra_tls: expected ECDSA public key in CSR, got %T", csr.PublicKey)
-	}
-
-	// If GenerateKey was used, clean up the ephemeral store entry.
-	if ecPub, ok := csr.PublicKey.(*ecdsa.PublicKey); ok {
-		if fp, err := pubKeyFingerprint(ecPub); err == nil {
-			iss.keys.LoadAndDelete(fp)
-		}
-	}
-
-	// -- 6. Build the X.509 certificate -----------------------
-	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, fmt.Errorf("ra_tls: serial number generation failed: %w", err)
-	}
-
-	extraExts := []pkix.Extension{
-		iss.attester.CertExtension(rawQuote),
-	}
-	if gpuOK {
-		extraExts = append(extraExts, gpuExtension(gpuEv))
-	}
-
-	// Load per-hostname OID extensions from the extensions directory.
-	if len(csr.DNSNames) > 0 {
-		hostExts, err := iss.loadHostnameExtensions(csr.DNSNames[0])
-		if err != nil {
-			return nil, err
-		}
-		extraExts = append(extraExts, hostExts...)
-	}
-
-	template := &x509.Certificate{
-		SerialNumber:   serialNumber,
-		Subject:        csr.Subject,
-		DNSNames:       csr.DNSNames,
-		IPAddresses:    csr.IPAddresses,
-		URIs:           csr.URIs,
-		EmailAddresses: csr.EmailAddresses,
-
-		NotBefore: creationTime,
-		NotAfter:  creationTime.Add(24 * time.Hour),
-
-		KeyUsage: x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{
-			x509.ExtKeyUsageServerAuth,
-			x509.ExtKeyUsageClientAuth,
-		},
-		BasicConstraintsValid: true,
-
-		ExtraExtensions: extraExts,
-	}
-
-	// -- 7. Sign with the intermediary CA and encode the PEM chain
-	certDER, err := iss.signCertificate(template, csr.PublicKey)
-	if err != nil {
-		return nil, err
-	}
-	chainPEM := iss.encodeChainPEM(certDER)
-
-	iss.logger.Info("RA-TLS certificate issued (CA-signed)",
-		zap.String("backend", iss.attester.Name()),
-		zap.Strings("dns_names", csr.DNSNames),
-		zap.String("ca_subject", iss.caCert.Subject.String()),
-		zap.String("not_before", creationTimeStr),
-		zap.Time("not_after", template.NotAfter))
-
-	return &certmagic.IssuedCertificate{
-		Certificate: chainPEM,
-		Metadata: map[string]any{
-			"issuer":        "ra_tls",
-			"backend":       iss.attester.Name(),
-			"quote_size":    len(rawQuote),
-			"creation_time": creationTimeStr,
-		},
-	}, nil
-}
-
-// IssuerKey returns a string that uniquely identifies this issuer
-// configuration, used by certmagic to namespace stored certificates.
-func (iss *RATLSIssuer) IssuerKey() string {
-	if iss.Backend != "" {
-		return "ra_tls_" + iss.Backend
-	}
-	return "ra_tls"
-}
 
 // extensionEntry matches the JSON format written by the workload manager.
 type extensionEntry struct {
@@ -457,28 +331,23 @@ type extensionEntry struct {
 	Value string `json:"value"` // base64-encoded DER value
 }
 
-// extensionsFile is the object format for per-hostname extension files.
-// It carries static OID extensions written by the manager and an optional
-// upstream URL pointing to the container's HTTP server. When upstream is
-// set, the RA-TLS module calls GET <upstream>/.well-known/attestation-extensions
-// at certificate issuance time and merges any dynamic OIDs the container
-// reports (pull model, analogous to enclave-os-mini's custom_oids() trait).
+// extensionsFile is the object format for per-hostname extension files: the
+// manager's static extensions plus an optional upstream URL of the container,
+// queried for its self-declared app-defined extensions at issuance.
 type extensionsFile struct {
 	Extensions []extensionEntry `json:"extensions"`
 	Upstream   string           `json:"upstream,omitempty"`
 }
 
 // loadHostnameExtensions reads <extensions_dir>/<hostname>.json and returns
-// the entries as pkix.Extension values. If the file contains an upstream
-// URL, the container is also queried for dynamic OID extensions.
-//
-// Returns nil (no error) when the extensions directory is not configured
-// or the file does not exist.
-func (iss *RATLSIssuer) loadHostnameExtensions(hostname string) ([]pkix.Extension, error) {
-	if iss.ExtensionsDir == "" {
+// the entries as pkix.Extension values, merged with the container's own
+// app-defined extensions when an upstream is configured. Returns nil when the
+// directory is not configured or the file does not exist.
+func (g *RATLSCertGetter) loadHostnameExtensions(hostname string) ([]pkix.Extension, error) {
+	if g.ExtensionsDir == "" {
 		return nil, nil
 	}
-	path := filepath.Join(iss.ExtensionsDir, hostname+".json")
+	path := filepath.Join(g.ExtensionsDir, hostname+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -486,35 +355,29 @@ func (iss *RATLSIssuer) loadHostnameExtensions(hostname string) ([]pkix.Extensio
 		}
 		return nil, fmt.Errorf("ra_tls: read extensions file %q: %w", path, err)
 	}
-
-	// Parse the object format (extensions + optional upstream).
 	var file extensionsFile
 	if err := json.Unmarshal(data, &file); err != nil {
 		return nil, fmt.Errorf("ra_tls: parse extensions file %q: %w", path, err)
 	}
-
 	exts, err := parseExtensionEntries(file.Extensions)
 	if err != nil {
 		return nil, fmt.Errorf("ra_tls: %s: %w", path, err)
 	}
 
-	// Pull dynamic extensions from the container if an upstream is configured.
-	// Reserved (manager-owned / hardware-evidence) OIDs are stripped: the
-	// container may only declare its own app arc, never an identity extension
-	// the manager stamps (image digest 3.2, app id 3.6, dependency set 6.1, ...)
-	// — otherwise a workload could spoof or duplicate the attested identity on
-	// its own serving certificate.
+	// Reserved OIDs are stripped from what the container declares: a workload
+	// may only publish under the app-defined sub-arc, never an identity or
+	// configuration extension the manager stamps.
 	if file.Upstream != "" {
 		dynamic, err := fetchContainerExtensions(file.Upstream)
 		if err != nil {
-			iss.logger.Warn("failed to fetch container extensions (continuing without them)",
+			g.logger.Warn("failed to fetch container extensions (continuing without them)",
 				zap.String("hostname", hostname),
 				zap.String("upstream", file.Upstream),
 				zap.Error(err))
 		}
 		for _, ext := range dynamic {
 			if reservedExtensionOID(ext.Id) {
-				iss.logger.Warn("dropping reserved OID self-declared by container",
+				g.logger.Warn("dropping reserved OID self-declared by container",
 					zap.String("hostname", hostname),
 					zap.String("oid", ext.Id.String()))
 				continue
@@ -522,39 +385,31 @@ func (iss *RATLSIssuer) loadHostnameExtensions(hostname string) ([]pkix.Extensio
 			exts = append(exts, ext)
 		}
 	}
-
-	iss.logger.Debug("loaded hostname extensions",
-		zap.String("hostname", hostname),
-		zap.Int("count", len(exts)),
-		zap.Bool("has_upstream", file.Upstream != ""))
 	return exts, nil
 }
 
-// oidSGXQuote is the Intel SGX DCAP quote extension OID; reserved alongside
-// the TDX one even though this plugin only ever attaches TDX quotes.
-var oidSGXQuote = asn1.ObjectIdentifier{1, 2, 840, 113741, 1, 13, 1, 0}
+// Intel-arc quote OIDs: a v1 certificate extension. A v2 leaf never carries
+// them; they are refused from container declarations.
+var (
+	oidTDXQuote = asn1.ObjectIdentifier{1, 2, 840, 113741, 1, 5, 5, 1, 6}
+	oidSGXQuote = asn1.ObjectIdentifier{1, 2, 840, 113741, 1, 13, 1, 0}
+)
 
-// oidPrivasysArc is the Privasys Private Enterprise Number arc all platform
-// extension OIDs live under.
+// oidPrivasysArc is the Privasys Private Enterprise Number arc every platform
+// extension OID lives under.
 var oidPrivasysArc = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 65230}
 
-// containerDeclarableArc reports whether a sub-arc under the Privasys PEN
-// (1.3.6.1.4.1.65230) may be self-declared by a container: the app arc only —
-// 3.5 (AI model digest) and 3.5.* (app-owned extensions, e.g. 3.5.7 the AI
-// tools digest, and SDK-installed extensions). Every other slot under the PEN
-// is reserved for manager-owned identity/config data, including top-level 3.x
-// slots not yet assigned — an app must never squat an OID the platform may
-// later stamp.
+// containerDeclarableArc reports whether a sub-arc under the Privasys PEN may
+// be self-declared by a container: the app-defined sub-arc 5.4.<n> only (OID
+// scheme v2). The root 5.4 itself carries no value.
 func containerDeclarableArc(sub asn1.ObjectIdentifier) bool {
-	return len(sub) >= 2 && sub[0] == 3 && sub[1] == 5
+	return len(sub) >= 3 && sub[0] == 5 && sub[1] == 4
 }
 
 // reservedExtensionOID reports whether a container-declared extension OID must
-// be dropped at certificate issuance: the Intel quote OIDs and every
-// manager-owned Privasys OID (platform 1.*/2.*, workload identity 3.1-3.4,
-// 3.6 and unassigned 3.x slots, hardware evidence 4.*/5.*, dependency set
-// 6.*). The same trust rule as the manager's own extension writer: identity is
-// stamped by the measured manager, never self-declared.
+// be dropped at issuance: the Intel quote OIDs and every Privasys OID outside
+// the app-defined sub-arc. Identity is stamped by the measured manager, never
+// self-declared.
 func reservedExtensionOID(oid asn1.ObjectIdentifier) bool {
 	if oid.Equal(oidTDXQuote) || oid.Equal(oidSGXQuote) {
 		return true
@@ -572,8 +427,6 @@ func reservedExtensionOID(oid asn1.ObjectIdentifier) bool {
 
 // fetchContainerExtensions calls GET <upstream>/.well-known/attestation-extensions
 // and parses the response as a JSON array of extensionEntry objects.
-// This is the Virtual equivalent of enclave-os-mini's custom_oids() trait method:
-// the container declares its own attestation OIDs at certificate issuance time.
 func fetchContainerExtensions(upstream string) ([]pkix.Extension, error) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(upstream + "/.well-known/attestation-extensions")
@@ -582,7 +435,7 @@ func fetchContainerExtensions(upstream string) ([]pkix.Extension, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, nil // container doesn't support custom OIDs yet, that's fine
+		return nil, nil
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
@@ -595,8 +448,7 @@ func fetchContainerExtensions(upstream string) ([]pkix.Extension, error) {
 	return parseExtensionEntries(entries)
 }
 
-// parseExtensionEntries converts a slice of extensionEntry (JSON) into
-// pkix.Extension values.
+// parseExtensionEntries converts extensionEntry values into pkix.Extension values.
 func parseExtensionEntries(entries []extensionEntry) ([]pkix.Extension, error) {
 	exts := make([]pkix.Extension, 0, len(entries))
 	for _, e := range entries {
@@ -608,10 +460,7 @@ func parseExtensionEntries(entries []extensionEntry) ([]pkix.Extension, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid base64 for OID %s: %w", e.OID, err)
 		}
-		exts = append(exts, pkix.Extension{
-			Id:    oid,
-			Value: val,
-		})
+		exts = append(exts, pkix.Extension{Id: oid, Value: val})
 	}
 	return exts, nil
 }
@@ -635,7 +484,6 @@ func parseOID(s string) (asn1.ObjectIdentifier, error) {
 	return oid, nil
 }
 
-// splitDots splits a string by '.'.
 func splitDots(s string) []string {
 	var parts []string
 	start := 0
@@ -650,525 +498,10 @@ func splitDots(s string) []string {
 	return parts
 }
 
-// ---------------------------------------------------------------------------
-// certmagic.Manager -- challenge-response attestation
-// ---------------------------------------------------------------------------
-
-// GetCertificate implements certmagic.Manager. It inspects the TLS
-// ClientHello for a RA-TLS challenge extension (0xffbb). If present and the
-// challenge payload is available (requires the Privasys/go fork + "ratls"
-// build tag), it generates a fresh ephemeral certificate with attestation
-// evidence bound to the client's nonce — providing interactive,
-// challenge-response attestation.
-//
-// If no RA-TLS challenge is found, or if the extension is detected but the
-// payload is unavailable (standard Go), it returns (nil, nil) to let
-// certmagic serve a pre-issued certificate from the Issue() path.
-func (iss *RATLSIssuer) GetCertificate(ctx context.Context, hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	nonce, found := extractRATLSChallenge(hello)
-	if !found {
-		return nil, nil
-	}
-
-	if nonce == nil {
-		iss.logger.Warn("RA-TLS challenge extension detected in ClientHello but payload "+
-			"is unavailable (build with the Privasys/go fork and -tags ratls to enable); "+
-			"falling back to deterministic certificate",
-			zap.String("server_name", hello.ServerName))
-		return nil, nil
-	}
-
-	iss.logger.Info("RA-TLS challenge detected in ClientHello, generating challenge-response certificate",
-		zap.String("server_name", hello.ServerName),
-		zap.Int("nonce_bytes", len(nonce)))
-
-	// -- Generate ephemeral ECDSA P-256 key pair --------------
-	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("ra_tls: ephemeral key generation failed: %w", err)
-	}
-
-	// -- ReportData = SHA-512( SHA-256(pubkey) || nonce [|| binder] ) --
-	pubKeyDER, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("ra_tls: failed to marshal ephemeral public key: %w", err)
-	}
-	// RA-TLS channel binding: when the TLS 1.3 emit seam re-invokes this callback
-	// with the 32-byte session channel binder, fold it in after the nonce so the
-	// quote commits to this exact TLS session and a relayed quote fails closed. A
-	// verifier reproduces the same value from its own handshake key schedule. The
-	// binder is nil on the initial certificate selection (no key schedule yet);
-	// that certificate is only used to pick parameters and is replaced by the
-	// bound one before it is sent.
-	challengeBinding := nonce
-	channelBound := len(hello.RATLSChannelBinder) > 0
-	if channelBound {
-		challengeBinding = append(append([]byte(nil), nonce...), hello.RATLSChannelBinder...)
-	}
-	gpuEv, gpuSum, gpuOK := loadGPUEvidence(iss.GPUEvidenceDir)
-	reportData := computeReportData(pubKeyDER, gpuBinding(challengeBinding, gpuSum, gpuOK))
-
-	// -- Generate attestation evidence ------------------------
-	rawQuote, err := iss.attester.Quote(reportData)
-	if err != nil {
-		return nil, fmt.Errorf("ra_tls[%s]: %w", iss.attester.Name(), err)
-	}
-
-	// -- Build certificate template ---------------------------
-	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, fmt.Errorf("ra_tls: serial number generation failed: %w", err)
-	}
-
-	crExtraExts := []pkix.Extension{
-		iss.attester.CertExtension(rawQuote),
-	}
-	if gpuOK {
-		crExtraExts = append(crExtraExts, gpuExtension(gpuEv))
-	}
-
-	// Load per-hostname OID extensions from the extensions directory.
-	hostExts, err := iss.loadHostnameExtensions(hello.ServerName)
-	if err != nil {
-		return nil, err
-	}
-	crExtraExts = append(crExtraExts, hostExts...)
-
-	// Resolve the cert name. Empty ServerName means the client did not
-	// send SNI, and an IP literal in ServerName must go in IPAddresses
-	// rather than DNSNames (otherwise Go's TLS stack rejects the cert as
-	// having "no names" matching the connection peer). Mirror the SNI
-	// handling from issueDeterministic so challenge-response handshakes
-	// against an IP SNI succeed.
-	certCN := hello.ServerName
-	var dnsNames []string
-	var ipSANs []net.IP
-	if certCN != "" {
-		if ip := net.ParseIP(certCN); ip != nil {
-			ipSANs = append(ipSANs, ip)
-		} else {
-			dnsNames = []string{certCN}
-		}
-	}
-	if hello.Conn != nil {
-		if local, ok := hello.Conn.LocalAddr().(*net.TCPAddr); ok && local.IP != nil {
-			ipSANs = append(ipSANs, local.IP)
-			if certCN == "" {
-				certCN = local.IP.String()
-			}
-		}
-	}
-	if certCN == "" {
-		certCN = "enclave-default"
-	}
-
-	now := time.Now().UTC()
-	template := &x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			CommonName: certCN,
-		},
-		DNSNames:    dnsNames,
-		IPAddresses: ipSANs,
-		NotBefore:   now,
-		NotAfter:    now.Add(5 * time.Minute),
-
-		KeyUsage: x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{
-			x509.ExtKeyUsageServerAuth,
-		},
-		BasicConstraintsValid: true,
-
-		ExtraExtensions: crExtraExts,
-	}
-
-	// -- Sign with the intermediary CA ------------------------
-	certDER, err := iss.signCertificate(template, &privKey.PublicKey)
-	if err != nil {
-		return nil, err
-	}
-	chainPEM := iss.encodeChainPEM(certDER)
-
-	// -- Build tls.Certificate --------------------------------
-	keyDER, err := x509.MarshalECPrivateKey(privKey)
-	if err != nil {
-		return nil, fmt.Errorf("ra_tls: failed to marshal ephemeral private key: %w", err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-
-	tlsCert, err := tls.X509KeyPair(chainPEM, keyPEM)
-	if err != nil {
-		return nil, fmt.Errorf("ra_tls: failed to build TLS certificate: %w", err)
-	}
-
-	iss.logger.Info("RA-TLS challenge-response certificate generated",
-		zap.String("backend", iss.attester.Name()),
-		zap.String("server_name", hello.ServerName),
-		zap.Int("quote_bytes", len(rawQuote)),
-		zap.Bool("channel_bound", channelBound))
-
-	return &tlsCert, nil
-}
-
-// ---------------------------------------------------------------------------
-// caddyfile.Unmarshaler
-// ---------------------------------------------------------------------------
-
-// UnmarshalCaddyfile parses the "ra_tls" issuer directive:
-//
-//	tls {
-//	   issuer ra_tls {
-//	       backend  tdx
-//	       ca_cert  /path/to/intermediate-ca.crt
-//	       ca_key   /path/to/intermediate-ca.key
-//	   }
-//	}
-func (iss *RATLSIssuer) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
-	d.Next() // consume the directive name "ra_tls"
-	if d.NextArg() {
-		return d.ArgErr()
-	}
-	for d.NextBlock(0) {
-		switch d.Val() {
-		case "backend":
-			if !d.NextArg() {
-				return d.ArgErr()
-			}
-			iss.Backend = d.Val()
-		case "ca_cert":
-			if !d.NextArg() {
-				return d.ArgErr()
-			}
-			iss.CACertPath = d.Val()
-		case "ca_key":
-			if !d.NextArg() {
-				return d.ArgErr()
-			}
-			iss.CAKeyPath = d.Val()
-		case "extensions_dir":
-			if !d.NextArg() {
-				return d.ArgErr()
-			}
-			iss.ExtensionsDir = d.Val()
-		case "gpu_evidence_dir":
-			if !d.NextArg() {
-				return d.ArgErr()
-			}
-			iss.GPUEvidenceDir = d.Val()
-		default:
-			return d.Errf("unrecognised sub-directive: %s", d.Val())
-		}
-	}
-	return nil
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// computeReportData produces the 64-byte ReportData used in attestation
-// quotes. It computes SHA-512( SHA-256(pubKeyDER) || binding ), where
-// binding is either a time string (deterministic path) or a client nonce
-// (challenge-response path).
-func computeReportData(pubKeyDER []byte, binding []byte) [64]byte {
-	pubKeyHash := sha256.Sum256(pubKeyDER)
-	var input []byte
-	input = append(input, pubKeyHash[:]...)
-	input = append(input, binding...)
-	return sha512.Sum512(input)
-}
-
-// signCertificate signs the given certificate template with the intermediary
-// CA and returns the DER-encoded leaf certificate.
-func (iss *RATLSIssuer) signCertificate(template *x509.Certificate, pub crypto.PublicKey) ([]byte, error) {
-	certDER, err := x509.CreateCertificate(rand.Reader, template, iss.caCert, pub, iss.caKey)
-	if err != nil {
-		return nil, fmt.Errorf("ra_tls: CA-signed certificate creation failed: %w", err)
-	}
-	return certDER, nil
-}
-
-// encodeChainPEM encodes the leaf certificate (DER) and the intermediary CA
-// certificate into a PEM bundle (leaf first, then CA).
-func (iss *RATLSIssuer) encodeChainPEM(leafDER []byte) []byte {
-	var chain []byte
-	chain = append(chain, pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: leafDER,
-	})...)
-	chain = append(chain, pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: iss.caCert.Raw,
-	})...)
-	return chain
-}
-
-// ratlsExtType is the TLS extension type for the RA-TLS challenge extension.
-// This matches the temporary value (0xffbb) used in the Privasys/go fork
-// (https://github.com/Privasys/go/tree/release-branch.go1.26).
-// Replace with the IANA-assigned value once allocated.
-const ratlsExtType uint16 = 0xffbb // TODO: replace with IANA assignment
-
-// extractRATLSChallenge inspects the ClientHello for a RA-TLS challenge extension.
-//
-// This implementation requires the Privasys/go fork
-// (https://github.com/Privasys/go/tree/release-branch.go1.26) which adds
-// tls.ClientHelloInfo.RATLSChallenge — the raw challenge bytes from the
-// RA-TLS extension (0xffbb). The fork validates the payload length (8–64
-// bytes) during handshake parsing; if malformed, the handshake is rejected
-// before we get here.
-//
-// Build with:
-//
-//	GOROOT=~/go-ratls xcaddy build -tags ratls --with ...
-func extractRATLSChallenge(hello *tls.ClientHelloInfo) (nonce []byte, found bool) {
-	if len(hello.RATLSChallenge) > 0 {
-		return hello.RATLSChallenge, true
-	}
-	return nil, false
-}
-
-// pubKeyFingerprint returns a deterministic fingerprint string derived from
-// the SHA-512 hash of the DER-encoded PKIX representation of pub. It is used
-// to correlate keys between GenerateKey and Issue.
-func pubKeyFingerprint(pub *ecdsa.PublicKey) (string, error) {
-	der, err := x509.MarshalPKIXPublicKey(pub)
-	if err != nil {
-		return "", err
-	}
-	h := sha512.Sum512(der)
-	return string(h[:]), nil
-}
-
-// ---------------------------------------------------------------------------
-// tls.get_certificate.ra_tls — Manager wrapper for challenge-response
-// ---------------------------------------------------------------------------
-
-// RATLSCertGetter is a Caddy certificate manager module that handles ALL
-// RA-TLS certificate generation, both challenge-response and deterministic.
-//
-// It is registered under the "tls.get_certificate" namespace so that Caddy
-// calls GetCertificate on every TLS handshake (when no certmagic-cached cert
-// exists). When used as the sole source of certificates (without issuers),
-// it guarantees that challenge-bearing connections always receive a fresh cert
-// bound to the client's nonce.
-//
-// For non-challenge connections, an internal cache keyed by SNI avoids
-// regenerating the TDX quote on every handshake. Cached certs are evicted
-// when they reach 80% of their lifetime.
-type RATLSCertGetter struct {
-	RATLSIssuer
-
-	mu    sync.RWMutex
-	cache map[string]*cachedCert
-}
-
-// cachedCert holds a TLS certificate with its expiry for cache eviction.
-type cachedCert struct {
-	cert     *tls.Certificate
-	notAfter time.Time
-}
-
-// CaddyModule returns the Caddy module information for the cert getter.
-func (RATLSCertGetter) CaddyModule() caddy.ModuleInfo {
-	return caddy.ModuleInfo{
-		ID:  "tls.get_certificate.ra_tls",
-		New: func() caddy.Module { return new(RATLSCertGetter) },
-	}
-}
-
-// Provision delegates to the embedded RATLSIssuer and initialises the cache.
-func (g *RATLSCertGetter) Provision(ctx caddy.Context) error {
-	g.cache = make(map[string]*cachedCert)
-	return g.RATLSIssuer.Provision(ctx)
-}
-
-// GetCertificate implements certmagic.Manager. It handles both attestation
-// modes:
-//
-//   - Challenge-response: if hello.RATLSChallenge is set, a fresh ephemeral
-//     certificate is generated with ReportData bound to the client's nonce.
-//     These certs are never cached.
-//
-//   - Deterministic: if no challenge is present, a certificate with
-//     ReportData = SHA-512(SHA-256(pubkey) || time) is generated (or served
-//     from cache if still valid).
-func (g *RATLSCertGetter) GetCertificate(ctx context.Context, hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	// Challenge connections always get a fresh cert.
-	nonce, found := extractRATLSChallenge(hello)
-	if found && nonce != nil {
-		return g.RATLSIssuer.GetCertificate(ctx, hello)
-	}
-
-	// Non-challenge: check internal cache.
-	sni := hello.ServerName
-	g.mu.RLock()
-	if c, ok := g.cache[sni]; ok {
-		// Serve cached cert if it still has >20% of its lifetime remaining.
-		remaining := time.Until(c.notAfter)
-		if remaining > 0 {
-			g.mu.RUnlock()
-			return c.cert, nil
-		}
-	}
-	g.mu.RUnlock()
-
-	// Generate a deterministic RA-TLS certificate.
-	cert, notAfter, err := g.issueDeterministic(hello)
-	if err != nil {
-		return nil, err
-	}
-
-	// Cache it.
-	g.mu.Lock()
-	g.cache[sni] = &cachedCert{cert: cert, notAfter: notAfter}
-	g.mu.Unlock()
-
-	return cert, nil
-}
-
-// issueDeterministic generates a deterministic RA-TLS certificate for a
-// non-challenge connection. The ReportData binding is
-// SHA-512(SHA-256(pubkey) || creation_time) where creation_time is the
-// NotBefore value truncated to 1-minute precision.
-func (g *RATLSCertGetter) issueDeterministic(hello *tls.ClientHelloInfo) (*tls.Certificate, time.Time, error) {
-	// Generate ephemeral ECDSA P-256 key pair.
-	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("ra_tls: ephemeral key generation failed: %w", err)
-	}
-
-	// ReportData = SHA-512(SHA-256(pubkey) || creation_time).
-	pubKeyDER, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
-	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("ra_tls: failed to marshal public key: %w", err)
-	}
-	creationTime := time.Now().UTC().Truncate(time.Minute)
-	creationTimeStr := creationTime.Format(reportTimeFormat)
-	gpuEv, gpuSum, gpuOK := loadGPUEvidence(g.GPUEvidenceDir)
-	reportData := computeReportData(pubKeyDER, gpuBinding([]byte(creationTimeStr), gpuSum, gpuOK))
-
-	// Generate attestation evidence.
-	rawQuote, err := g.attester.Quote(reportData)
-	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("ra_tls[%s]: %w", g.attester.Name(), err)
-	}
-
-	g.logger.Info("attestation evidence generated",
-		zap.String("backend", g.attester.Name()),
-		zap.Int("quote_bytes", len(rawQuote)),
-		zap.String("creation_time", creationTimeStr),
-		zap.String("report_data_algo", "SHA-512(SHA-256(pubkey) || time)"))
-
-	// Build certificate template.
-	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("ra_tls: serial number generation failed: %w", err)
-	}
-
-	extraExts := []pkix.Extension{
-		g.attester.CertExtension(rawQuote),
-	}
-	if gpuOK {
-		extraExts = append(extraExts, gpuExtension(gpuEv))
-	}
-	hostExts, err := g.loadHostnameExtensions(hello.ServerName)
-	if err != nil {
-		return nil, time.Time{}, err
-	}
-	extraExts = append(extraExts, hostExts...)
-
-	// Resolve the cert name. Empty ServerName means the client did not
-	// send SNI — typically a Go HTTP client dialing an https://IP:port URL,
-	// because crypto/tls.hostnameInSNI strips IP literals per RFC 6066.
-	// Caddy then keys the on-demand certificate lookup on the connection's
-	// LocalAddr.IP and rejects any cert whose SAN list does not contain
-	// that IP ("filling cert from leaf: certificate has no names"). We
-	// derive the cert's CN/SAN from the connection so empty/IP-literal SNI
-	// handshakes always succeed.
-	certCN := hello.ServerName
-	var dnsNames []string
-	var ipSANs []net.IP
-	if certCN != "" {
-		if ip := net.ParseIP(certCN); ip != nil {
-			ipSANs = append(ipSANs, ip)
-		} else {
-			dnsNames = []string{certCN}
-		}
-	}
-	if hello.Conn != nil {
-		if local, ok := hello.Conn.LocalAddr().(*net.TCPAddr); ok && local.IP != nil {
-			ipSANs = append(ipSANs, local.IP)
-			if certCN == "" {
-				certCN = local.IP.String()
-			}
-		}
-	}
-	if certCN == "" {
-		certCN = "enclave-default"
-	}
-
-	notAfter := creationTime.Add(24 * time.Hour)
-	template := &x509.Certificate{
-		SerialNumber: serialNumber,
-		Subject: pkix.Name{
-			CommonName: certCN,
-		},
-		DNSNames:    dnsNames,
-		IPAddresses: ipSANs,
-		NotBefore:   creationTime,
-		NotAfter:    notAfter,
-
-		KeyUsage: x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{
-			x509.ExtKeyUsageServerAuth,
-		},
-		BasicConstraintsValid: true,
-
-		ExtraExtensions: extraExts,
-	}
-
-	// Sign with the intermediary CA.
-	certDER, err := g.signCertificate(template, &privKey.PublicKey)
-	if err != nil {
-		return nil, time.Time{}, err
-	}
-	chainPEM := g.encodeChainPEM(certDER)
-
-	// Build tls.Certificate.
-	keyDER, err := x509.MarshalECPrivateKey(privKey)
-	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("ra_tls: failed to marshal private key: %w", err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-
-	tlsCert, err := tls.X509KeyPair(chainPEM, keyPEM)
-	if err != nil {
-		return nil, time.Time{}, fmt.Errorf("ra_tls: failed to build TLS certificate: %w", err)
-	}
-
-	g.logger.Info("RA-TLS certificate issued (CA-signed)",
-		zap.String("backend", g.attester.Name()),
-		zap.String("server_name", hello.ServerName),
-		zap.String("not_before", creationTimeStr),
-		zap.Time("not_after", notAfter))
-
-	return &tlsCert, notAfter, nil
-}
-
-// ---------------------------------------------------------------------------
-// Interface guards -- these are compile-time assertions.
-// ---------------------------------------------------------------------------
-
+// Interface guards.
 var (
-	_ caddy.Module           = (*RATLSIssuer)(nil)
-	_ caddy.Provisioner      = (*RATLSIssuer)(nil)
-	_ certmagic.Issuer       = (*RATLSIssuer)(nil)
-	_ certmagic.KeyGenerator = (*RATLSIssuer)(nil)
-	_ certmagic.Manager      = (*RATLSIssuer)(nil)
-	_ caddyfile.Unmarshaler  = (*RATLSIssuer)(nil)
-
-	_ caddy.Module      = (*RATLSCertGetter)(nil)
-	_ caddy.Provisioner = (*RATLSCertGetter)(nil)
-	_ certmagic.Manager = (*RATLSCertGetter)(nil)
+	_ caddy.Module          = (*RATLSCertGetter)(nil)
+	_ caddy.Provisioner     = (*RATLSCertGetter)(nil)
+	_ certmagic.Manager     = (*RATLSCertGetter)(nil)
+	_ caddyfile.Unmarshaler = (*RATLSCertGetter)(nil)
 )

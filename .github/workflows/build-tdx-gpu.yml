@@ -85,13 +85,6 @@ jobs:
           restore-keys: |
             mkosi-tdx-gpu-${{ runner.os }}-
 
-      - name: Install Privasys Go fork
-        run: |
-          curl -sL https://github.com/Privasys/go/releases/download/privasys-v0.5.2-go1.26.5/go-ratls-privasys-v0.5.2-go1.26.5-linux-amd64.tar.gz -o /tmp/go-ratls.tar.gz
-          sudo tar -C /usr/local -xzf /tmp/go-ratls.tar.gz
-          echo "/usr/local/go-ratls/bin" >> "$GITHUB_PATH"
-          /usr/local/go-ratls/bin/go version
-
       - name: Clone SDK siblings (go.mod replace directives)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -103,25 +96,14 @@ jobs:
           gh repo clone Privasys/enclave-vaults-client "$GITHUB_WORKSPACE/../../platform/enclave-vaults-client" -- --depth 1
 
       - name: Build manager binary
-        run: |
-          # -tags ratls: the vault key flow reads the vault's challenge
-          # nonce from tls.CertificateRequestInfo.RATLSChallenge (Privasys
-          # Go fork, installed above).
-          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
-            -tags ratls \
+        run: |          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
             -ldflags="-s -w" \
             -o build/image/mkosi.extra/usr/bin/manager \
             ./cmd/manager/
 
       - name: Build manager-bootstrap binary (Phase B first-boot helper)
-        run: |
-          # -tags ratls: the `dek` subcommand resolves the vault-backed
-          # /data DEK through internal/vaultkey (same fork requirement as
-          # the manager). Without it the stub clientcert_std.go fails every
-          # pre-approved first boot at LUKS time.
-          mkdir -p build/image/mkosi.extra/usr/sbin
+        run: |          mkdir -p build/image/mkosi.extra/usr/sbin
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
-            -tags ratls \
             -ldflags="-s -w" \
             -o build/image/mkosi.extra/usr/sbin/manager-bootstrap \
             ./cmd/manager-bootstrap/

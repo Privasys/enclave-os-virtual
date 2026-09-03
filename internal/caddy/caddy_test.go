@@ -105,10 +105,10 @@ func TestBuildConfigMutualRouteHasPeerHandler(t *testing.T) {
 		return nil
 	}
 
-	if got := handlerFor("m.example"); len(got) != 2 || got[0] != "privasys_peer_headers" || got[1] != "reverse_proxy" {
-		t.Fatalf("mutual route handlers = %v, want [privasys_peer_headers reverse_proxy]", got)
+	if got := handlerFor("m.example"); len(got) != 3 || got[0] != "privasys_attest" || got[1] != "privasys_peer_headers" || got[2] != "reverse_proxy" {
+		t.Fatalf("mutual route handlers = %v, want [privasys_attest privasys_peer_headers reverse_proxy]", got)
 	}
-	if got := handlerFor("s.example"); len(got) != 1 || got[0] != "reverse_proxy" {
-		t.Fatalf("server-auth route handlers = %v, want [reverse_proxy]", got)
+	if got := handlerFor("s.example"); len(got) != 2 || got[0] != "privasys_attest" || got[1] != "reverse_proxy" {
+		t.Fatalf("server-auth route handlers = %v, want [privasys_attest reverse_proxy]", got)
 	}
 }

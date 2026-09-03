@@ -43,10 +43,6 @@ func TestLoadGPUEvidencePresentBindsHash(t *testing.T) {
 	if !bytes.Equal(got, want) {
 		t.Fatalf("gpuBinding mismatch:\n got=%x\nwant=%x", got, want)
 	}
-	// The extension carries the raw envelope under the GPU OID.
-	if e := gpuExtension(ev); !e.Id.Equal(oidNVIDIAGPUEvidence) || !bytes.Equal(e.Value, evidence) {
-		t.Fatal("gpuExtension mismatch")
-	}
 }
 
 func TestLoadGPUEvidenceRejectsOversize(t *testing.T) {

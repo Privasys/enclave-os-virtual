@@ -175,30 +175,14 @@ func dialOptions(cfg Config, imageDigest, appID []byte, attToken string) (vault.
 	if err != nil {
 		return vault.DialOptions{}, fmt.Errorf("vaultkey: bad mrenclave hex: %w", err)
 	}
-	certFn, err := clientCertificateFn(imageDigest, appID)
-	if err != nil {
-		return vault.DialOptions{}, err
-	}
-	// One challenge nonce per resolution. Sent in the ClientHello: it (1)
-	// binds the vault's server quote to this connection via
-	// challenge-response, and (2) puts the vault into bidirectional-
-	// challenge mode so it issues its own challenge in the
-	// CertificateRequest — which the Tee client cert (clientCertificateFn)
-	// requires in order to be accepted.
-	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil {
-		return vault.DialOptions{}, fmt.Errorf("vaultkey: generate challenge nonce: %w", err)
-	}
+	certFn := clientCertificateFn(imageDigest, appID)
+	// Challenge mode (the SDK default): the vault's evidence is bound to this
+	// connection's exporter value and a fresh context, and the vault requires
+	// our own evidence for the presented identity (clientEvidenceFn).
 	return vault.DialOptions{
-		Challenge: nonce,
 		VaultPolicy: &ratls.VerificationPolicy{
 			TEE:       ratls.TeeTypeSGX,
 			MRENCLAVE: mre,
-			// Challenge-response: the vault binds our ClientHello nonce
-			// into its server-cert ReportData, proving the quote is fresh
-			// and bound to this connection (not a relayed capture).
-			ReportData: ratls.ReportDataChallengeResponse,
-			Nonce:      nonce,
 			QuoteVerification: &ratls.QuoteVerificationConfig{
 				Endpoint: cfg.AttestationServerURL,
 				// The attestation server requires an OIDC bearer; the
@@ -208,6 +192,7 @@ func dialOptions(cfg Config, imageDigest, appID []byte, attToken string) (vault.
 			},
 		},
 		GetClientCertificate: certFn,
+		ClientEvidence:       clientEvidenceFn(),
 	}, nil
 }
 

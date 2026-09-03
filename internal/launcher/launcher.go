@@ -27,7 +27,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509/pkix"
-	"encoding/asn1"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -608,6 +607,10 @@ type Launcher struct {
 	// container's identity. Loopback-only enforcement in the manager.
 	containerTokens map[string]string
 
+	// mintedIdentities maps container name → SPKI hash of each client
+	// identity minted for it → expiry (MintIdentity, ContainerOwnsIdentity).
+	mintedIdentities map[string]map[[32]byte]time.Time
+
 	// Loaded container specs (mirrors what is running).
 	specs map[string]manifest.Container
 
@@ -660,6 +663,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		failures:          make(map[string]string),
 		billingFrozen:     make(map[string]string),
 		containerTokens:   make(map[string]string),
+		mintedIdentities:  make(map[string]map[[32]byte]time.Time),
 		attestationTokens: make(map[string]string),
 		sovereignBranches: make(map[string][]byte),
 		readyCh:           make(chan struct{}),
@@ -2100,22 +2104,6 @@ func (l *Launcher) containerList() []manifest.Container {
 	return result
 }
 
-// PlatformExtensions returns the RA-TLS X.509 extensions for the
-// platform-wide certificate.
-func (l *Launcher) PlatformExtensions(quote []byte, quoteOID asn1.ObjectIdentifier) []pkix.Extension {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-
-	root := l.platformTree.Root()
-	var cdHash [32]byte
-	copy(cdHash[:], l.containerdHash)
-	var asHash *[32]byte
-	if l.hasAttestationServers {
-		asHash = &l.attestationServersHash
-	}
-	return oids.PlatformExtensions(quote, quoteOID, root, cdHash, l.combinedImgHash, l.dekOrigin, asHash)
-}
-
 // ContainerExtensions returns the RA-TLS X.509 extensions for a
 // per-container leaf certificate.
 func (l *Launcher) ContainerExtensions(containerName string) ([]pkix.Extension, error) {
@@ -2285,7 +2273,7 @@ func (l *Launcher) writePlatformExtensions() error {
 
 	// Build the extensions list (without the quote - the RA-TLS module adds that).
 	exts := []pkix.Extension{
-		oids.Extension(oids.PlatformConfigMerkleRoot, root[:]),
+		oids.Extension(oids.ConfigMerkleRoot, root[:]),
 		oids.Extension(oids.RuntimeVersionHash, cdHash[:]),
 		oids.Extension(oids.CombinedWorkloadsHash, l.combinedImgHash[:]),
 	}
@@ -2299,8 +2287,26 @@ func (l *Launcher) writePlatformExtensions() error {
 	if p := imageProfile(); p != "" {
 		exts = append(exts, oids.Extension(oids.ImageProfile, []byte(p)))
 	}
+	// Enclave Instance ID (OID 1.3): the management-service enclave_id this
+	// VM registered under, when the platform supplied it.
+	if id := enclaveIDBytes(l.cfg.ToolSpecEnclaveID); id != nil {
+		exts = append(exts, oids.Extension(oids.EnclaveInstanceID, id))
+	}
 
 	return extensions.Write(l.cfg.ExtensionsDir, l.cfg.PlatformHostname, exts, "")
+}
+
+// enclaveIDBytes parses a UUID string into its 16 raw bytes, or nil.
+func enclaveIDBytes(s string) []byte {
+	h := strings.ReplaceAll(strings.TrimSpace(s), "-", "")
+	if len(h) != 32 {
+		return nil
+	}
+	b, err := hex.DecodeString(h)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // writeContainerExtensions writes the per-container OID extensions to the
@@ -2585,13 +2591,14 @@ func (l *Launcher) LookupContainerByToken(token string) string {
 	return ""
 }
 
-// MintVaultIdentity mints a one-shot RA-TLS vault client identity for the named
-// container, bound to the vault's challenge nonce, and returns it PEM-encoded
-// (cert + key). The manager calls this after authenticating the caller's
+// MintIdentity mints the named container's RA-TLS v2 client identity (leaf
+// key, code digest OID 4.2, app id OID 4.1, no evidence) and returns it
+// PEM-encoded. The manager calls this after authenticating the caller's
 // container token, so the app id stamped is the one the platform assigned to
-// that container — an app cannot mint another app's identity. This is the same
-// identity the launcher mints for the per-app data key.
-func (l *Launcher) MintVaultIdentity(name string, challenge, channelBinder []byte) (certPEM, keyPEM []byte, err error) {
+// that container. The identity's SPKI hash is remembered for its validity so
+// the manager only mints client evidence (ContainerOwnsIdentity) for keys it
+// issued to that container.
+func (l *Launcher) MintIdentity(name string) (certPEM, keyPEM []byte, err error) {
 	l.mu.RLock()
 	digest := l.imageDigests[name]
 	appID := l.appIDs[name]
@@ -2599,11 +2606,31 @@ func (l *Launcher) MintVaultIdentity(name string, challenge, channelBinder []byt
 	if len(digest) == 0 {
 		return nil, nil, fmt.Errorf("launcher: unknown container %q", name)
 	}
-	cert, err := vaultkey.MintIdentity(challenge, channelBinder, digest, appID)
+	id, err := vaultkey.MintIdentity(digest, appID)
 	if err != nil {
 		return nil, nil, err
 	}
-	return vaultkey.EncodeIdentityPEM(cert)
+	l.mu.Lock()
+	if l.mintedIdentities[name] == nil {
+		l.mintedIdentities[name] = make(map[[32]byte]time.Time)
+	}
+	for h, exp := range l.mintedIdentities[name] {
+		if time.Now().After(exp) {
+			delete(l.mintedIdentities[name], h)
+		}
+	}
+	l.mintedIdentities[name][id.SPKIHash] = id.NotAfter
+	l.mu.Unlock()
+	return vaultkey.EncodeIdentityPEM(id.Cert)
+}
+
+// ContainerOwnsIdentity reports whether spkiHash is the key of an unexpired
+// identity minted for the named container.
+func (l *Launcher) ContainerOwnsIdentity(name string, spkiHash [32]byte) bool {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	exp, ok := l.mintedIdentities[name][spkiHash]
+	return ok && time.Now().Before(exp)
 }
 
 // mintContainerToken returns a fresh 32-byte hex-encoded random token.
