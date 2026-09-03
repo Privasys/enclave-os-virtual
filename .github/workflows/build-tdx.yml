@@ -82,13 +82,15 @@ jobs:
           gh repo clone Privasys/enclave-vaults-client "$GITHUB_WORKSPACE/../../platform/enclave-vaults-client" -- --depth 1
 
       - name: Build manager binary
-        run: |          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
             -ldflags="-s -w" \
             -o build/image/mkosi.extra/usr/bin/manager \
             ./cmd/manager/
 
       - name: Build manager-bootstrap binary (Phase B first-boot helper)
-        run: |          mkdir -p build/image/mkosi.extra/usr/sbin
+        run: |
+          mkdir -p build/image/mkosi.extra/usr/sbin
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
             -ldflags="-s -w" \
             -o build/image/mkosi.extra/usr/sbin/manager-bootstrap \
