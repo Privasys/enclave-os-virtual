@@ -1182,7 +1182,7 @@ func (m *Manager) StartHealthChecks(ctx context.Context, mc *ManagedContainer, o
 }
 
 // ContainerdVersionHash returns the SHA-256 hash of the containerd server
-// version string. This is embedded in OID 1.3.6.1.4.1.65230.2.4.
+// version string. This is embedded in OID 1.3.6.1.4.1.65230.1.1.
 func (m *Manager) ContainerdVersionHash(ctx context.Context) ([]byte, error) {
 	ctx = m.ctx(ctx)
 	version, err := m.client.Version(ctx)

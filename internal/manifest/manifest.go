@@ -353,7 +353,7 @@ func (c *Container) ContainerMerkleTree(imageDigest []byte) *merkle.Tree {
 
 // CombinedImagesHash computes a single SHA-256 hash covering all container
 // image digests (sorted by container name). This is the value embedded in
-// OID 1.3.6.1.4.1.65230.2.5.
+// OID 1.3.6.1.4.1.65230.2.4.
 func CombinedImagesHash(containers []Container, imageDigests map[string][]byte) [32]byte {
 	// Sort by name.
 	sorted := make([]Container, len(containers))
