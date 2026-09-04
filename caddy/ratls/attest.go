@@ -8,6 +8,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -270,9 +272,12 @@ func (h *Attest) serveEvidence(w http.ResponseWriter, r *http.Request, g *RATLSC
 
 	c := connFor(r.RemoteAddr, true)
 	c.tag = req.Mode
-	// A caller that presented a client certificate must prove it: a mutual
-	// leg. The context is remembered for the present message.
-	if len(r.TLS.PeerCertificates) > 0 {
+	// A caller whose client certificate claims a fleet identity (the workload
+	// app-id extension) must prove it: a mutual leg, and the context is
+	// remembered for the present message. A bare key-holder certificate (a CLI
+	// user with a holder-of-key grant) claims no enclave identity, gets no
+	// evidence demand and no Tee principal.
+	if len(r.TLS.PeerCertificates) > 0 && leafClaimsEnclaveIdentity(r.TLS.PeerCertificates[0]) {
 		cc := make([]byte, contextLen)
 		if _, err := rand.Read(cc); err != nil {
 			h.fail(w, http.StatusInternalServerError, "rng")
@@ -293,6 +298,22 @@ func (h *Attest) serveEvidence(w http.ResponseWriter, r *http.Request, g *RATLSC
 		zap.String("mode", req.Mode),
 		zap.String("remote", r.RemoteAddr),
 		zap.Bool("client_evidence_required", resp.ClientEvidence == "required"))
+}
+
+// workloadAppIDOID is 1.3.6.1.4.1.65230.4.1 (internal/oids.WorkloadAppID; the
+// Caddy module cannot import the root module's internal package).
+var workloadAppIDOID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 65230, 4, 1}
+
+// leafClaimsEnclaveIdentity reports whether a client leaf carries the workload
+// app-id extension (OID 1.3.6.1.4.1.65230.4.1), i.e. claims to be a
+// fleet-minted enclave identity that must be backed by evidence.
+func leafClaimsEnclaveIdentity(leaf *x509.Certificate) bool {
+	for _, ext := range leaf.Extensions {
+		if ext.Id.Equal(workloadAppIDOID) {
+			return true
+		}
+	}
+	return false
 }
 
 // acceptClientEvidence forwards a present message, with this connection's
