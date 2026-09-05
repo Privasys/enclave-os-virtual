@@ -806,13 +806,50 @@ func isHostCaller(host string) bool {
 	if isLoopbackHost(host) {
 		return true
 	}
-	// Compare parsed IPs, never strings: the management API listens dual-stack,
-	// so a dial to the IPv4 bridge gateway (10.88.0.1, what Caddy uses for every
-	// workload route) arrives as the IPv4-mapped form "::ffff:10.88.0.1" on the
-	// v6 socket. net.IP.Equal treats that as equal to the plain v4 address; a
-	// string compare does not, which silently 403'd every mutual RA-TLS caller.
 	ip := net.ParseIP(host)
-	return ip != nil && ip.Equal(net.ParseIP(network.GatewayIP))
+	if ip == nil {
+		return false
+	}
+	if ip.Equal(net.ParseIP(network.GatewayIP)) {
+		return true
+	}
+	// Measured on a live host (2026-09-05): a dial from the host to the bridge
+	// gateway 10.88.0.1 (what Caddy uses for every workload route) is sourced
+	// from the VM's PRIMARY interface address (10.200.x.y on GCE), not from the
+	// bridge address and not from loopback. "From the host" therefore means
+	// "from any address configured on one of this VM's interfaces"; containers
+	// live on the 10.88.0.0/16 subnet with their own addresses and never match.
+	return isLocalInterfaceAddr(ip)
+}
+
+var (
+	localAddrsMu   sync.Mutex
+	localAddrs     []net.IP
+	localAddrsSeen time.Time
+)
+
+// isLocalInterfaceAddr reports whether ip is assigned to a local interface,
+// refreshing the cached list every 30 s (addresses change on Spot restarts).
+func isLocalInterfaceAddr(ip net.IP) bool {
+	localAddrsMu.Lock()
+	defer localAddrsMu.Unlock()
+	if time.Since(localAddrsSeen) > 30*time.Second {
+		localAddrs = localAddrs[:0]
+		if addrs, err := net.InterfaceAddrs(); err == nil {
+			for _, a := range addrs {
+				if ipn, ok := a.(*net.IPNet); ok {
+					localAddrs = append(localAddrs, ipn.IP)
+				}
+			}
+		}
+		localAddrsSeen = time.Now()
+	}
+	for _, a := range localAddrs {
+		if a.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // isInEnclaveCaller returns true for a loopback caller (the host) or one from
