@@ -290,7 +290,7 @@ func (v *ingressVerifier) verifyPeerEvidence(req *peerEvidenceRequest) error {
 // present message here. Reachable from the host only.
 func (s *Server) handlePeerEvidence(w http.ResponseWriter, r *http.Request) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil || !isLoopbackHost(host) {
+	if err != nil || !isHostCaller(host) {
 		s.jsonError(w, http.StatusForbidden, "this endpoint is reachable only from the host")
 		return
 	}

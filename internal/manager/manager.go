@@ -797,6 +797,15 @@ func isLoopbackHost(host string) bool {
 // bridgeSubnet is the container network's CIDR, parsed once.
 var _, bridgeSubnet, _ = net.ParseCIDR(network.Subnet)
 
+// isHostCaller returns true for the host itself: a loopback address, or the
+// bridge gateway address, which is what Caddy dials for every workload route
+// (launcher: caddyUpstream = network.GatewayIP + ":" + mgmtPort). The
+// peer-evidence endpoint must accept the latter or no mutual RA-TLS caller
+// can ever be verified.
+func isHostCaller(host string) bool {
+	return isLoopbackHost(host) || host == network.GatewayIP
+}
+
 // isInEnclaveCaller returns true for a loopback caller (the host) or one from
 // the container bridge subnet (a co-resident container in its own netns, #45).
 func isInEnclaveCaller(host string) bool {
@@ -1488,7 +1497,6 @@ func (s *Server) handleSetConfigComplete(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
-
 
 // handleSetAttestationServers handles PUT /api/v1/attestation-servers.
 // It replaces the attestation server list (URLs and optional bearer tokens)
