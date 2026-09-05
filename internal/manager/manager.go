@@ -803,7 +803,16 @@ var _, bridgeSubnet, _ = net.ParseCIDR(network.Subnet)
 // peer-evidence endpoint must accept the latter or no mutual RA-TLS caller
 // can ever be verified.
 func isHostCaller(host string) bool {
-	return isLoopbackHost(host) || host == network.GatewayIP
+	if isLoopbackHost(host) {
+		return true
+	}
+	// Compare parsed IPs, never strings: the management API listens dual-stack,
+	// so a dial to the IPv4 bridge gateway (10.88.0.1, what Caddy uses for every
+	// workload route) arrives as the IPv4-mapped form "::ffff:10.88.0.1" on the
+	// v6 socket. net.IP.Equal treats that as equal to the plain v4 address; a
+	// string compare does not, which silently 403'd every mutual RA-TLS caller.
+	ip := net.ParseIP(host)
+	return ip != nil && ip.Equal(net.ParseIP(network.GatewayIP))
 }
 
 // isInEnclaveCaller returns true for a loopback caller (the host) or one from
