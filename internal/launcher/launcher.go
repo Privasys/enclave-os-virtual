@@ -201,6 +201,9 @@ type LoadRequest struct {
 	// manager-owned; updatable at runtime via the set-dependencies API,
 	// which re-mints the leaf without restarting the container.
 	Dependencies *ratls.DependencySet `json:"dependencies,omitempty"`
+	// ResourceDecls: user-owned resources the app declares (P1); consent is the
+	// runtime's (P2). Recorded on the spec; nothing is granted by loading.
+	ResourceDecls []ResourceDecl `json:"resource_decls,omitempty"`
 
 	// HealthCheck defines how to verify the container is ready.
 	HealthCheck *manifest.HealthCheck `json:"health_check,omitempty"`
