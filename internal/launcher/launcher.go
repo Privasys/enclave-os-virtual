@@ -1279,9 +1279,19 @@ func (l *Launcher) ingressAttestationToken() string {
 		l.log.Warn("ingress verifier: failed to fetch attestation-server token", zap.Error(err))
 		return ""
 	}
+	// Cache for at most 5 minutes, and never past the token's own expiry:
+	// mgmt vends its cached service token, which may have only a minute
+	// left, and a verifier that kept it for 5 minutes presented an expired
+	// bearer to the attestation server (401) and refused every caller.
+	exp := time.Now().Add(5 * time.Minute)
+	if tokExp, ok := bearerExpiry(tok); ok {
+		if early := tokExp.Add(-30 * time.Second); early.Before(exp) {
+			exp = early
+		}
+	}
 	l.mu.Lock()
 	l.ingressAttTok = tok
-	l.ingressAttExp = time.Now().Add(5 * time.Minute)
+	l.ingressAttExp = exp
 	l.mu.Unlock()
 	return tok
 }
