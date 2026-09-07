@@ -609,6 +609,11 @@ type Launcher struct {
 	// (attestation-extensions, config-complete) to the calling
 	// container's identity. Loopback-only enforcement in the manager.
 	containerTokens map[string]string
+	// resourceDecls maps container name → the user-owned resources its
+	// manifest declares (P1). The manager brokers consent for them (P2):
+	// only a declared resource can be requested, and only for a container
+	// that declared it.
+	resourceDecls map[string][]ResourceDecl
 
 	// mintedIdentities maps container name → SPKI hash of each client
 	// identity minted for it → expiry (MintIdentity, ContainerOwnsIdentity).
@@ -666,6 +671,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		failures:          make(map[string]string),
 		billingFrozen:     make(map[string]string),
 		containerTokens:   make(map[string]string),
+		resourceDecls:     make(map[string][]ResourceDecl),
 		mintedIdentities:  make(map[string]map[[32]byte]time.Time),
 		attestationTokens: make(map[string]string),
 		sovereignBranches: make(map[string][]byte),
@@ -1666,6 +1672,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	if appID := parseAppID(req.AppId); appID != nil {
 		l.appIDs[req.Name] = appID
 	}
+	if len(req.ResourceDecls) > 0 {
+		l.resourceDecls[req.Name] = req.ResourceDecls
+	} else {
+		delete(l.resourceDecls, req.Name) // idempotent reload with the block removed
+	}
 	if volEncryption != "" {
 		l.volumeEncryption[req.Name] = volEncryption
 	}
@@ -1837,6 +1848,7 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	l.freezeMu.Unlock()
 	l.clearFailure(name)
 	delete(l.containerTokens, name)
+	delete(l.resourceDecls, name)
 
 	// Garbage-collect the image if no other loaded container references it.
 	// Frees disk on the enclave so old/abandoned images do not accumulate.

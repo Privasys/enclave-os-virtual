@@ -157,6 +157,13 @@ type Config struct {
 	// no attribute marketplace.
 	MgmtBaseURL  string
 	EnclaveToken string
+	// CapabilityStateDir holds the per-app resource-capability binding keys
+	// and outcomes (P2). Keep it on the encrypted /data volume; empty keeps
+	// them in memory (dev/test only).
+	CapabilityStateDir string
+	// StorageResourceApp is the app id (undashed hex) of the resource service
+	// for storage.folder capabilities (Privasys Drive on this fleet).
+	StorageResourceApp string
 }
 
 // Server is the management API server.
@@ -178,6 +185,8 @@ type Server struct {
 	// appHosts maps container Hostname → loopback upstream (e.g.
 	// "localhost:8000"). Populated by the launcher via RegisterAppHost.
 	appHosts sync.Map // map[string]string
+	// caps brokers resource capabilities for the loaded apps (capabilities.go).
+	caps *capabilityBroker
 
 	// staticUnsealed maps lowercased Hostname → []string path prefixes that
 	// the session-relay may serve in the CLEAR on the gateway-terminated leg
@@ -255,6 +264,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 	// the launcher (updated at runtime via PUT /api/v1/attestation-servers) and
 	// permits dev-image callers only when this VM itself runs a dev image.
 	s.ingress = newIngressVerifier(s.log, l.PrimaryAttestationServer, isDevImageProfile())
+	s.caps = newCapabilityBroker(cfg.CapabilityStateDir, s.log)
 	// Teach the launcher's image GC the FULL desired image set (every app in
 	// the registry), so a concurrent replay never prunes a sibling's cached
 	// image before that sibling loads. Without this the GC evicts an image an
@@ -295,6 +305,9 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		if r.Method == http.MethodGet &&
 			(r.URL.Path == "/healthz" || r.URL.Path == "/readiness") {
 			return false
+		}
+		if strings.HasPrefix(r.URL.Path, capabilityWellKnown) {
+			return false // the wallet's attested fetch is plain HTTPS by design
 		}
 		// Opt-in public static UI: an app that serves its own browser shell
 		// from the enclave declares its HTML/JS/CSS prefixes (measured image
@@ -569,6 +582,12 @@ func (s *Server) Start(ctx context.Context) error {
 	// Caddy forwards a caller's present message here (host only); the verdict
 	// is recorded per connection for the ingress gate.
 	mux.HandleFunc("POST /api/v1/peer-evidence", s.handlePeerEvidence)
+	// Resource capabilities (P2): an app asks the manager, over loopback, to
+	// obtain the holder's consent for a resource its manifest declares; the
+	// manager holds the binding key, pushes the wallet and serves it.
+	mux.HandleFunc("POST /api/v1/resources/sign", s.handleResourceSign)
+	mux.HandleFunc("POST /api/v1/resources/{resource}/request", s.handleResourceRequest)
+	mux.HandleFunc("GET /api/v1/resources/{resource}/status", s.handleResourceStatus)
 
 	// TLS certificate rotation (require manager role).
 	mux.HandleFunc("PUT /api/v1/tls", s.requireAuth(s.handleUpdateTLS))
@@ -588,6 +607,15 @@ func (s *Server) Start(ctx context.Context) error {
 	dispatcher := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := hostOnly(r.Host)
 		if _, ok := s.lookupAppHost(host); ok {
+			// Wallet-facing capability endpoints live on the app's hostname but
+			// are answered by the manager for any app that declares resources
+			// (before the ingress gate: the wallet presents no client cert).
+			if strings.HasPrefix(r.URL.Path, capabilityWellKnown) {
+				if name := s.launcher.AppHostnameToContainer(host); name != "" && len(s.launcher.ContainerResourceDecls(name)) > 0 {
+					s.serveCapabilityWellKnown(w, r, name)
+					return
+				}
+			}
 			// Ingress mutual RA-TLS gate: for a host that declares an
 			// allowed-caller set, verify the attested caller certificate Caddy
 			// handed over (quote signature + measurement + app-id/code-hash OIDs

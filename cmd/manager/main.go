@@ -276,6 +276,9 @@ func runServe(args []string) error {
 		// fleet mgmt URL + enclave bearer (same credential as check-in).
 		MgmtBaseURL:  *rsMgmtURL,
 		EnclaveToken: *rsEnclaveToken,
+		// Resource-capability state (P2) lives beside the registry on /data.
+		CapabilityStateDir: "/data/manager-capabilities",
+		StorageResourceApp: storageResourceApp(*rsMgmtURL),
 	}
 	srv := manager.New(mgrCfg, log, l, verifier)
 
@@ -375,4 +378,18 @@ func walletJWKSURL(override, issuer string) string {
 		return ""
 	}
 	return strings.TrimRight(issuer, "/") + "/wallet-provider/jwks"
+}
+
+// storageResourceApp names the Drive instance that serves storage.folder
+// capabilities on this fleet (undashed app id, the wallet resolves it by
+// identity). Override with PRIVASYS_STORAGE_RESOURCE_APP; otherwise the
+// test fleet (a mgmt URL under the test domain) maps to the dev Drive.
+func storageResourceApp(mgmtURL string) string {
+	if v := os.Getenv("PRIVASYS_STORAGE_RESOURCE_APP"); v != "" {
+		return v
+	}
+	if strings.Contains(mgmtURL, ".test.") || strings.Contains(mgmtURL, "api-test") {
+		return "02104572ca2f41e8ae2d24c0294e6f5e" // drive-demo (dev)
+	}
+	return "cf7a0d585468416884c341ebe0ce4025" // privasys-drive (prod)
 }

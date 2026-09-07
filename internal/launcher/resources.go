@@ -12,3 +12,23 @@ type ResourceDecl struct {
 	Permissions []string `json:"permissions"`
 	Mount       string   `json:"mount,omitempty"`
 }
+
+// ContainerResourceDecls returns the resources a loaded container declared
+// in its manifest (a copy; nil when it declared none).
+func (l *Launcher) ContainerResourceDecls(name string) []ResourceDecl {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	decls := l.resourceDecls[name]
+	if len(decls) == 0 {
+		return nil
+	}
+	return append([]ResourceDecl(nil), decls...)
+}
+
+// ContainerHostname returns the public hostname a loaded container serves
+// on, or "" when unknown.
+func (l *Launcher) ContainerHostname(name string) string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.specs[name].Hostname
+}
