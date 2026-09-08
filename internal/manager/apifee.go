@@ -49,11 +49,20 @@ func (s *Server) priceForRequest(containerName string, r *http.Request) (apifees
 	return pt, ok
 }
 
+// onBehalfOfHeader names the end user an attested peer app acts for. It is
+// honoured only behind a manager-verified peer verdict (hdrPeerVerified,
+// set by the ingress verifier and stripped from every other request): an
+// allowed caller binds its acting user in its own measured code, so the
+// value is as trustworthy as the peer identity. That user, not the app,
+// then pays for a priced call ("the user pays", decision 2026-09-08).
+const onBehalfOfHeader = "X-Privasys-On-Behalf-Of"
+
 // callerIdentity resolves who is calling, for charge attribution. A
 // verified platform bearer wins: its sub is the platform-pairwise one the
-// ledger can map to an account. Fallback is the relay-asserted
-// X-Privasys-Sub, set exclusively by the session-relay middleware after an
-// EncAuth bootstrap.
+// ledger can map to an account. Next is the user an attested peer app
+// names (onBehalfOfHeader, behind the peer verdict). Fallback is the
+// relay-asserted X-Privasys-Sub, set exclusively by the session-relay
+// middleware after an EncAuth bootstrap.
 //
 // Deliberately NOT a source of the wallet exemption. A session that a
 // wallet once approved is an ordinary paying caller; only a call the
@@ -68,6 +77,11 @@ func (s *Server) callerIdentity(r *http.Request) string {
 	}
 	if tok != "" && s.verifier != nil {
 		if sub, _, err := s.verifier.AuthenticateCaller(tok); err == nil && sub != "" {
+			return sub
+		}
+	}
+	if r.Header.Get(hdrPeerVerified) == "true" {
+		if sub := strings.TrimSpace(r.Header.Get(onBehalfOfHeader)); sub != "" {
 			return sub
 		}
 	}
