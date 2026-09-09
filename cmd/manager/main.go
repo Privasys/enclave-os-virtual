@@ -243,6 +243,7 @@ func runServe(args []string) error {
 		ToolSpecEnclaveToken: *rsEnclaveToken,
 		LoadToken:            *loadToken,
 		IsolationUserns:      *isolationUserns,
+		Issuer:               *oidcIssuer,
 	}
 	// Bring up the container bridge + egress NAT + manager-port guard before
 	// any container is loaded or the management API binds (#45). Fatal on

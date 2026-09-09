@@ -150,7 +150,10 @@ type Event struct {
 	Function  string `json:"function"`
 	CallID    string `json:"call_id"`
 	CallerSub string `json:"caller_sub,omitempty"`
-	Credits   uint64 `json:"credits"`
+	// PayerApp is the app the caller authorised to spend for them (the
+	// spend token's azp), when the call carried one.
+	PayerApp string `json:"payer_app,omitempty"`
+	Credits  uint64 `json:"credits"`
 }
 
 // Store is the bounded, persisted fee-event ring. Events are appended on
@@ -205,6 +208,12 @@ func Open(path string, log *zap.Logger) *Store {
 
 // Record appends one fee event and returns it.
 func (s *Store) Record(app, function, callerSub string, credits uint64) Event {
+	return s.RecordFor(app, function, callerSub, "", credits)
+}
+
+// RecordFor is Record with the spender app (the spend token's azp, undashed
+// hex) the fee counts against for the payer's per-app monthly cap.
+func (s *Store) RecordFor(app, function, callerSub, payerApp string, credits uint64) Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.seq++
@@ -214,6 +223,7 @@ func (s *Store) Record(app, function, callerSub string, credits uint64) Event {
 		Function:  function,
 		CallID:    newCallID(),
 		CallerSub: callerSub,
+		PayerApp:  payerApp,
 		Credits:   credits,
 	}
 	s.events = append(s.events, ev)

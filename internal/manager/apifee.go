@@ -18,6 +18,8 @@ import (
 
 	"go.uber.org/zap"
 
+	"enclave-os-mini/clients/go/spend"
+
 	"github.com/Privasys/enclave-os-virtual/internal/apifees"
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
 )
@@ -79,6 +81,12 @@ func (s *Server) callerIdentity(r *http.Request) string {
 		if sub, _, err := s.verifier.AuthenticateCaller(tok); err == nil && sub != "" {
 			return sub
 		}
+	}
+	// A verified spend token names the paying user outright (spendgate.go
+	// asserted it after verifying token, proof and billability; the header
+	// is stripped from every other request).
+	if sub := strings.TrimSpace(r.Header.Get(spend.HeaderPayer)); sub != "" {
+		return sub
 	}
 	if r.Header.Get(hdrPeerVerified) == "true" {
 		if sub := strings.TrimSpace(r.Header.Get(onBehalfOfHeader)); sub != "" {
@@ -151,7 +159,8 @@ func (s *Server) serveAppBilled(w http.ResponseWriter, r *http.Request, containe
 	// Charge only on delivery: a failed call costs nothing. status 0 means
 	// the handler wrote a body with no explicit status — an implicit 200.
 	if bw.status == 0 || (bw.status >= 200 && bw.status < 300) {
-		ev := s.apiFees.Record(containerName, pt.Tool, sub, rule.Credits)
+		ev := s.apiFees.RecordFor(containerName, pt.Tool, sub,
+			strings.TrimSpace(r.Header.Get(spend.HeaderPayerApp)), rule.Credits)
 		s.log.Info("api fee recorded",
 			zap.String("container", containerName),
 			zap.String("tool", pt.Tool),

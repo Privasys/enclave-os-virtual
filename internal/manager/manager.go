@@ -226,6 +226,11 @@ type Server struct {
 	// RegisterIngressPolicy.
 	ingress *ingressVerifier
 
+	// spend verifies spend tokens (the paying user behind a call) on every
+	// app-host request and asserts X-Privasys-Peer-Payer* to the app; see
+	// spendgate.go. Independent of ingress pinning.
+	spend *spendGate
+
 	// sovereignSealFn overrides the launcher's SovereignSealKey in tests;
 	// nil in production (the handler falls back to s.launcher).
 	sovereignSealFn func(name string) (key, imageDigest []byte, err error)
@@ -264,6 +269,9 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 	// the launcher (updated at runtime via PUT /api/v1/attestation-servers) and
 	// permits dev-image callers only when this VM itself runs a dev image.
 	s.ingress = newIngressVerifier(s.log, l.PrimaryAttestationServer, isDevImageProfile())
+	// Spend-token gate: verifies against the same IdP the sealed relay
+	// trusts, asks mgmt (enclave bearer) whether the payer may spend.
+	s.spend = newSpendGate(s.log, cfg.IdpIssuer, cfg.MgmtBaseURL, cfg.EnclaveToken)
 	s.caps = newCapabilityBroker(cfg.CapabilityStateDir, s.log)
 	// Teach the launcher's image GC the FULL desired image set (every app in
 	// the registry), so a concurrent replay never prunes a sibling's cached
@@ -489,6 +497,9 @@ func (s *Server) Start(ctx context.Context) error {
 		s.log.Warn("registry replay failed", zap.Error(err))
 	}
 
+	// Revoked-consent feed for the spend gate (no-op without an IdP).
+	go s.spend.runRevokedPoller(ctx)
+
 	mux := http.NewServeMux()
 
 	// Liveness probe — always unauthenticated (used by infra health checks).
@@ -642,6 +653,18 @@ func (s *Server) Start(ctx context.Context) error {
 			containerName := s.launcher.AppHostnameToContainer(host)
 			if containerName != "" {
 				st := s.launcher.ContainerFreezeState(containerName)
+				// Spend-token gate (spendgate.go): name the paying user
+				// behind the call, or refuse a bad token (403) or a payer
+				// who may not spend (402). Runs after the ingress verifier
+				// (which scrubbed the peer namespace) so the payer headers
+				// it asserts are the only ones the app can ever see.
+				if code, err := s.spend.enforce(r, host, st.AppID); code != 0 {
+					if code == http.StatusPaymentRequired {
+						w.Header().Set("X-Privasys-Payer-Refused", "true")
+					}
+					s.jsonError(w, code, err.Error())
+					return
+				}
 				// Billing freeze (credits exhausted): the container task is
 				// paused, so reject all of its traffic with 503 + reason.
 				// Attestation is served outside this app-host path, so the

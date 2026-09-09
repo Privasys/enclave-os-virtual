@@ -129,6 +129,11 @@ type Config struct {
 	ToolSpecEnclaveID    string
 	ToolSpecEnclaveToken string
 
+	// Issuer is the platform identity provider (the manager's OIDC
+	// issuer), injected as PRIVASYS_ISSUER so an app fetches spend tokens
+	// from the IdP this fleet trusts without per-app configuration.
+	Issuer string
+
 	// LoadToken, when non-empty, is injected as the per-container env
 	// var LOAD_TOKEN. confidential-ai requires it as the Bearer
 	// credential on /v1/models/{load,unload}; without it those
@@ -391,15 +396,15 @@ func (r *LoadRequest) Validate() error {
 // separately via OID 3.4.
 func (r *LoadRequest) toContainerSpec() manifest.Container {
 	spec := manifest.Container{
-		Name:        r.Name,
-		Image:       r.Image,
-		Port:        r.Port,
-		Volumes:     r.Volumes,
-		Command:     r.Command,
-		Internal:    r.Internal,
-		HealthCheck:           rewriteHealthCheckHost(r.HealthCheck, r.Port),
-		Storage:               r.Storage,
-		Devices:               r.Devices,
+		Name:                    r.Name,
+		Image:                   r.Image,
+		Port:                    r.Port,
+		Volumes:                 r.Volumes,
+		Command:                 r.Command,
+		Internal:                r.Internal,
+		HealthCheck:             rewriteHealthCheckHost(r.HealthCheck, r.Port),
+		Storage:                 r.Storage,
+		Devices:                 r.Devices,
 		IngressAllowedCallers:   r.IngressAllowedCallers,
 		IngressAllowedPlatforms: r.IngressAllowedPlatforms,
 		Dependencies:            r.Dependencies,
@@ -1612,6 +1617,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// as themselves use it to ask the platform to delegate key ops to their TEE.
 	if req.AppId != "" {
 		runtimeEnv["PRIVASYS_APP_ID"] = req.AppId
+	}
+	// The identity provider this fleet trusts, for spend tokens (the app
+	// fetches one per signed-in user from <issuer>/spend/token).
+	if l.cfg.Issuer != "" {
+		runtimeEnv["PRIVASYS_ISSUER"] = strings.TrimRight(l.cfg.Issuer, "/")
 	}
 	// The verified image digest (hex SHA-256) — the same value attested at
 	// OID 3.2. Lets an app stamp its own measurement into artifacts it signs
