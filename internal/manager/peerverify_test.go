@@ -69,7 +69,7 @@ func TestEnforceMutualHostWithoutCertPassesAnonymously(t *testing.T) {
 	v := newTestVerifier()
 	v.setPolicy("app.example", &ratls.DependencySet{
 		Entries: []ratls.DependencyEntry{{AppID: "deadbeef"}},
-	})
+	}, nil)
 
 	r, _ := http.NewRequest("GET", "http://app.example/", nil)
 	r.Host = "app.example"
@@ -95,7 +95,7 @@ func TestEnforceMutualHostWithBadCertRejects(t *testing.T) {
 	v := newTestVerifier()
 	v.setPolicy("app.example", &ratls.DependencySet{
 		Entries: []ratls.DependencyEntry{{AppID: "deadbeef"}},
-	})
+	}, nil)
 
 	r, _ := http.NewRequest("GET", "http://app.example/", nil)
 	r.Host = "app.example"
@@ -114,17 +114,42 @@ func TestSetPolicyStoreAndRemove(t *testing.T) {
 	if _, ok := v.policyFor("app.example"); ok {
 		t.Fatal("no policy expected initially")
 	}
-	v.setPolicy("App.Example", &ratls.DependencySet{Entries: []ratls.DependencyEntry{{AppID: "x"}}})
+	v.setPolicy("App.Example", &ratls.DependencySet{Entries: []ratls.DependencyEntry{{AppID: "x"}}}, nil)
 	if _, ok := v.policyFor("app.example"); !ok {
 		t.Fatal("policy should be found case-insensitively")
 	}
-	v.setPolicy("app.example", nil)
+	v.setPolicy("app.example", nil, nil)
 	if _, ok := v.policyFor("app.example"); ok {
 		t.Fatal("nil policy should remove the entry")
 	}
-	v.setPolicy("app.example", &ratls.DependencySet{}) // empty entries
+	v.setPolicy("app.example", &ratls.DependencySet{}, nil) // empty entries
 	if _, ok := v.policyFor("app.example"); ok {
 		t.Fatal("empty-entry policy should be treated as no policy")
+	}
+}
+
+// The wildcard is honoured only with a platform allow-list: without one it
+// is dropped and the pinned entries stay; alone, it leaves no policy at all.
+func TestSetPolicyWildcardNeedsPlatforms(t *testing.T) {
+	v := newTestVerifier()
+	wild := ratls.DependencyEntry{AppID: anyCallerAppID}
+	pinned := ratls.DependencyEntry{AppID: "x"}
+
+	v.setPolicy("a.example", &ratls.DependencySet{Entries: []ratls.DependencyEntry{wild, pinned}}, nil)
+	p, ok := v.policyFor("a.example")
+	if !ok || p.admitsAnyCaller() || len(p.set.Entries) != 1 || p.set.Entries[0].AppID != "x" {
+		t.Fatalf("wildcard without platforms must be dropped, pinned entry kept: %+v", p)
+	}
+
+	v.setPolicy("b.example", &ratls.DependencySet{Entries: []ratls.DependencyEntry{wild}}, nil)
+	if _, ok := v.policyFor("b.example"); ok {
+		t.Fatal("a lone wildcard without platforms must leave no policy")
+	}
+
+	v.setPolicy("c.example", &ratls.DependencySet{Entries: []ratls.DependencyEntry{wild}}, []string{"d4602590b11c770aa7b9ee404649e802"})
+	p, ok = v.policyFor("c.example")
+	if !ok || !p.admitsAnyCaller() || len(p.platforms) != 1 {
+		t.Fatalf("wildcard with platforms must be installed: %+v", p)
 	}
 }
 

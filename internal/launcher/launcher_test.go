@@ -24,7 +24,7 @@ type fakeAppHostRouter struct {
 
 func (*fakeAppHostRouter) RegisterAppHost(string, string)                      {}
 func (*fakeAppHostRouter) UnregisterAppHost(string)                            {}
-func (*fakeAppHostRouter) RegisterIngressPolicy(string, *ratls.DependencySet)  {}
+func (*fakeAppHostRouter) RegisterIngressPolicy(string, *ratls.DependencySet, []string) {}
 func (*fakeAppHostRouter) SetSessionRelayIdentityKeySeed(string, []byte) error { return nil }
 func (*fakeAppHostRouter) SetStaticUnsealedPrefixes(string, []string)          {}
 func (f *fakeAppHostRouter) SetExpectedWorkloadDigest(_ string, d [32]byte) {

@@ -71,8 +71,33 @@ type ingressVerifier struct {
 	allowDebugImages bool
 
 	mu       sync.RWMutex
-	policies map[string]*ratls.DependencySet // lowercase host → allowed callers
-	verdicts map[string]*peerVerdict         // connection id → verdict
+	policies map[string]*ingressPolicy // lowercase host → allowed callers
+	verdicts map[string]*peerVerdict   // connection id → verdict
+}
+
+// anyCallerAppID is the allowed-caller entry that admits ANY attested caller
+// carrying an app id, provided its quote comes from one of the host's
+// allowed platforms. It is the owner saying "I charge whoever calls, I do
+// not pin them": the caller's identity still reaches the app as verified
+// X-Privasys-Peer-* headers, and what the app does with an unknown app id
+// (refuse, or bill it) stays the app's decision.
+const anyCallerAppID = "*"
+
+// ingressPolicy is one host's allowed-caller set plus the platform
+// allow-list every caller's quote is checked against.
+type ingressPolicy struct {
+	set       *ratls.DependencySet
+	platforms []string
+}
+
+// admitsAnyCaller reports whether the set holds the wildcard entry.
+func (p *ingressPolicy) admitsAnyCaller() bool {
+	for i := range p.set.Entries {
+		if p.set.Entries[i].AppID == anyCallerAppID {
+			return true
+		}
+	}
+	return false
 }
 
 func newIngressVerifier(log *zap.Logger, attServer func() (string, string), allowDebugImages bool) *ingressVerifier {
@@ -80,14 +105,16 @@ func newIngressVerifier(log *zap.Logger, attServer func() (string, string), allo
 		log:              log.Named("ingress-verify"),
 		attServer:        attServer,
 		allowDebugImages: allowDebugImages,
-		policies:         make(map[string]*ratls.DependencySet),
+		policies:         make(map[string]*ingressPolicy),
 		verdicts:         make(map[string]*peerVerdict),
 	}
 }
 
 // setPolicy installs (or, with a nil policy, removes) the allowed-caller set for
 // a host. Called by the launcher via the manager's RegisterIngressPolicy.
-func (v *ingressVerifier) setPolicy(host string, policy *ratls.DependencySet) {
+// A wildcard entry without a platform allow-list is dropped here, loudly:
+// the host keeps mutual auth for its pinned entries and admits nobody else.
+func (v *ingressVerifier) setPolicy(host string, policy *ratls.DependencySet, platforms []string) {
 	h := strings.ToLower(host)
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -95,11 +122,27 @@ func (v *ingressVerifier) setPolicy(host string, policy *ratls.DependencySet) {
 		delete(v.policies, h)
 		return
 	}
-	v.policies[h] = policy
+	p := &ingressPolicy{set: policy, platforms: platforms}
+	if p.admitsAnyCaller() && len(platforms) == 0 {
+		kept := make([]ratls.DependencyEntry, 0, len(policy.Entries))
+		for _, e := range policy.Entries {
+			if e.AppID != anyCallerAppID {
+				kept = append(kept, e)
+			}
+		}
+		v.log.Warn("allowed-caller wildcard ignored: no platform allow-list (fail closed)",
+			zap.String("host", h))
+		if len(kept) == 0 {
+			delete(v.policies, h)
+			return
+		}
+		p.set = &ratls.DependencySet{Entries: kept}
+	}
+	v.policies[h] = p
 }
 
-// policyFor returns the allowed-caller set for a host, if it is a mutual-auth host.
-func (v *ingressVerifier) policyFor(host string) (*ratls.DependencySet, bool) {
+// policyFor returns the allowed-caller policy for a host, if it is a mutual-auth host.
+func (v *ingressVerifier) policyFor(host string) (*ingressPolicy, bool) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	p, ok := v.policies[strings.ToLower(host)]
@@ -229,14 +272,19 @@ func (v *ingressVerifier) verifyPeerEvidence(req *peerEvidenceRequest) error {
 	}
 	// Step 1: quote signature (Intel DCAP, via the attestation server) and the
 	// binding of report_data to the caller's leaf key, the client context and
-	// this connection's exporter value, with no measurement pinned.
+	// this connection's exporter value, with no measurement pinned. The
+	// owner's platform allow-list, when set, is enforced here on EVERY caller
+	// (the attestation server checks it too): it is what makes a caller's
+	// self-asserted app id worth anything on the wildcard path, and an owner
+	// who lists platforms lists the ones their pinned callers run on.
 	base := &ratls.VerificationPolicy{
 		TEE: ratls.TeeTypeTDX,
 		QuoteVerification: &ratls.QuoteVerificationConfig{
 			Endpoint: attURL,
 			Token:    attToken,
 		},
-		AllowDebugImages: v.allowDebugImages,
+		AllowDebugImages:   v.allowDebugImages,
+		AllowedPlatformIDs: policy.platforms,
 	}
 	info, err := ratls.VerifyEvidence(cert, ev, base)
 	if err != nil {
@@ -244,12 +292,17 @@ func (v *ingressVerifier) verifyPeerEvidence(req *peerEvidenceRequest) error {
 	}
 
 	// Step 2: match the (now trusted) evidence and OIDs against an
-	// allowed-caller entry whose app-id matches the caller.
+	// allowed-caller entry whose app-id matches the caller. Pinned entries
+	// are tried first; the wildcard admits whoever is left, as long as the
+	// caller names an app at all (an anonymous workload has nobody to bill).
 	callerAppID := oidFromInfoRaw(info, ratls.OidWorkloadAppID)
 	var lastErr error
 	matchedEntry := false
-	for i := range policy.Entries {
-		entry := policy.Entries[i]
+	for i := range policy.set.Entries {
+		entry := policy.set.Entries[i]
+		if entry.AppID == anyCallerAppID {
+			continue
+		}
 		if entry.AppID != "" && !appIDMatches(entry.AppID, callerAppID) {
 			continue
 		}
@@ -260,6 +313,12 @@ func (v *ingressVerifier) verifyPeerEvidence(req *peerEvidenceRequest) error {
 		} else {
 			lastErr = err
 		}
+	}
+	if !matchedEntry && policy.admitsAnyCaller() {
+		if len(callerAppID) == 0 {
+			return fmt.Errorf("caller carries no app id (OID %s); the wildcard admits attested apps only", ratls.OidWorkloadAppID)
+		}
+		matchedEntry, lastErr = true, nil
 	}
 	if !matchedEntry {
 		return fmt.Errorf("no allowed-caller entry matches caller app-id %s", hex.EncodeToString(callerAppID))
@@ -349,9 +408,10 @@ func appIDMatches(entryAppID string, callerAppID []byte) bool {
 }
 
 // RegisterIngressPolicy installs the per-host allowed-caller policy for an
-// ingress mutual-RA-TLS app. Passing nil disables verification for the host.
-func (s *Server) RegisterIngressPolicy(hostname string, policy *ratls.DependencySet) {
-	s.ingress.setPolicy(hostname, policy)
+// ingress mutual-RA-TLS app, with the owner's platform allow-list. Passing a
+// nil policy disables verification for the host.
+func (s *Server) RegisterIngressPolicy(hostname string, policy *ratls.DependencySet, platforms []string) {
+	s.ingress.setPolicy(hostname, policy, platforms)
 }
 
 // -- container identity and evidence (v2) ------------------------------------

@@ -401,7 +401,7 @@ func (s *Server) UnregisterAppHost(hostname string) {
 	s.appHosts.Delete(hostname)
 	s.staticUnsealed.Delete(hostname)
 	s.sessionRelay.ClearExpectedWorkloadDigest(hostname)
-	s.ingress.setPolicy(hostname, nil)
+	s.ingress.setPolicy(hostname, nil, nil)
 	s.log.Info("app host unregistered", zap.String("hostname", hostname))
 }
 

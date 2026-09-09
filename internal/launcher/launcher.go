@@ -194,6 +194,15 @@ type LoadRequest struct {
 	// X-Privasys-Peer-* identity headers (see manifest.Container). Platform-
 	// supplied and manager-owned; the app can never self-declare it.
 	IngressAllowedCallers *ratls.DependencySet `json:"ingress_allowed_callers,omitempty"`
+	// IngressAllowedPlatforms is the owner's platform allow-list for the
+	// callers above: the physical machines (Platform Instance ID, else PPID
+	// or CHIP_ID, as the attestation server reports them) a caller's quote
+	// may come from. Required when IngressAllowedCallers holds the "*" entry
+	// (any attested caller): a quote proves a genuine TEE, not whose, and
+	// the app id in a caller's certificate is asserted by that caller's own
+	// runtime, so without the platform check any TEE anywhere could name an
+	// app, and a paying user, of its choosing.
+	IngressAllowedPlatforms []string `json:"ingress_allowed_platforms,omitempty"`
 
 	// Dependencies is the container's DIRECT attested dependency set,
 	// stamped into the serving leaf at OID 65230.6.1 (see
@@ -391,8 +400,9 @@ func (r *LoadRequest) toContainerSpec() manifest.Container {
 		HealthCheck:           rewriteHealthCheckHost(r.HealthCheck, r.Port),
 		Storage:               r.Storage,
 		Devices:               r.Devices,
-		IngressAllowedCallers: r.IngressAllowedCallers,
-		Dependencies:          r.Dependencies,
+		IngressAllowedCallers:   r.IngressAllowedCallers,
+		IngressAllowedPlatforms: r.IngressAllowedPlatforms,
+		Dependencies:            r.Dependencies,
 	}
 	if r.Resources != nil {
 		spec.ResourceVCPUs = r.Resources.VCPUs
@@ -989,8 +999,10 @@ type AppHostRouter interface {
 	// caller certificate (handed over by Caddy as X-Privasys-Peer-Cert-Der +
 	// X-Privasys-Peer-Channel-Binder) against this policy and annotates the
 	// request with verified X-Privasys-Peer-* identity headers, or rejects it.
-	// Passing nil disables ingress verification for the host.
-	RegisterIngressPolicy(hostname string, policy *ratls.DependencySet)
+	// platforms is the owner's platform allow-list, enforced on every
+	// caller's quote (see ContainerLoadRequest.IngressAllowedPlatforms).
+	// Passing a nil policy disables ingress verification for the host.
+	RegisterIngressPolicy(hostname string, policy *ratls.DependencySet, platforms []string)
 	// SetSessionRelayIdentityKeySeed installs the vault-resolved
 	// session-relay identity key (enc_pub) for an app's Host from its
 	// 32-byte seed, so that app's enc_pub is stable across same-measurement
@@ -1773,7 +1785,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 			if mutualAuth {
 				// Register the per-host allowed-caller policy so the manager can
 				// verify the attested caller identity on every request to this app.
-				l.appHostRouter.RegisterIngressPolicy(spec.Hostname, spec.IngressAllowedCallers)
+				l.appHostRouter.RegisterIngressPolicy(spec.Hostname, spec.IngressAllowedCallers, spec.IngressAllowedPlatforms)
 			}
 		}
 	}

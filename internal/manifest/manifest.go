@@ -131,6 +131,14 @@ type Container struct {
 	// NOT measured: whom an app is willing to accept is authorization policy,
 	// set at deploy time, not workload code identity.
 	IngressAllowedCallers *ratls.DependencySet `yaml:"ingress_allowed_callers,omitempty"`
+	// IngressAllowedPlatforms is the owner's platform allow-list for those
+	// callers (the machines their quotes may come from). An entry with
+	// app_id "*" in IngressAllowedCallers admits ANY attested caller that
+	// carries an app id, and is only honoured together with this list: the
+	// app id is asserted by the caller's own runtime, so the platform is
+	// what makes it trustworthy. Manager-owned and NOT measured, like the
+	// caller set.
+	IngressAllowedPlatforms []string `yaml:"ingress_allowed_platforms,omitempty"`
 
 	// Dependencies is the container's set of DIRECT attested cross-enclave
 	// dependencies (the egress counterpart of IngressAllowedCallers, same
