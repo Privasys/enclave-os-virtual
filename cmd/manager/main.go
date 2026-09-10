@@ -279,7 +279,7 @@ func runServe(args []string) error {
 		EnclaveToken: *rsEnclaveToken,
 		// Resource-capability state (P2) lives beside the registry on /data.
 		CapabilityStateDir: "/data/manager-capabilities",
-		ResourceApps:       resourceApps(*rsMgmtURL),
+		ResourceApps:       resourceApps(),
 	}
 	srv := manager.New(mgrCfg, log, l, verifier)
 
@@ -381,32 +381,28 @@ func walletJWKSURL(override, issuer string) string {
 	return strings.TrimRight(issuer, "/") + "/wallet-provider/jwks"
 }
 
-// resourceApps names the resource service for each capability kind on this
-// fleet, by undashed app id, which the wallet resolves by identity.
+// resourceApps is the OPERATOR OVERRIDE for which app serves a capability
+// kind on this fleet, keyed by kind, valued by undashed app id.
 //
-// Operator configuration and never the asking app's: an app that could name
-// its own resource service could point the holder at one it controls, and the
-// consent screen would look identical. A kind with no entry here cannot be
-// asked for at all, which is how a fleet that has not deployed a connector
-// stays unable to consent to one.
+// It carries no defaults and names no product, deliberately. Which app serves
+// "storage.folder" or "mail.mailbox" is not something a generic runtime should
+// know: a table of product app ids compiled in here would mean shipping a
+// connector required a runtime release, and it would put a specific company's
+// product catalogue inside an operating system. The control plane stamps the
+// app id onto each resource declaration it forwards at deploy, and the runtime
+// relays it (see manager.resourceAppFor).
 //
-// Overrides: PRIVASYS_RESOURCE_APPS as "kind=appid,kind=appid", and the older
-// PRIVASYS_STORAGE_RESOURCE_APP, which still names the storage.folder entry
-// and wins over the general form so existing fleet configs keep working.
-func resourceApps(mgmtURL string) map[string]string {
-	test := strings.Contains(mgmtURL, ".test.") || strings.Contains(mgmtURL, "api-test")
-
+// This exists only for a fleet whose control plane does not stamp yet, and is
+// expected to be deleted once none are left. PRIVASYS_RESOURCE_APPS is
+// "kind=appid,kind=appid"; PRIVASYS_STORAGE_RESOURCE_APP is the older spelling
+// of the storage.folder entry and still wins, so existing fleet configuration
+// keeps working untouched.
+//
+// It is never the asking app's to supply: an app that could name its own
+// resource service could point the holder at one it controls, and the consent
+// screen would look identical.
+func resourceApps() map[string]string {
 	apps := map[string]string{}
-	if test {
-		apps["storage.folder"] = "02104572ca2f41e8ae2d24c0294e6f5e" // drive-demo (dev)
-		apps["mail.mailbox"] = "7958ba28a8d440f1873a925c15b87aa8"   // mail-connector (dev)
-	} else {
-		apps["storage.folder"] = "cf7a0d585468416884c341ebe0ce4025" // privasys-drive (prod)
-		// No mail connector on prod yet. Deliberately absent rather than
-		// pointed at the dev one: a wrong entry here would send a holder's
-		// consent to the wrong enclave.
-	}
-
 	// Split on the separators rather than parsing: a malformed entry should
 	// be ignored, not take the manager down at boot over a fleet env var.
 	for _, pair := range strings.Split(os.Getenv("PRIVASYS_RESOURCE_APPS"), ",") {
@@ -417,7 +413,12 @@ func resourceApps(mgmtURL string) map[string]string {
 		}
 	}
 	if v := os.Getenv("PRIVASYS_STORAGE_RESOURCE_APP"); v != "" {
-		apps["storage.folder"] = v
+		apps[capabilityKindStorageFolder] = v
 	}
 	return apps
 }
+
+// capabilityKindStorageFolder appears here only to keep the legacy
+// PRIVASYS_STORAGE_RESOURCE_APP variable meaning what it always meant. It is
+// the one kind literal left in the runtime and goes with that variable.
+const capabilityKindStorageFolder = "storage.folder"

@@ -11,6 +11,22 @@ type ResourceDecl struct {
 	Label       string   `json:"label"`
 	Permissions []string `json:"permissions"`
 	Mount       string   `json:"mount,omitempty"`
+
+	// ResourceApp is the app id of the service that will mint this
+	// capability, stamped by the CONTROL PLANE and never read from the app's
+	// own manifest.
+	//
+	// It arrives here rather than being looked up because this is a generic
+	// runtime: which product serves "mail.mailbox" on which fleet is not
+	// something an operating system should know, and a table of product app
+	// ids compiled into it would have to be edited and re-rolled for every
+	// connector anyone ever ships.
+	//
+	// Never the app's to supply: an app that could name its own resource
+	// service could point the holder at one it controls, and the consent
+	// screen would look identical. The control plane strips any value the
+	// manifest carried before stamping its own.
+	ResourceApp string `json:"resource_app,omitempty"`
 }
 
 // ContainerResourceDecls returns the resources a loaded container declared

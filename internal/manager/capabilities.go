@@ -364,6 +364,8 @@ type capabilityDecl struct {
 	Name        string
 	Label       string
 	Permissions []string
+	// ResourceApp is stamped by the control plane; see resourceAppFor.
+	ResourceApp string
 }
 
 // ---- App-facing loopback endpoints -------------------------------------
@@ -376,22 +378,33 @@ func (s *Server) resourceDecl(container, resource string) (capabilityDecl, bool)
 			if label == "" {
 				label = d.Name
 			}
-			return capabilityDecl{Kind: d.Kind, Name: d.Name, Label: label, Permissions: d.Permissions}, true
+			return capabilityDecl{Kind: d.Kind, Name: d.Name, Label: label, Permissions: d.Permissions, ResourceApp: d.ResourceApp}, true
 		}
 	}
 	return capabilityDecl{}, false
 }
 
-// resourceAppFor names the resource service for a capability kind by
+// resourceAppFor names the resource service for a declared resource, by
 // IDENTITY (the wallet resolves it; a URL in the payload would let an app
 // point the holder anywhere).
 //
-// The mapping is fleet configuration, not something the asking app supplies:
-// see Config.ResourceApps. An unmapped kind returns "" and the caller refuses
-// the ask, so a fleet that has not deployed a connector cannot be talked into
-// consenting to one.
-func (s *Server) resourceAppFor(kind string) string {
-	return s.cfg.ResourceApps[kind]
+// The runtime does not decide this and deliberately knows no product: the
+// CONTROL PLANE stamps the app id onto the declaration it forwards at deploy.
+// A table of connector app ids compiled in here would make shipping a
+// connector a runtime release, and would put "which product serves mail" in
+// an operating system, which is the wrong layer for it.
+//
+// Config.ResourceApps remains only as an OPERATOR OVERRIDE for a fleet whose
+// control plane does not stamp yet. It is keyed by kind, carries no defaults,
+// and is expected to disappear once every fleet's control plane is current.
+//
+// An unresolved kind returns "" and the caller refuses the ask, so a fleet
+// with no service for a kind cannot be talked into consenting to one.
+func (s *Server) resourceAppFor(decl capabilityDecl) string {
+	if decl.ResourceApp != "" {
+		return decl.ResourceApp
+	}
+	return s.cfg.ResourceApps[decl.Kind]
 }
 
 // handleResourceRequest starts (or reports) an ask for the calling
@@ -420,7 +433,7 @@ func (s *Server) handleResourceRequest(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusServiceUnavailable, "container has no platform app id")
 		return
 	}
-	resourceApp := s.resourceAppFor(decl.Kind)
+	resourceApp := s.resourceAppFor(decl)
 	if resourceApp == "" {
 		s.jsonError(w, http.StatusNotImplemented, "no resource service for kind "+decl.Kind)
 		return
@@ -473,7 +486,7 @@ func (s *Server) handleResourceStatus(w http.ResponseWriter, r *http.Request) {
 		"kind":         decl.Kind,
 		"permissions":  decl.Permissions,
 		"label":        decl.Label,
-		"resource_app": s.resourceAppFor(decl.Kind),
+		"resource_app": s.resourceAppFor(decl),
 	}
 	if g.usable() {
 		out["capability_id"] = g.CapabilityID
