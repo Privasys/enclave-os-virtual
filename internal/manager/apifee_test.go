@@ -67,31 +67,33 @@ func TestBilledResponseWriterImplicitOK(t *testing.T) {
 	}
 }
 
-// A verified attested peer naming the user it acts for is charged as that
-// user; the same header without the manager's verdict is ignored, and the
-// relay-asserted subject remains the fallback.
-func TestCallerIdentityOnBehalfOf(t *testing.T) {
+
+// An app-supplied acting user is never a payer, with or without the
+// manager's peer verdict: only a verified bearer, the spend-token payer the
+// gate asserted, or the relay-asserted subject can be charged.
+func TestCallerIdentityIgnoresAppSuppliedActingUser(t *testing.T) {
 	s := &Server{}
 
 	r := httptest.NewRequest("POST", "/tools/search", nil)
 	r.Header.Set(hdrPeerVerified, "true")
 	r.Header.Set(hdrPeerAppID, "590ebdc31b63401fbbb822d5f3886c5e")
-	r.Header.Set(onBehalfOfHeader, " user-pairwise-sub ")
-	if got := s.callerIdentity(r); got != "user-pairwise-sub" {
-		t.Fatalf("verified peer on behalf of user: got %q", got)
+	r.Header.Set("X-Privasys-On-Behalf-Of", "user-pairwise-sub")
+	if got := s.callerIdentity(r); got != "" {
+		t.Fatalf("verified peer naming a user must stay unattributable: got %q", got)
 	}
 
 	r = httptest.NewRequest("POST", "/tools/search", nil)
-	r.Header.Set(onBehalfOfHeader, "user-pairwise-sub")
+	r.Header.Set("X-Privasys-On-Behalf-Of", "user-pairwise-sub")
 	r.Header.Set("X-Privasys-Sub", "relay-user")
 	if got := s.callerIdentity(r); got != "relay-user" {
-		t.Fatalf("unverified on-behalf-of must not name a payer: got %q", got)
+		t.Fatalf("relay subject is the fallback: got %q", got)
 	}
 
 	r = httptest.NewRequest("POST", "/tools/search", nil)
 	r.Header.Set(hdrPeerVerified, "true")
-	r.Header.Set(hdrPeerAppID, "590ebdc31b63401fbbb822d5f3886c5e")
-	if got := s.callerIdentity(r); got != "" {
-		t.Fatalf("peer without on-behalf-of and without a relay subject is unattributable: got %q", got)
+	r.Header.Set("X-Privasys-On-Behalf-Of", "user-pairwise-sub")
+	r.Header.Set("X-Privasys-Peer-Payer", "payer-sub")
+	if got := s.callerIdentity(r); got != "payer-sub" {
+		t.Fatalf("spend-token payer wins: got %q", got)
 	}
 }
