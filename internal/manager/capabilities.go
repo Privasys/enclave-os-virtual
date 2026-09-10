@@ -206,6 +206,26 @@ func (b *capabilityBroker) sign(appID string, payload []byte) ([]byte, error) {
 	return ed25519.Sign(k, payload), nil
 }
 
+// capabilityRequestFor builds the opaque body the wallet forwards verbatim to
+// the resource service.
+//
+// It is kind-specific because the kinds genuinely differ: a folder capability
+// has to say WHICH folder, and a mailbox capability has nothing to name at
+// all, because the resource service derives the mailbox from the holder who
+// authenticated. Sending {"folder": ...} to a mail connector, which is what
+// this did while storage.folder was the only kind, would be a field it has no
+// use for in a payload it is required to treat as untrusted.
+//
+// Nothing here may name an ownership boundary: no user, no tenant, no account.
+// That is the resource service's to derive, and a connector that accepts being
+// told is one a caller can point at somebody else's data.
+func capabilityRequestFor(decl capabilityDecl) map[string]string {
+	if decl.Kind == capabilityKindFolder {
+		return map[string]string{"folder": decl.Label}
+	}
+	return map[string]string{}
+}
+
 // create registers an ask for one subject and returns it. The nonce is the
 // only secret in the flow before the wallet's attested fetch.
 func (b *capabilityBroker) create(container, appID, resourceApp, subject string, decl capabilityDecl) (*capabilityPending, error) {
@@ -216,7 +236,7 @@ func (b *capabilityBroker) create(container, appID, resourceApp, subject string,
 	if _, err := rand.Read(raw); err != nil {
 		return nil, err
 	}
-	req, err := json.Marshal(map[string]string{"folder": decl.Label})
+	req, err := json.Marshal(capabilityRequestFor(decl))
 	if err != nil {
 		return nil, err
 	}
@@ -365,11 +385,13 @@ func (s *Server) resourceDecl(container, resource string) (capabilityDecl, bool)
 // resourceAppFor names the resource service for a capability kind by
 // IDENTITY (the wallet resolves it; a URL in the payload would let an app
 // point the holder anywhere).
+//
+// The mapping is fleet configuration, not something the asking app supplies:
+// see Config.ResourceApps. An unmapped kind returns "" and the caller refuses
+// the ask, so a fleet that has not deployed a connector cannot be talked into
+// consenting to one.
 func (s *Server) resourceAppFor(kind string) string {
-	if kind == capabilityKindFolder {
-		return s.cfg.StorageResourceApp
-	}
-	return ""
+	return s.cfg.ResourceApps[kind]
 }
 
 // handleResourceRequest starts (or reports) an ask for the calling

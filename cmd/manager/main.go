@@ -279,7 +279,7 @@ func runServe(args []string) error {
 		EnclaveToken: *rsEnclaveToken,
 		// Resource-capability state (P2) lives beside the registry on /data.
 		CapabilityStateDir: "/data/manager-capabilities",
-		StorageResourceApp: storageResourceApp(*rsMgmtURL),
+		ResourceApps:       resourceApps(*rsMgmtURL),
 	}
 	srv := manager.New(mgrCfg, log, l, verifier)
 
@@ -381,16 +381,43 @@ func walletJWKSURL(override, issuer string) string {
 	return strings.TrimRight(issuer, "/") + "/wallet-provider/jwks"
 }
 
-// storageResourceApp names the Drive instance that serves storage.folder
-// capabilities on this fleet (undashed app id, the wallet resolves it by
-// identity). Override with PRIVASYS_STORAGE_RESOURCE_APP; otherwise the
-// test fleet (a mgmt URL under the test domain) maps to the dev Drive.
-func storageResourceApp(mgmtURL string) string {
+// resourceApps names the resource service for each capability kind on this
+// fleet, by undashed app id, which the wallet resolves by identity.
+//
+// Operator configuration and never the asking app's: an app that could name
+// its own resource service could point the holder at one it controls, and the
+// consent screen would look identical. A kind with no entry here cannot be
+// asked for at all, which is how a fleet that has not deployed a connector
+// stays unable to consent to one.
+//
+// Overrides: PRIVASYS_RESOURCE_APPS as "kind=appid,kind=appid", and the older
+// PRIVASYS_STORAGE_RESOURCE_APP, which still names the storage.folder entry
+// and wins over the general form so existing fleet configs keep working.
+func resourceApps(mgmtURL string) map[string]string {
+	test := strings.Contains(mgmtURL, ".test.") || strings.Contains(mgmtURL, "api-test")
+
+	apps := map[string]string{}
+	if test {
+		apps["storage.folder"] = "02104572ca2f41e8ae2d24c0294e6f5e" // drive-demo (dev)
+		apps["mail.mailbox"] = "7958ba28a8d440f1873a925c15b87aa8"   // mail-connector (dev)
+	} else {
+		apps["storage.folder"] = "cf7a0d585468416884c341ebe0ce4025" // privasys-drive (prod)
+		// No mail connector on prod yet. Deliberately absent rather than
+		// pointed at the dev one: a wrong entry here would send a holder's
+		// consent to the wrong enclave.
+	}
+
+	// Split on the separators rather than parsing: a malformed entry should
+	// be ignored, not take the manager down at boot over a fleet env var.
+	for _, pair := range strings.Split(os.Getenv("PRIVASYS_RESOURCE_APPS"), ",") {
+		kind, app, ok := strings.Cut(strings.TrimSpace(pair), "=")
+		kind, app = strings.TrimSpace(kind), strings.TrimSpace(app)
+		if ok && kind != "" && app != "" {
+			apps[kind] = app
+		}
+	}
 	if v := os.Getenv("PRIVASYS_STORAGE_RESOURCE_APP"); v != "" {
-		return v
+		apps["storage.folder"] = v
 	}
-	if strings.Contains(mgmtURL, ".test.") || strings.Contains(mgmtURL, "api-test") {
-		return "02104572ca2f41e8ae2d24c0294e6f5e" // drive-demo (dev)
-	}
-	return "cf7a0d585468416884c341ebe0ce4025" // privasys-drive (prod)
+	return apps
 }

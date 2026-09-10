@@ -161,9 +161,15 @@ type Config struct {
 	// and outcomes (P2). Keep it on the encrypted /data volume; empty keeps
 	// them in memory (dev/test only).
 	CapabilityStateDir string
-	// StorageResourceApp is the app id (undashed hex) of the resource service
-	// for storage.folder capabilities (Privasys Drive on this fleet).
-	StorageResourceApp string
+	// ResourceApps names the resource service for each capability kind, by
+	// app id (undashed hex), for this fleet.
+	//
+	// Keyed by kind and supplied by the OPERATOR rather than by the app that
+	// is asking. An app that could name its own resource service could point
+	// the holder at one it controls, and the wallet screen would look exactly
+	// the same. An unknown kind resolves to nothing and the ask is refused,
+	// which is the direction to fail in.
+	ResourceApps map[string]string
 }
 
 // Server is the management API server.

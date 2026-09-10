@@ -104,3 +104,47 @@ func TestCapabilityWellKnownScopedToContainer(t *testing.T) {
 		t.Fatalf("bad status: %d", rec.Code)
 	}
 }
+
+// The resource service for a kind is FLEET configuration. An app that could
+// name its own would point the holder at one it controls, behind a consent
+// screen that looked exactly the same; and a kind the fleet has not deployed
+// must be unaskable rather than defaulted to something plausible.
+func TestResourceAppComesFromTheFleetAndUnknownKindsRefuse(t *testing.T) {
+	s := &Server{cfg: Config{ResourceApps: map[string]string{
+		capabilityKindFolder: "cf7a0d58",
+		"mail.mailbox":       "7958ba28",
+	}}}
+	if got := s.resourceAppFor(capabilityKindFolder); got != "cf7a0d58" {
+		t.Fatalf("folder: %q", got)
+	}
+	if got := s.resourceAppFor("mail.mailbox"); got != "7958ba28" {
+		t.Fatalf("mailbox: %q", got)
+	}
+	if got := s.resourceAppFor("calendar.events"); got != "" {
+		t.Fatalf("an undeployed kind must resolve to nothing, got %q", got)
+	}
+	if got := (&Server{}).resourceAppFor(capabilityKindFolder); got != "" {
+		t.Fatalf("a fleet with no mapping must refuse everything, got %q", got)
+	}
+}
+
+// The opaque request is kind-specific: a folder capability has to say which
+// folder, and a mailbox capability has nothing to name, because the resource
+// service derives the mailbox from the holder who authenticated.
+func TestCapabilityRequestIsKindSpecific(t *testing.T) {
+	folder := capabilityRequestFor(capabilityDecl{Kind: capabilityKindFolder, Label: "Harness"})
+	if folder["folder"] != "Harness" {
+		t.Fatalf("folder request: %v", folder)
+	}
+	mailbox := capabilityRequestFor(capabilityDecl{Kind: "mail.mailbox", Label: "Mail Connector"})
+	if len(mailbox) != 0 {
+		t.Fatalf("a mailbox ask must name nothing, got %v", mailbox)
+	}
+	// The label must not leak into the body under another name either: it is
+	// rendered by the wallet from resource_label, not carried as a parameter.
+	for k, v := range mailbox {
+		if v == "Mail Connector" {
+			t.Fatalf("label leaked into the request as %q", k)
+		}
+	}
+}
