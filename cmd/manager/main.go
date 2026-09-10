@@ -394,9 +394,16 @@ func walletJWKSURL(override, issuer string) string {
 //
 // This exists only for a fleet whose control plane does not stamp yet, and is
 // expected to be deleted once none are left. PRIVASYS_RESOURCE_APPS is
-// "kind=appid,kind=appid"; PRIVASYS_STORAGE_RESOURCE_APP is the older spelling
-// of the storage.folder entry and still wins, so existing fleet configuration
-// keeps working untouched.
+// "kind=appid,kind=appid", and the runtime never reads the kind: it is a map
+// key it was handed, not a value it understands.
+//
+// The older PRIVASYS_STORAGE_RESOURCE_APP is deliberately NOT read. Honouring
+// it would mean writing "storage.folder" in here, and one product's vocabulary
+// compiled into every enclave on the fleet is exactly what this change exists
+// to remove. Operators express the same thing as
+// PRIVASYS_RESOURCE_APPS=storage.folder=<app id>, which the runtime treats as
+// an opaque pair. The roll is coordinated with the control-plane configuration
+// either way (see the sequencing note in know-how/mail-connector.md).
 //
 // It is never the asking app's to supply: an app that could name its own
 // resource service could point the holder at one it controls, and the consent
@@ -412,13 +419,5 @@ func resourceApps() map[string]string {
 			apps[kind] = app
 		}
 	}
-	if v := os.Getenv("PRIVASYS_STORAGE_RESOURCE_APP"); v != "" {
-		apps[capabilityKindStorageFolder] = v
-	}
 	return apps
 }
-
-// capabilityKindStorageFolder appears here only to keep the legacy
-// PRIVASYS_STORAGE_RESOURCE_APP variable meaning what it always meant. It is
-// the one kind literal left in the runtime and goes with that variable.
-const capabilityKindStorageFolder = "storage.folder"

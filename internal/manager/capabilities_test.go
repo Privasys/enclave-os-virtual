@@ -12,7 +12,9 @@ import (
 	"go.uber.org/zap"
 )
 
-var testDecl = capabilityDecl{Kind: capabilityKindFolder, Name: "storage", Label: "Harness", Permissions: []string{"read", "write"}}
+// A declaration as the control plane forwards one. The kind is a string the
+// runtime carries and never interprets; this one happens to be Drive's.
+var testDecl = capabilityDecl{Kind: "storage.folder", Name: "storage", Label: "Harness", Permissions: []string{"read", "write"}}
 
 // The key is per app, sealed on first use and stable across brokers on the
 // same directory: a redeploy must keep every approved capability valid.
@@ -50,7 +52,7 @@ func TestCapabilityFlowAndDenialSticks(t *testing.T) {
 	}
 	var req map[string]string
 	_ = json.Unmarshal(got.Capability.Request, &req)
-	if req["folder"] != "Harness" {
+	if req["label"] != "Harness" {
 		t.Fatalf("request %s", got.Capability.Request)
 	}
 	if _, _, err := b.resolve(p.Nonce, "denied", "", nil); err != nil {
@@ -115,10 +117,10 @@ func TestCapabilityWellKnownScopedToContainer(t *testing.T) {
 // something plausible.
 func TestResourceAppComesFromTheFleetAndUnknownKindsRefuse(t *testing.T) {
 	s := &Server{cfg: Config{ResourceApps: map[string]string{
-		capabilityKindFolder: "cf7a0d58",
-		"mail.mailbox":       "7958ba28",
+		"storage.folder": "cf7a0d58",
+		"mail.mailbox":   "7958ba28",
 	}}}
-	if got := s.resourceAppFor(capabilityDecl{Kind: capabilityKindFolder}); got != "cf7a0d58" {
+	if got := s.resourceAppFor(capabilityDecl{Kind: "storage.folder"}); got != "cf7a0d58" {
 		t.Fatalf("folder: %q", got)
 	}
 	if got := s.resourceAppFor(capabilityDecl{Kind: "mail.mailbox"}); got != "7958ba28" {
@@ -127,29 +129,31 @@ func TestResourceAppComesFromTheFleetAndUnknownKindsRefuse(t *testing.T) {
 	if got := s.resourceAppFor(capabilityDecl{Kind: "calendar.events"}); got != "" {
 		t.Fatalf("an undeployed kind must resolve to nothing, got %q", got)
 	}
-	if got := (&Server{}).resourceAppFor(capabilityDecl{Kind: capabilityKindFolder}); got != "" {
+	if got := (&Server{}).resourceAppFor(capabilityDecl{Kind: "storage.folder"}); got != "" {
 		t.Fatalf("a fleet with no mapping must refuse everything, got %q", got)
 	}
 }
 
-// The opaque request is kind-specific: a folder capability has to say which
-// folder, and a mailbox capability has nothing to name, because the resource
-// service derives the mailbox from the holder who authenticated.
-func TestCapabilityRequestIsKindSpecific(t *testing.T) {
-	folder := capabilityRequestFor(capabilityDecl{Kind: capabilityKindFolder, Label: "Harness"})
-	if folder["folder"] != "Harness" {
-		t.Fatalf("folder request: %v", folder)
-	}
-	mailbox := capabilityRequestFor(capabilityDecl{Kind: "mail.mailbox", Label: "Mail Connector"})
-	if len(mailbox) != 0 {
-		t.Fatalf("a mailbox ask must name nothing, got %v", mailbox)
-	}
-	// The label must not leak into the body under another name either: it is
-	// rendered by the wallet from resource_label, not carried as a parameter.
-	for k, v := range mailbox {
-		if v == "Mail Connector" {
-			t.Fatalf("label leaked into the request as %q", k)
+// The opaque request is the SAME SHAPE for every kind: the declared label,
+// under that generic name. What a service does with it is the service's
+// business — Drive makes a folder called that, a mail connector ignores it —
+// and neither meaning belongs in a runtime shared by every app on the fleet.
+//
+// This test exists because the previous version emitted {"folder": ...} for
+// storage.folder, so one product's vocabulary was compiled into every enclave.
+func TestCapabilityRequestCarriesTheLabelAndNoProductVocabulary(t *testing.T) {
+	for _, kind := range []string{"storage.folder", "mail.mailbox", "anything.at.all"} {
+		got := capabilityRequestFor(capabilityDecl{Kind: kind, Label: "Harness"})
+		if len(got) != 1 || got["label"] != "Harness" {
+			t.Fatalf("%s: want {label: Harness}, got %v", kind, got)
 		}
+		if _, ok := got["folder"]; ok {
+			t.Fatalf("%s: a product's word for the label reached the wire", kind)
+		}
+	}
+	// Nothing to say is said as nothing, not as an empty label.
+	if got := capabilityRequestFor(capabilityDecl{Kind: "mail.mailbox"}); len(got) != 0 {
+		t.Fatalf("an unlabelled declaration must name nothing, got %v", got)
 	}
 }
 

@@ -54,7 +54,6 @@ const (
 	capabilityWellKnown     = "/.well-known/privasys/capability-"
 	capabilityRequestPath   = "/.well-known/privasys/capability-request"
 	capabilityResultPath    = "/.well-known/privasys/capability-result"
-	capabilityKindFolder    = "storage.folder"
 	capabilityPushType      = "capability-request"
 	capabilityStatusPending = "pending"
 )
@@ -209,21 +208,25 @@ func (b *capabilityBroker) sign(appID string, payload []byte) ([]byte, error) {
 // capabilityRequestFor builds the opaque body the wallet forwards verbatim to
 // the resource service.
 //
-// It is kind-specific because the kinds genuinely differ: a folder capability
-// has to say WHICH folder, and a mailbox capability has nothing to name at
-// all, because the resource service derives the mailbox from the holder who
-// authenticated. Sending {"folder": ...} to a mail connector, which is what
-// this did while storage.folder was the only kind, would be a field it has no
-// use for in a payload it is required to treat as untrusted.
+// It carries the declared LABEL and nothing else, under that generic name.
+// The runtime does not know what a service will do with it: Drive makes a
+// folder called that, a mail connector ignores it, and neither meaning is the
+// runtime's to hold. This function used to emit {"folder": ...} for
+// storage.folder, which put one product's vocabulary — and its UX — inside
+// every enclave on the fleet.
+//
+// The label comes from the app's measured declaration and is the same string
+// the wallet renders, so what the holder approved and what the service is
+// asked for cannot drift apart.
 //
 // Nothing here may name an ownership boundary: no user, no tenant, no account.
-// That is the resource service's to derive, and a connector that accepts being
+// That is the resource service's to derive, and a service that accepts being
 // told is one a caller can point at somebody else's data.
 func capabilityRequestFor(decl capabilityDecl) map[string]string {
-	if decl.Kind == capabilityKindFolder {
-		return map[string]string{"folder": decl.Label}
+	if decl.Label == "" {
+		return map[string]string{}
 	}
-	return map[string]string{}
+	return map[string]string{"label": decl.Label}
 }
 
 // create registers an ask for one subject and returns it. The nonce is the
