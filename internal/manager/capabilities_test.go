@@ -179,3 +179,40 @@ func TestStampedResourceServiceWinsOverTheOperatorOverride(t *testing.T) {
 		t.Fatalf("a bare runtime must know no resource services, got %q", got)
 	}
 }
+
+// A grant approved under one permission set is not an answer to a manifest
+// that now declares another: the request path asks again (the old outcome
+// stands meanwhile), the status path says so, and an explicit retry from the
+// holder always re-asks. Outcomes recorded before permissions were kept are
+// treated as stale once, never as silently matching.
+func TestCapabilityReasksWhenPermissionsMoveOrOnRetry(t *testing.T) {
+	dir := t.TempDir()
+	b := newCapabilityBroker(dir, nil)
+	p, _ := b.create("ctr", "app1", "cf7a0d58", "sub-A", testDecl)
+	_, g, _ := b.resolve(p.Nonce, "approved", "cap-1", map[string]string{"tenant_id": "t", "node_id": "n"})
+	if !g.usable() || g.stale(testDecl) {
+		t.Fatalf("same permissions must not be stale: %+v", g)
+	}
+	reordered := testDecl
+	reordered.Permissions = []string{"Write", "read"}
+	if g.stale(reordered) {
+		t.Fatal("permission order and case carry no meaning")
+	}
+	wider := testDecl
+	wider.Permissions = []string{"read", "write", "delete"}
+	if !g.stale(wider) {
+		t.Fatal("a declaration asking for more must read as stale")
+	}
+	narrower := testDecl
+	narrower.Permissions = []string{"read"}
+	if !g.stale(narrower) {
+		t.Fatal("a declaration asking for less must read as stale too: the holder approved something else")
+	}
+	legacy := &capabilityGrant{Resource: "storage", CapabilityID: "cap-0", Status: "approved"}
+	if !legacy.stale(testDecl) {
+		t.Fatal("an outcome recorded without permissions must be re-asked once")
+	}
+	if b.granted("app1", "storage", "sub-A").Permissions[0] != "read" {
+		t.Fatal("the approved permissions must persist with the outcome")
+	}
+}

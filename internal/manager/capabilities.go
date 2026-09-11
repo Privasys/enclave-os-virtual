@@ -92,10 +92,46 @@ type capabilityGrant struct {
 	Status        string            `json:"status"`
 	ServiceResult map[string]string `json:"service_result,omitempty"`
 	At            time.Time         `json:"at"`
+	// Permissions is what the holder approved: the ask's permission set at
+	// the time. A declaration that later asks for more (or less) is a new
+	// question, not a granted one; see stale.
+	Permissions []string `json:"permissions,omitempty"`
 }
 
 func (g *capabilityGrant) usable() bool {
 	return g != nil && g.Status == "approved" && g.CapabilityID != ""
+}
+
+// stale reports a usable grant whose approved permissions are not the ones
+// the manifest declares now. An outcome recorded before permissions were
+// kept counts as stale: the runtime cannot vouch that what the holder
+// approved is what the app now asks, so it asks once more.
+func (g *capabilityGrant) stale(decl capabilityDecl) bool {
+	return g.usable() && !samePermissions(g.Permissions, decl.Permissions)
+}
+
+// samePermissions compares two permission sets as sets (order and case
+// carry no meaning in the wallet's vocabulary).
+func samePermissions(a, b []string) bool {
+	norm := func(in []string) map[string]bool {
+		out := map[string]bool{}
+		for _, p := range in {
+			if p = strings.ToLower(strings.TrimSpace(p)); p != "" {
+				out[p] = true
+			}
+		}
+		return out
+	}
+	na, nb := norm(a), norm(b)
+	if len(na) != len(nb) {
+		return false
+	}
+	for p := range na {
+		if !nb[p] {
+			return false
+		}
+	}
+	return true
 }
 
 func (g *capabilityGrant) denied() bool { return g != nil && g.Status == "denied" }
@@ -304,6 +340,7 @@ func (b *capabilityBroker) resolve(nonce, status, capabilityID string, result ma
 		Status:        status,
 		ServiceResult: result,
 		At:            time.Now().UTC(),
+		Permissions:   append([]string(nil), p.Capability.Permissions...),
 	}
 	key := grantKey(p.appID, p.resource, p.subject)
 	b.grants[key] = g
@@ -442,16 +479,26 @@ func (s *Server) handleResourceRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if g := s.caps.granted(appID, resource, body.Subject); g != nil {
-		if g.usable() {
+		switch {
+		case g.usable() && !body.Retry && !g.stale(decl):
 			s.writeJSON(w, http.StatusOK, map[string]any{
 				"status": "already_granted", "capability_id": g.CapabilityID,
 				"service_result": g.ServiceResult, "at": g.At,
 			})
 			return
-		}
-		// A refusal stands until the user reopens it: retry is the user
-		// changing their mind, never the app trying again.
-		if g.denied() && !body.Retry {
+		case g.usable():
+			// Ask afresh: the holder is reconnecting (a revoke made in the
+			// resource service is invisible here, so retry is how they say
+			// so) or the manifest now declares other permissions than the
+			// ones approved. The recorded outcome stands until the new one
+			// lands, so a holder who ignores the ask loses nothing.
+			s.log.Info("capability re-ask",
+				zap.String("container", name), zap.String("resource", resource),
+				zap.Bool("retry", body.Retry), zap.Strings("approved", g.Permissions),
+				zap.Strings("declared", decl.Permissions))
+		case g.denied() && !body.Retry:
+			// A refusal stands until the user reopens it: retry is the user
+			// changing their mind, never the app trying again.
 			s.writeJSON(w, http.StatusOK, map[string]any{"status": "declined", "at": g.At})
 			return
 		}
@@ -494,6 +541,11 @@ func (s *Server) handleResourceStatus(w http.ResponseWriter, r *http.Request) {
 	if g.usable() {
 		out["capability_id"] = g.CapabilityID
 		out["service_result"] = g.ServiceResult
+		// stale: approved under other permissions than the manifest now
+		// declares (or under permissions the runtime did not yet record).
+		// The app should ask again; the grant keeps working meanwhile.
+		out["stale"] = g.stale(decl)
+		out["granted_permissions"] = g.Permissions
 	}
 	s.writeJSON(w, http.StatusOK, out)
 }
