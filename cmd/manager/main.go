@@ -156,8 +156,6 @@ func runServe(args []string) error {
 		"Local confidential-ai proxy URL for /v1/models/status feed; empty disables the proxy feed")
 	rsInterval := fs.Duration("push-interval", 30*time.Second,
 		"Interval between runtime-status pushes")
-	loadToken := fs.String("load-token", os.Getenv("LOAD_TOKEN"),
-		"Bearer token injected into containers as LOAD_TOKEN to gate /v1/models/{load,unload}; empty leaves those endpoints unauthenticated (env: LOAD_TOKEN)")
 	isolationUserns := fs.Bool("isolation-userns", os.Getenv("PRIVASYS_ISOLATION_USERNS") == "true",
 		"Run each container in a user namespace (container-root -> unprivileged host uid). SHARED multi-tenant VMs only; leave off on dedicated/GPU VMs. EXPERIMENTAL/UNVALIDATED — validate on m2-dev before prod (env: PRIVASYS_ISOLATION_USERNS)")
 
@@ -241,7 +239,6 @@ func runServe(args []string) error {
 		ToolSpecMgmtURL:      *rsMgmtURL,
 		ToolSpecEnclaveID:    *rsEnclaveID,
 		ToolSpecEnclaveToken: *rsEnclaveToken,
-		LoadToken:            *loadToken,
 		IsolationUserns:      *isolationUserns,
 		Issuer:               *oidcIssuer,
 	}

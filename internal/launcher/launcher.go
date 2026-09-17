@@ -33,8 +33,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -134,16 +134,6 @@ type Config struct {
 	// issuer), injected as PRIVASYS_ISSUER so an app fetches spend tokens
 	// from the IdP this fleet trusts without per-app configuration.
 	Issuer string
-
-	// LoadToken, when non-empty, is injected as the per-container env
-	// var LOAD_TOKEN. confidential-ai requires it as the Bearer
-	// credential on /v1/models/{load,unload}; without it those
-	// endpoints run in legacy-open mode and any sealed-session client
-	// can unload the live model. Runtime secret: rides runtimeSpec.Env
-	// (same channel as PRIVASYS_CONTAINER_TOKEN), never the attested
-	// config Merkle tree. Sourced from the manager's --load-token
-	// (i.e. /data/manager.env).
-	LoadToken string
 
 	// IsolationUserns enables per-container user-namespace remapping (see
 	// container.Manager.usernsRemap). Set ONLY on shared, multi-tenant VMs;
@@ -1694,22 +1684,21 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		runtimeEnv["TOOL_SPEC_INTERVAL"] = "30s"
 	}
 
-	// Gate /v1/models/{load,unload}: confidential-ai requires LOAD_TOKEN
-	// as Bearer auth when set; without it those endpoints are open to
-	// any sealed-session client. Other workloads ignore the variable.
+	// LOAD_TOKEN is no longer injected. It was an instance-wide static
+	// credential gating /v1/models/{load,unload}, so one container's copy
+	// opened another's model endpoints. It could not simply be withheld,
+	// because confidential-ai served those endpoints with NO authentication
+	// when both it and the OIDC verifier were absent — withholding the token
+	// opened the endpoint rather than closing it.
 	//
-	// Still instance-wide, so one container's token opens another's model
-	// endpoints. It is deliberately NOT switched to the per-container token
-	// here: the workload compares it against its own env as a shared
-	// break-glass secret that an operator has to be able to know, and
-	// confidential-ai leaves the endpoint fully OPEN when both its OIDC
-	// verifier and this value are absent, so withholding it would
-	// unauthenticate rather than secure. The durable fix is to retire the
-	// break-glass in favour of the per-app owner/admin role that already
-	// takes precedence there.
-	if l.cfg.LoadToken != "" {
-		runtimeEnv["LOAD_TOKEN"] = l.cfg.LoadToken
-	}
+	// That inversion is fixed at the source: confidential-ai now requires a
+	// platform bearer carrying the app's owner/admin role and refuses when it
+	// has no verifier, with no static fallback. Nothing reads this variable
+	// any more.
+	//
+	// ORDER MATTERS on rollout: ship the confidential-ai build that drops the
+	// break-glass BEFORE a runtime that stops injecting, so no window exists
+	// where an old binary sees neither a token nor a verifier.
 
 	if len(runtimeEnv) > 0 {
 		runtimeSpec.Env = make(map[string]string, len(runtimeEnv))
