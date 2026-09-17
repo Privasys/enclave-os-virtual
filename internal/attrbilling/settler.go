@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 
@@ -64,7 +65,12 @@ func (s *Settler) post(ctx context.Context, jti, action string) error {
 	if s == nil {
 		return nil
 	}
-	url := fmt.Sprintf("%s/api/v1/enclave/attribute-vouchers/%s/%s", s.base, jti, action)
+	// PathEscape the jti: it is interpolated into the request target, so a
+	// value containing ../, ? or # would rewrite which endpoint this POST
+	// reaches on the management host. Verification signs and bounds the jti
+	// upstream, so this is defence in depth rather than a live path.
+	url := fmt.Sprintf("%s/api/v1/enclave/attribute-vouchers/%s/%s",
+		s.base, neturl.PathEscape(jti), action)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return err
