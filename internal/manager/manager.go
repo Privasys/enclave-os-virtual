@@ -157,6 +157,10 @@ type Config struct {
 	// no attribute marketplace.
 	MgmtBaseURL  string
 	EnclaveToken string
+	// EnclaveID identifies this enclave to the management service. Needed
+	// alongside the two above to relay the tool spec on a container's behalf,
+	// so the fleet bearer never has to be handed to the container itself.
+	EnclaveID string
 	// CapabilityStateDir holds the per-app resource-capability binding keys
 	// and outcomes (P2). Keep it on the encrypted /data volume; empty keeps
 	// them in memory (dev/test only).
@@ -545,6 +549,12 @@ func (s *Server) Start(ctx context.Context) error {
 	// token auth (the caller reads only its OWN set).
 	mux.HandleFunc("GET /api/v1/containers/{name}/dependencies",
 		s.requireContainerSelf(s.handleGetDependencies))
+
+	// Tool spec relay: the manager holds the fleet enclave bearer and makes
+	// the upstream call, so the container never receives that credential.
+	// Container token auth (the caller is the container it names).
+	mux.HandleFunc("GET /api/v1/containers/{name}/tool-spec",
+		s.requireContainerSelf(s.handleToolSpec))
 
 	// First-class volumes: inventory/usage, online grow, and owner-requested
 	// deletion (refused while the container is loaded). Named by container.

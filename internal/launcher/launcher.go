@@ -1646,16 +1646,41 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// endpoint. Empty fallbacks intentionally — a missing piece (e.g.
 	// pre-bootstrap manager.env) means the puller stays idle, which is
 	// the same behaviour as before this wire-up.
+	// Point the puller at the manager rather than straight at mgmt-service.
+	//
+	// TOOL_SPEC_TOKEN used to carry l.cfg.ToolSpecEnclaveToken, which is the
+	// fleet-wide enclave bearer: the same credential also authenticates
+	// check-in, runtime status, AI usage, per-call API fees and
+	// attribute-voucher settle/release, and it fetches the attestation token
+	// used to unseal vault keys. A container can read its own environment, so
+	// every workload on a host held the credential gating every other
+	// workload's management endpoints — a cross-tenant capability on a shared
+	// VM.
+	//
+	// The manager now makes that call on the container's behalf and
+	// authenticates the container by its own per-container token. The
+	// workload's contract is unchanged: same two variables, one authenticated
+	// GET, same body — so no app image needs rebuilding.
 	if l.cfg.ToolSpecMgmtURL != "" && l.cfg.ToolSpecEnclaveID != "" && l.cfg.ToolSpecEnclaveToken != "" {
-		base := strings.TrimRight(l.cfg.ToolSpecMgmtURL, "/")
-		runtimeEnv["TOOL_SPEC_URL"] = base + "/api/v1/enclave/tool-spec?enclave_id=" + l.cfg.ToolSpecEnclaveID
-		runtimeEnv["TOOL_SPEC_TOKEN"] = l.cfg.ToolSpecEnclaveToken
+		runtimeEnv["TOOL_SPEC_URL"] = network.ManagerURL() +
+			"/api/v1/containers/" + url.PathEscape(req.Name) + "/tool-spec"
+		runtimeEnv["TOOL_SPEC_TOKEN"] = containerToken
 		runtimeEnv["TOOL_SPEC_INTERVAL"] = "30s"
 	}
 
 	// Gate /v1/models/{load,unload}: confidential-ai requires LOAD_TOKEN
 	// as Bearer auth when set; without it those endpoints are open to
 	// any sealed-session client. Other workloads ignore the variable.
+	//
+	// Still instance-wide, so one container's token opens another's model
+	// endpoints. It is deliberately NOT switched to the per-container token
+	// here: the workload compares it against its own env as a shared
+	// break-glass secret that an operator has to be able to know, and
+	// confidential-ai leaves the endpoint fully OPEN when both its OIDC
+	// verifier and this value are absent, so withholding it would
+	// unauthenticate rather than secure. The durable fix is to retire the
+	// break-glass in favour of the per-app owner/admin role that already
+	// takes precedence there.
 	if l.cfg.LoadToken != "" {
 		runtimeEnv["LOAD_TOKEN"] = l.cfg.LoadToken
 	}

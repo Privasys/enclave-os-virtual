@@ -275,8 +275,11 @@ func runServe(args []string) error {
 		WalletProviderJWKS: walletJWKSURL(*walletProviderJWKS, *oidcIssuer),
 		// Settlement channel for paid attribute disclosures: reuses the
 		// fleet mgmt URL + enclave bearer (same credential as check-in).
+		// The same three also let the manager relay the tool spec on a
+		// container's behalf, so that bearer stays inside the manager.
 		MgmtBaseURL:  *rsMgmtURL,
 		EnclaveToken: *rsEnclaveToken,
+		EnclaveID:    *rsEnclaveID,
 		// Resource-capability state (P2) lives beside the registry on /data.
 		CapabilityStateDir: "/data/manager-capabilities",
 		ResourceApps:       resourceApps(),
