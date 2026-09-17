@@ -534,6 +534,9 @@ func (s *Server) Start(ctx context.Context) error {
 	// container without tearing it down. Manager-role only.
 	mux.HandleFunc("POST /api/v1/containers/{name}/freeze", s.requireAuth(s.handleFreezeContainer))
 	mux.HandleFunc("POST /api/v1/containers/{name}/rotate-key", s.requireAuth(s.handleRotateKey))
+	// Move this enclave's own /data DEK to another constellation, so the one
+	// it was created on can be decommissioned (datakeyrotate.go).
+	mux.HandleFunc("POST /api/v1/data-key/rotate", s.requireAuth(s.handleRotateDataKey))
 
 	// Attested dependency set (OID 65230.6.1): the platform installs or
 	// replaces a running container's declared dependencies; the manager

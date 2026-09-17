@@ -303,3 +303,13 @@ func readAllStdin() ([]byte, error) {
 	}
 	return buf, nil
 }
+
+// DataKeyConstellation reports the mrenclave the volume's locator currently
+// names, for before/after reporting. Empty when there is no locator.
+func DataKeyConstellation(ctx context.Context, device string) (string, error) {
+	loc, err := exportLocator(ctx, device)
+	if err != nil {
+		return "", err
+	}
+	return loc.Mrenclave, nil
+}
