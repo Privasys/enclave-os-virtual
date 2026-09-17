@@ -689,9 +689,27 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	devices := append([]string(nil), spec.Devices...)
 	if v, ok := imgSpec.Config.Labels["ai.privasys.devices"]; ok {
 		for _, d := range strings.Split(v, ",") {
-			if d = strings.TrimSpace(d); d != "" {
-				devices = append(devices, d)
+			if d = strings.TrimSpace(d); d == "" {
+				continue
 			}
+			// The label is read from the image's own config, so honouring it
+			// unconditionally put the authority to grant host device access
+			// with the image rather than with the deploy request. An image
+			// declaring /dev/sda, /dev/mem or /dev/kvm received it, with rwm
+			// (read, write and mknod). That matters most where the image
+			// publisher is not the deployer, as with a store app.
+			//
+			// Until that authority moves to the deploy request, restrict what
+			// an image may ask for to the GPU nodes the label exists to serve.
+			// A device outside that set must come from spec.Devices, which the
+			// control plane stamps.
+			if !isAllowedImageDevice(d) {
+				return nil, fmt.Errorf(
+					"container: %s image label ai.privasys.devices requests %q, which is not a GPU device node; "+
+						"host devices other than the NVIDIA set must be granted by the deploy request",
+					spec.Name, d)
+			}
+			devices = append(devices, d)
 		}
 	}
 	// A device-passthrough app under userns remap is a contradiction: GPU/host
@@ -723,11 +741,29 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	if v, ok := imgSpec.Config.Labels["ai.privasys.volume"]; ok {
 		parts := strings.SplitN(v, ":", 3)
 		if len(parts) < 2 {
-			return nil, fmt.Errorf("container: invalid ai.privasys.volume label %q (expected host:container[:ro|rw])", v)
+			return nil, fmt.Errorf("container: invalid ai.privasys.volume label %q (expected host:container[:ro])", v)
 		}
 		mountOpts := "ro"
 		if len(parts) == 3 {
-			mountOpts = parts[2]
+			mountOpts = strings.TrimSpace(parts[2])
+		}
+		// As with the device label, this is the image naming what it gets from
+		// the host. Validation used to be len(parts) < 2 and nothing else: no
+		// allowlist on the source and no check that mountOpts was one of
+		// ro/rw, so a label of "/:/host:rw" mounted the entire host
+		// filesystem, writable, into the container.
+		//
+		// An image-declared mount is now read-only and confined to the model
+		// root. A writable mount, or one from anywhere else, has to come from
+		// the deploy request.
+		if mountOpts != "ro" {
+			return nil, fmt.Errorf(
+				"container: %s image label ai.privasys.volume requests %q mount options; "+
+					"an image-declared mount is read-only, use the deploy request for anything else",
+				spec.Name, mountOpts)
+		}
+		if err := checkImageMountSource(parts[0]); err != nil {
+			return nil, fmt.Errorf("container: %s image label ai.privasys.volume: %w", spec.Name, err)
 		}
 		opts = append(opts, oci.WithMounts(idmapMounts([]specs.Mount{{
 			Destination: parts[1],
