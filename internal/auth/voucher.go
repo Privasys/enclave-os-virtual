@@ -98,7 +98,13 @@ func (v *Verifier) VerifyVoucher(tokenStr string) (*VoucherClaims, error) {
 	if raw.Iss != v.oidc.Issuer {
 		return nil, fmt.Errorf("auth: voucher issuer %q != %q", raw.Iss, v.oidc.Issuer)
 	}
-	if raw.Exp != 0 && time.Now().Unix() > int64(raw.Exp) {
+	// exp is REQUIRED. The check used to read `raw.Exp != 0 && ...`, so an Exp
+	// of zero short-circuited the comparison and the voucher was valid
+	// indefinitely -- and zero is exactly what an absent claim decodes to.
+	if raw.Exp == 0 {
+		return nil, errors.New("auth: voucher has no exp")
+	}
+	if time.Now().Unix() > int64(raw.Exp) {
 		return nil, errors.New("auth: voucher expired")
 	}
 	if raw.JTI == "" {

@@ -241,10 +241,23 @@ func (v *Verifier) verifyClaims(tokenStr string) (map[string]interface{}, error)
 		return nil, fmt.Errorf("auth: OIDC audience missing %q", v.oidc.Audience)
 	}
 
-	// Validate expiry.
-	if exp, ok := claims["exp"].(float64); ok {
-		if time.Now().Unix() > int64(exp) {
-			return nil, errors.New("auth: OIDC token expired")
+	// Validate expiry. exp is REQUIRED: guarding the comparison on the type
+	// assertion meant a token carrying no exp skipped the check entirely and
+	// stayed valid for as long as the signing key did. Signature, issuer and
+	// audience are all checked above, so this was never an authentication
+	// bypass -- it was the absence of an upper bound on a token's life.
+	exp, ok := claims["exp"].(float64)
+	if !ok {
+		return nil, errors.New("auth: OIDC token has no exp claim")
+	}
+	now := time.Now().Unix()
+	if now > int64(exp) {
+		return nil, errors.New("auth: OIDC token expired")
+	}
+	// nbf is optional, but honoured when present.
+	if nbf, ok := claims["nbf"].(float64); ok {
+		if now < int64(nbf) {
+			return nil, errors.New("auth: OIDC token not yet valid")
 		}
 	}
 
