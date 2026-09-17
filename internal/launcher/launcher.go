@@ -33,6 +33,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"os/signal"
 	"runtime"
 	"sort"
@@ -1331,9 +1332,34 @@ func (l *Launcher) AttestationToken(url string) string {
 
 // atomicWrite writes data to a file atomically by writing to a temporary
 // file in the same directory and renaming.
+// atomicWrite writes data to path via a temporary file in the same directory.
+//
+// The temporary name comes from os.CreateTemp rather than path+".tmp": the
+// fixed name was fully predictable and os.WriteFile opens without O_EXCL, so
+// anyone able to create files in the target directory could pre-create it as a
+// symlink and redirect the write. That matters here because the callers are
+// the CA certificate and the CA private key. The precondition is write access
+// to the directory, so on a correctly-permissioned host this is hardening.
 func atomicWrite(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	// Best-effort cleanup on every failure path below; a successful Rename
+	// makes the Remove a no-op miss, which is harmless.
+	defer func() {
+		_ = os.Remove(tmp)
+	}()
+	if err := f.Chmod(0600); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
