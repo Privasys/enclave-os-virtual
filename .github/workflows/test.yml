@@ -1,0 +1,48 @@
+# Copyright (c) Privasys. All rights reserved.
+#
+# Unit tests and vet.
+#
+# This repository had 142 tests and no workflow that ran any of them: the four
+# build-* workflows produce images and never invoke `go test`. The 2026-09-17
+# disclosure included defects the existing suite would have caught had it run,
+# so this is deliberately cheap and always-on rather than thorough.
+#
+# Runs on every PR and every push to main. Seconds, not minutes — there is no
+# reason to gate it behind a label or a schedule.
+
+name: Test
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The manager targets Linux and several packages use Linux-only syscalls
+      # (O_DIRECT, Statfs) plus purego dlopen, so this only builds on Linux.
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -count=1

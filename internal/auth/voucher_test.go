@@ -141,3 +141,81 @@ func TestVerifyVoucher_RejectsWrongIssuer(t *testing.T) {
 		t.Fatal("expected rejection of wrong issuer")
 	}
 }
+
+// --- Absence cases -------------------------------------------------------
+//
+// The suite above covers wrong values: an expired voucher, a tampered
+// signature, a wrong issuer. It did not cover a claim being ABSENT, which is
+// how the real defect presented: the check read `raw.Exp != 0 && now >
+// raw.Exp`, so an Exp of zero short-circuited it and the voucher never
+// expired — and zero is exactly what an absent claim decodes to.
+
+func TestVerifyVoucher_RejectsMissingExp(t *testing.T) {
+	f := newVoucherFixture(t)
+	claims := f.validClaims()
+	delete(claims, "exp")
+	if _, err := f.verifier.VerifyVoucher(f.sign(t, voucherType, claims)); err == nil {
+		t.Fatal("a voucher with no exp was accepted; it would never expire")
+	}
+}
+
+func TestVerifyVoucher_RejectsZeroExp(t *testing.T) {
+	f := newVoucherFixture(t)
+	claims := f.validClaims()
+	claims["exp"] = float64(0)
+	if _, err := f.verifier.VerifyVoucher(f.sign(t, voucherType, claims)); err == nil {
+		t.Fatal("a voucher with exp=0 was accepted; it would never expire")
+	}
+}
+
+// --- JWT lifetime --------------------------------------------------------
+//
+// auth_test.go had no expiry coverage at all: the same absence bug lived in
+// Authenticate's `if exp, ok := claims["exp"].(float64); ok { ... }`.
+
+func (f *voucherFixture) validTokenClaims() map[string]any {
+	return map[string]any{
+		"iss": f.issuer,
+		"aud": "enclave-os-virtual",
+		"sub": "user-1",
+		"exp": float64(time.Now().Add(10 * time.Minute).Unix()),
+	}
+}
+
+func TestAuthenticateUser_AcceptsValidToken(t *testing.T) {
+	f := newVoucherFixture(t)
+	sub, _, err := f.verifier.AuthenticateUser(f.sign(t, "JWT", f.validTokenClaims()))
+	if err != nil {
+		t.Fatalf("a well-formed token was rejected: %v", err)
+	}
+	if sub != "user-1" {
+		t.Fatalf("wrong sub: %q", sub)
+	}
+}
+
+func TestAuthenticateUser_RejectsMissingExp(t *testing.T) {
+	f := newVoucherFixture(t)
+	claims := f.validTokenClaims()
+	delete(claims, "exp")
+	if _, _, err := f.verifier.AuthenticateUser(f.sign(t, "JWT", claims)); err == nil {
+		t.Fatal("a token with no exp was accepted; it would be valid as long as the signing key")
+	}
+}
+
+func TestAuthenticateUser_RejectsExpired(t *testing.T) {
+	f := newVoucherFixture(t)
+	claims := f.validTokenClaims()
+	claims["exp"] = float64(time.Now().Add(-time.Minute).Unix())
+	if _, _, err := f.verifier.AuthenticateUser(f.sign(t, "JWT", claims)); err == nil {
+		t.Fatal("an expired token was accepted")
+	}
+}
+
+func TestAuthenticateUser_RejectsNotYetValid(t *testing.T) {
+	f := newVoucherFixture(t)
+	claims := f.validTokenClaims()
+	claims["nbf"] = float64(time.Now().Add(10 * time.Minute).Unix())
+	if _, _, err := f.verifier.AuthenticateUser(f.sign(t, "JWT", claims)); err == nil {
+		t.Fatal("a token with nbf in the future was accepted")
+	}
+}
