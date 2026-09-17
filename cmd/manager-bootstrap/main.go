@@ -78,6 +78,44 @@ func main() {
 		return
 	}
 
+	// rotate-dek --device <dev> --bundle <file|->: move the /data DEK onto
+	// another vault constellation with fresh material, so the one it was
+	// created on can be decommissioned. Operator-run while the machine is up;
+	// the volume stays openable throughout (see bootstrap.RotateDataDEK).
+	if len(os.Args) > 1 && os.Args[1] == "rotate-dek" {
+		device, bundlePath := "", ""
+		for i := 2; i < len(os.Args)-1; i++ {
+			switch os.Args[i] {
+			case "--device":
+				device = os.Args[i+1]
+			case "--bundle":
+				bundlePath = os.Args[i+1]
+			}
+		}
+		if device == "" || bundlePath == "" {
+			fmt.Fprintln(os.Stderr, "manager-bootstrap: usage: manager-bootstrap rotate-dek --device <block-device> --bundle <file|->")
+			os.Exit(1)
+		}
+		log, err := zap.NewDevelopment()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "manager-bootstrap: logger: %v\n", err)
+			os.Exit(1)
+		}
+		b, err := bootstrap.LoadRotateBundle(bundlePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "manager-bootstrap: %v\n", err)
+			os.Exit(1)
+		}
+		// Same budget as the boot path: reconstruct plus a create on k vaults.
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		if err := bootstrap.RotateDataDEK(ctx, log, cfg, device, b); err != nil {
+			fmt.Fprintf(os.Stderr, "manager-bootstrap: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// -measurements: post a fresh TDX quote to the management service
 	// for the measurement audit log (enclave-measurements.service, runs
 	// on boots where the enclave is already registered). Always exits 0:
