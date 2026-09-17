@@ -354,9 +354,17 @@ jobs:
 
       # ── GitHub Release (tag push only — runs before GCP upload so a WIF
       #    misconfiguration doesn't block the release) ──
+      #
+      # continue-on-error because the inverse bit on tdx-v0.2.86-dev: uploading
+      # the ~600 MB tarball failed three times with "Error saving asset", and
+      # because this step ran first its failure skipped the GCP publish
+      # entirely. The deployable artefact is the GCE image, not the tarball, so
+      # a release-upload problem must not withhold it. Same treatment the GCP
+      # auth step already gets, so now neither side can block the other.
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/tdx-v')
+        continue-on-error: true
         uses: softprops/action-gh-release@v3
         with:
           files: enclave-os-virtual-*.tar.gz
