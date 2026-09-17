@@ -36,6 +36,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # go.mod carries `replace` directives onto sibling repositories laid out
+      # as ../../platform/*, so nothing in this module compiles from a
+      # single-repo checkout. build-tdx.yml does the same thing; without it
+      # every build here fails with "replacement directory ... does not exist".
+      - name: Clone SDK siblings (go.mod replace directives)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh repo clone Privasys/ra-tls-clients "$GITHUB_WORKSPACE/../../platform/ra-tls-clients" -- --depth 1
+          gh repo clone Privasys/enclave-vaults-client "$GITHUB_WORKSPACE/../../platform/enclave-vaults-client" -- --depth 1
+
       # The manager targets Linux and several packages use Linux-only syscalls
       # (O_DIRECT, Statfs) plus purego dlopen, so this only builds on Linux.
       - name: Build
