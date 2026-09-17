@@ -1823,10 +1823,24 @@ func matchesConfigAPI(spec *launcher.ConfigAPISpec, r *http.Request) bool {
 // <audience>:app:<app-id-hex>:owner or :admin — grants/revocations are live
 // (next token), managed by the control plane on team changes. Transitional
 // fallback: a verified sub on the load-envelope owners team (removed once
-// the IdP role backfill is verified). Legacy loads carrying neither an app
-// id nor an owners list are admitted with a warning — enforcement becomes
-// possible when the control plane redeploys them with the new envelope.
-// Everything else fails closed. Note the sealed-relay X-Privasys-Sub is
+// the IdP role backfill is verified). Everything fails closed.
+//
+// A load carrying neither an app id nor an owners team used to be ADMITTED
+// here with a warning, which meant any caller could reach the configure
+// surface of such a container. That was deliberate and transitional, pending
+// the control plane redeploying those containers with the envelope — but it
+// was a live fail-open for as long as one existed, and it was reported as
+// such on 2026-09-17. It is now refused like anything else.
+//
+// The precondition for closing it was that every live container carries an
+// app id. The control plane sets AppId on both the first-deploy and redeploy
+// paths, so a redeploy through mgmt is enough to lift a container out of the
+// old branch; the registry entry is replaced by name, so the id survives the
+// replay that happens on every manager restart. A container that somehow
+// still arrives without one now gets a 403 naming the remedy rather than
+// silent admission.
+//
+// Note the sealed-relay X-Privasys-Sub is
 // deliberately NOT accepted: it asserts a subject but carries no roles. That
 // holds whether or not the call arrived sealed — a browser configuring an app
 // does so over a sealed session now, and the relay unwraps before this gate
@@ -1834,9 +1848,10 @@ func matchesConfigAPI(spec *launcher.ConfigAPISpec, r *http.Request) bool {
 // authority is the bearer's role, never the relay's assertion.
 func (s *Server) authorizeConfigure(r *http.Request, containerName string, st launcher.FreezeState) error {
 	if st.AppID == "" && len(st.Owners) == 0 {
-		s.log.Warn("configure gate: legacy load without app id or owners team — admitting",
+		s.log.Warn("configure gate: refusing a load that carries neither an app id nor an owners team",
 			zap.String("container", containerName))
-		return nil
+		return errors.New("this container was loaded without an app id or an owners team, " +
+			"so no caller can be authorised for its configure surface; redeploy it from the platform")
 	}
 	if s.verifier == nil {
 		return errors.New("no token verifier configured")
