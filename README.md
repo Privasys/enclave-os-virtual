@@ -211,18 +211,14 @@ decision: it reads `internal/trustedtime`.
 
 - **Floor.** The highest trusted time seen, kept on `/data` with a flag and
   its reason, and never below a compiled `MinTrustedTime`. A read returns the
-  host time while it is not behind the floor and has kept pace with the
-  monotonic clock, and never less than the previous read.
+  host time while it is not behind the floor, and never less than the
+  previous read.
 - **NTS (RFC 8915).** Two servers picked at random from ten compiled-in
   servers (one per operator) must agree within 2 s, else a third decides by
   majority, all within 8 s. NTS-KE certificates are checked against the
   floor, not the host clock, and NTP replies slower than 2 s (measured on
   the monotonic clock) are refused. The list is never configuration:
   changing it is a runtime roll.
-- **Monotonic clock.** Go's monotonic clock (the TSC on TDX, which the host
-  cannot change) measures real elapsed time since the host time was last
-  confirmed. A host clock that fell more than 10 s behind it (frozen or run
-  slow while staying above the floor) is checked against NTS.
 - **Boot.** One NTS fetch must succeed before the first time-sensitive
   decision. Until then every such decision fails closed.
 - **Monitor poll.** A platform monitor polls `POST /api/v1/clock/poll` with a
@@ -231,8 +227,9 @@ decision: it reads `internal/trustedtime`.
   by no more than the monotonic time since the last raise plus 10 s (never
   more than an hour) unless NTS confirms the host. On disagreement NTS
   decides who is wrong. The monitor's T never becomes trusted time on its
-  own. Without a confirmation for 15 minutes the runtime checks itself
-  against NTS.
+  own. The runtime does not police the host between polls: a host that
+  blocks them is the monitor's to deal with (it quarantines an enclave
+  that misses them).
 - **Host wrong.** Trusted time freezes at the NTS time (never an offset from
   the host clock, which would still move at the host's pace) and the clock is
   flagged. While flagged, every 100th read refetches NTS in the background;
@@ -246,9 +243,8 @@ decision: it reads `internal/trustedtime`.
   5 s. Then NTS is fetched and the clock is flagged. With no monitor pinned
   yet, incidents are logged only.
 - **Incidents and polls.** What a poll finds is reported in its reply only.
-  Conditions found elsewhere (host behind the floor, boot, a failed refetch,
-  the monotonic and self checks) are sent as incidents, once per condition
-  until it changes.
+  Conditions found elsewhere (host behind the floor, boot, a failed refetch)
+  are sent as incidents, once per condition until it changes.
 - **Fail closed.** No receipt, no NTS answer, or no majority: a trusted-time
   read returns an error, never a zero time, and every verification decision
   refuses what depended on it. Issuing is different: Caddy's RA-TLS module

@@ -448,64 +448,6 @@ func waitReport(t *testing.T, rep *fakeReporter, reason string) {
 	t.Fatalf("no %s incident reported (got %v)", reason, rep.reasons())
 }
 
-// A host that freezes its clock (staying above the floor) is caught by the
-// monotonic clock: NTS is asked, the clock is flagged, and the condition is
-// reported once, not on every read.
-func TestFrozenHostCaughtByMonotonicClock(t *testing.T) {
-	r := newRig(t)
-	r.configure(t, 1)
-	mustNow(t, r.c) // boot: confirmed at t0
-	r.mono.add(Tolerance + time.Second)
-	r.nts.t = t0.Add(Tolerance + time.Second) // real time moved, the host did not
-	got := mustNow(t, r.c)
-	if !r.c.flagged || r.c.reason != ReasonHostClockWrong || !got.Equal(r.nts.t) {
-		t.Fatalf("got %v flagged=%v reason=%q", got, r.c.flagged, r.c.reason)
-	}
-	waitReport(t, r.rep, ReasonHostClockWrong)
-	for i := 0; i < 3*RefetchEvery; i++ {
-		_, _ = r.c.Now()
-		r.settle()
-	}
-	n := 0
-	for _, x := range r.rep.reasons() {
-		if x == ReasonHostClockWrong {
-			n++
-		}
-	}
-	if n != 1 {
-		t.Fatalf("host_clock_wrong reported %d times, want once until it changes", n)
-	}
-}
-
-// A slow host that NTS says is right (the monotonic clock was the odd one) is
-// re-confirmed, not flagged.
-func TestSlowHostConfirmedByNTS(t *testing.T) {
-	r := newRig(t)
-	mustNow(t, r.c)
-	r.mono.add(Tolerance + time.Second)
-	mustNow(t, r.c)
-	if r.c.flagged {
-		t.Fatal("flagged although NTS agrees with the host")
-	}
-}
-
-// Without a confirmation for selfCheckAfter, the runtime asks NTS by itself.
-func TestSelfCheckWithoutPolls(t *testing.T) {
-	r := newRig(t)
-	mustNow(t, r.c)
-	calls := r.nts.calls
-	r.pass(selfCheckAfter - time.Minute)
-	r.c.tick()
-	if r.nts.calls != calls {
-		t.Fatal("self-check ran early")
-	}
-	r.pass(time.Minute)
-	r.c.tick()
-	if r.nts.calls != calls+1 {
-		t.Fatal("no self-check after selfCheckAfter without a confirmation")
-	}
-}
-
 // An in-sync poll may not raise the floor faster than real time without NTS:
 // a host and a monitor key agreeing on a future time get checked, and lose.
 func TestInSyncPollRaiseIsCapped(t *testing.T) {
@@ -563,7 +505,9 @@ func (b *blockingNTS) Quorum(ctx context.Context, _ time.Time) (Sample, error) {
 }
 
 // Readers are not held up by a network operation whose outcome they do not
-// need: the state mutex is released during NTS.
+// need: the state mutex is released during NTS. The operation here is the
+// background refetch of a flagged clock, during which reads keep getting the
+// frozen floor.
 func TestReadsDoNotWaitForBackgroundNTS(t *testing.T) {
 	host := &fakeHost{t: t0}
 	mono := &fakeHost{t: t0}
@@ -573,22 +517,25 @@ func TestReadsDoNotWaitForBackgroundNTS(t *testing.T) {
 		t.Fatal(err)
 	}
 	nts.release <- struct{}{}
-	if _, err := c.Now(); err != nil {
+	if _, err := c.Now(); err != nil { // boot fetch
 		t.Fatal(err)
 	}
-	// A self-check is due and blocks in NTS.
-	mono.add(selfCheckAfter)
-	host.add(selfCheckAfter)
-	go c.tick()
-	deadline := time.Now().Add(time.Second)
-	for {
-		c.mu.Lock()
-		busy := c.op != nil
-		c.mu.Unlock()
-		if busy || time.Now().After(deadline) {
-			break
+	host.add(-time.Hour)
+	nts.release <- struct{}{}
+	if _, err := c.Now(); err != nil { // host behind the floor: flagged
+		t.Fatal(err)
+	}
+	// Reach the refetch cap: its NTS quorum blocks until released.
+	for i := 0; i < RefetchEvery; i++ {
+		if _, err := c.Now(); err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(time.Millisecond)
+	}
+	c.mu.Lock()
+	busy := c.op != nil
+	c.mu.Unlock()
+	if !busy {
+		t.Fatal("no background refetch in flight")
 	}
 	done := make(chan error, 1)
 	go func() { _, err := c.Now(); done <- err }()
@@ -598,9 +545,27 @@ func TestReadsDoNotWaitForBackgroundNTS(t *testing.T) {
 			t.Fatal(err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("a read waited for an unrelated NTS quorum")
+		t.Fatal("a read waited for the background refetch")
 	}
 	nts.release <- struct{}{}
+}
+
+// Between polls, an unflagged clock with an honest host never calls NTS:
+// the runtime does not police the host on its own, blocked polls are the
+// monitor's to act on.
+func TestNoNTSBetweenPollsWhileUnflagged(t *testing.T) {
+	r := newRig(t)
+	mustNow(t, r.c) // boot fetch
+	calls := r.nts.calls
+	for i := 0; i < 10*RefetchEvery; i++ {
+		r.pass(time.Minute) // hours go by without a poll
+		mustNow(t, r.c)
+		r.c.tick()
+	}
+	r.settle()
+	if r.nts.calls != calls {
+		t.Fatalf("NTS called %d times between polls on an unflagged clock", r.nts.calls-calls)
+	}
 }
 
 // While trusted time is unavailable, a signed poll retries NTS; an unsigned

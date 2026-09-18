@@ -8,33 +8,29 @@
 // the host's DHCP hands out). A host that rolls its clock back can get an
 // expired credential accepted. The runtime therefore never reads the host
 // clock for a security decision directly: it asks this package, which checks
-// the host against three independent references.
+// the host against two independent references.
 //
 //   - A platform monitor polls the runtime with a signed "the time is at
 //     least T". The monitor only triggers checks: its T never becomes trusted
 //     time on its own.
 //   - NTS servers (RFC 8915) on the internet settle any disagreement. The
 //     list is compiled in (see servers.go), never configured.
-//   - Go's monotonic clock, which the guest keeps from the TSC on TDX and the
-//     host cannot change, measures how much time really passed since the host
-//     clock was last confirmed.
+//
+// The runtime does not police the host between polls. A host that blocks the
+// polls is the monitor's to deal with: it quarantines an enclave that misses
+// them.
 //
 // # Algorithm
 //
 // State: floor (the highest trusted time seen), flagged, reason, all persisted
-// on the encrypted /data volume, plus the last value returned and the last
-// confirmation (host wall time and monotonic instant), in memory.
+// on the encrypted /data volume, plus the last value returned, in memory.
 //
-//   - A read returns the host time while it is not behind the floor and has
-//     kept pace with the monotonic clock since the last confirmation, never
+//   - A read returns the host time while it is not behind the floor, never
 //     less than the previous read.
 //   - A host more than 1 s behind the floor is an incident: it is reported to
 //     the monitor (a signed receipt is required when a monitor is
 //     configured), NTS is fetched, the floor is raised to the NTS time and the
 //     clock is flagged.
-//   - A host whose clock fell more than 10 s behind the monotonic clock since
-//     the last confirmation (frozen, or run slow, while staying above the
-//     floor) is checked against NTS; if NTS disagrees the clock is flagged.
 //   - While flagged, reads return the floor, frozen (never an offset from the
 //     host clock, which would still move at the host's pace), and every 100th
 //     read refetches NTS. The flag clears when the host is back at or above
@@ -43,8 +39,6 @@
 //     the host time, by no more than the monotonic time since the last raise
 //     plus 10 s (and never by more than an hour) unless NTS confirms the host.
 //     On disagreement NTS decides who is wrong.
-//   - Without a confirmed poll for 15 minutes the runtime checks itself
-//     against NTS, since a host can also simply block the monitor.
 //   - At boot the persisted floor is loaded (never below MinTrustedTime) and
 //     one NTS fetch must succeed before the first read is answered.
 //   - Any NTS failure fails closed: the read returns an error, never a zero
@@ -94,10 +88,6 @@ const (
 	// tell a poll is late, so without this the frozen time would grow stale
 	// for as long as the host liked.
 	RefetchEvery = 100
-
-	// selfCheckAfter is how long the runtime goes without a confirmation
-	// (a poll in sync, or NTS) before it checks itself against NTS.
-	selfCheckAfter = 15 * time.Minute
 
 	// maxPollRaise bounds how far one in-sync poll may raise the floor
 	// without NTS confirming the host.
@@ -202,10 +192,6 @@ type Clock struct {
 	incidentErr error
 	incidentAt  time.Time
 
-	// anchorWall is the host wall time confirmed at the monotonic instant
-	// anchorMono (a poll in sync, or NTS). Zero anchorMono: none yet.
-	anchorWall int64
-	anchorMono time.Time
 	// raiseMono is the monotonic instant of the last floor raise.
 	raiseMono time.Time
 	// sample is the last NTS result, taken at monotonic instant sampleMono.
@@ -274,9 +260,8 @@ func New(opt Options) (*Clock, error) {
 	return c, nil
 }
 
-// Run performs the boot NTS fetch, keeps retrying while reads are failing
-// closed, and checks the host against NTS when nothing has confirmed it for
-// selfCheckAfter (the host can block the monitor's polls). It returns when
+// Run performs the boot NTS fetch and keeps retrying while reads are failing
+// closed, so the clock recovers even when nothing reads it. It returns when
 // ctx is done.
 func (c *Clock) Run(ctx context.Context) error {
 	t := time.NewTicker(30 * time.Second)
@@ -295,29 +280,12 @@ func (c *Clock) Run(ctx context.Context) error {
 func (c *Clock) tick() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.op != nil {
+	if c.op != nil || !c.needFetch {
 		return
 	}
-	switch {
-	case c.needFetch:
-		if err := c.fetchLocked(false); err != nil {
-			c.log.Warn("NTS fetch failed; trusted time unavailable", zap.Error(err))
-		}
-	case c.lastCheckLocked().IsZero() || c.mono().Sub(c.lastCheckLocked()) >= selfCheckAfter:
-		if err := c.fetchLocked(false); err != nil {
-			c.log.Warn("NTS self-check failed; trusted time unavailable", zap.Error(err))
-		}
+	if err := c.fetchLocked(false); err != nil {
+		c.log.Warn("NTS fetch failed; trusted time unavailable", zap.Error(err))
 	}
-}
-
-// lastCheckLocked is the monotonic instant the host was last checked: a
-// confirmation, or an NTS result (which, while flagged, confirms nothing but
-// still refreshes the frozen time).
-func (c *Clock) lastCheckLocked() time.Time {
-	if c.sampleMono.After(c.anchorMono) {
-		return c.sampleMono
-	}
-	return c.anchorMono
 }
 
 // hostNow reads the host clock as Unix ns (no monotonic reading).
@@ -364,45 +332,17 @@ func (c *Clock) nowLocked() (int64, error) {
 			return c.returnLocked(c.floor), nil
 		}
 		h := c.hostNow()
-		behind := h < c.floor-int64(behindSlack)
-		slow := c.slowLocked(h)
-		if !behind && !slow {
+		if h >= c.floor-int64(behindSlack) {
 			return c.returnLocked(h), nil
 		}
 		if c.op != nil {
 			c.waitLocked() // one incident at a time; the outcome decides this read
 			continue
 		}
-		if behind {
-			if err := c.incidentLocked(h); err != nil {
-				return 0, err
-			}
-			continue
-		}
-		// Slow or frozen host: NTS decides.
-		c.log.Warn("host clock fell behind the monotonic clock; checking NTS",
-			zap.Time("host", time.Unix(0, h).UTC()),
-			zap.Time("expected", time.Unix(0, c.expectedLocked()).UTC()))
-		if err := c.fetchLocked(false); err != nil {
+		if err := c.incidentLocked(h); err != nil {
 			return 0, err
 		}
 	}
-}
-
-// slowLocked reports whether the host clock advanced more than Tolerance less
-// than the monotonic clock since the last confirmation: a host that freezes or
-// slows its clock while staying above the floor.
-func (c *Clock) slowLocked(h int64) bool {
-	if c.anchorMono.IsZero() {
-		return false
-	}
-	return h < c.expectedLocked()-int64(Tolerance)
-}
-
-// expectedLocked is the confirmed host time carried forward on the monotonic
-// clock.
-func (c *Clock) expectedLocked() int64 {
-	return c.anchorWall + int64(c.mono().Sub(c.anchorMono))
 }
 
 // returnLocked records and returns max(v, last): a read never goes backwards.
@@ -519,12 +459,11 @@ func (c *Clock) applySampleLocked(s Sample, inPoll bool) {
 	c.persistLocked()
 }
 
-// confirmLocked records a confirmed host time: the floor rises to it, it
-// becomes the anchor the monotonic clock is compared against, and the flag
+// confirmLocked records a confirmed host time: the floor rises to it and the
+// flag clears.
 // clears.
 func (c *Clock) confirmLocked(h int64) {
 	c.raiseFloorLocked(h)
-	c.anchorWall, c.anchorMono = h, c.mono()
 	if c.flagged || c.reported != "" {
 		c.reported = "" // the condition changed: a new one is reported afresh
 	}
@@ -640,7 +579,7 @@ func (c *Clock) IssueTime() (t time.Time, trusted bool) {
 		return time.Unix(0, c.returnLocked(c.floor)).UTC(), true
 	}
 	h := c.hostNow()
-	if h < c.floor-int64(behindSlack) || c.slowLocked(h) {
+	if h < c.floor-int64(behindSlack) {
 		// A read would open an incident; issuing does not wait for it.
 		return time.Unix(0, fallback).UTC(), false
 	}
