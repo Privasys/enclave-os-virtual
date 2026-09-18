@@ -76,6 +76,7 @@ func (r *fakeReporter) reasons() []string {
 type rig struct {
 	c    *Clock
 	host *fakeHost
+	mono *fakeHost // real elapsed time, as the monotonic clock sees it
 	nts  *fakeNTS
 	rep  *fakeReporter
 	path string
@@ -86,6 +87,7 @@ func newRig(t *testing.T) *rig {
 	t.Helper()
 	r := &rig{
 		host: &fakeHost{t: t0},
+		mono: &fakeHost{t: t0},
 		nts:  &fakeNTS{t: t0},
 		rep:  &fakeReporter{done: make(chan struct{}, 16)},
 		path: filepath.Join(t.TempDir(), "clock.json"),
@@ -96,11 +98,27 @@ func newRig(t *testing.T) *rig {
 
 func (r *rig) open(t *testing.T) {
 	t.Helper()
-	c, err := New(Options{StatePath: r.path, EnclaveID: "enc-1", Host: r.host.now, NTS: r.nts, Reporter: r.rep})
+	c, err := New(Options{StatePath: r.path, EnclaveID: "enc-1", Host: r.host.now, Mono: r.mono.now, NTS: r.nts, Reporter: r.rep})
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.c = c
+}
+
+// pass moves real time on: the host clock (if it is honest) and the
+// monotonic clock together.
+func (r *rig) pass(d time.Duration) {
+	r.host.add(d)
+	r.mono.add(d)
+}
+
+// settle waits for the operation in flight, if any (a background refetch).
+func (r *rig) settle() {
+	r.c.mu.Lock()
+	if r.c.op != nil {
+		r.c.waitLocked()
+	}
+	r.c.mu.Unlock()
 }
 
 func (r *rig) configure(t *testing.T, version int64) {
@@ -220,27 +238,37 @@ func TestRefetchCapWhileFlagged(t *testing.T) {
 	r := newRig(t)
 	mustNow(t, r.c)
 	r.host.add(-time.Hour)
-	mustNow(t, r.c) // flags
+	mustNow(t, r.c) // flags; this read is the first of the hundred
 	calls := r.nts.calls
-	for i := 0; i < RefetchEvery-1; i++ {
+	for i := 0; i < RefetchEvery-2; i++ {
 		mustNow(t, r.c)
 	}
+	r.settle()
 	if r.nts.calls != calls {
 		t.Fatalf("refetched early: %d calls", r.nts.calls-calls)
 	}
 	r.nts.t = t0.Add(5 * time.Minute)
-	got := mustNow(t, r.c) // the 100th read refetches
+	// The 100th read refetches in the background and answers the frozen
+	// floor meanwhile; the reads after it see the refreshed time.
+	if got := mustNow(t, r.c); !got.Equal(t0) {
+		t.Fatalf("the triggering read must answer the frozen floor, got %v", got)
+	}
+	r.settle()
+	got := mustNow(t, r.c)
 	if r.nts.calls != calls+1 || !got.Equal(t0.Add(5*time.Minute)) {
 		t.Fatalf("want one refetch refreshing the frozen time, calls=%d got=%v", r.nts.calls-calls, got)
 	}
-	// A failed refetch fails closed.
+	// A failed refetch fails closed, and is reported once as an incident.
+	r.configure(t, 1)
 	r.nts.err = errors.New("blocked")
 	for i := 0; i < RefetchEvery-1; i++ {
 		mustNow(t, r.c)
 	}
+	r.settle()
 	if _, err := r.c.Now(); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("want fail closed on a failed refetch, got %v", err)
 	}
+	waitReport(t, r.rep, ReasonNTSUnreachable)
 }
 
 func TestFlagClearsWhenHostFixed(t *testing.T) {
@@ -249,15 +277,17 @@ func TestFlagClearsWhenHostFixed(t *testing.T) {
 	r.host.add(-time.Hour)
 	mustNow(t, r.c)
 	// The host is fixed: back at real time, which has moved on.
+	r.pass(10 * time.Minute)
 	r.host.set(t0.Add(10 * time.Minute))
 	r.nts.t = t0.Add(10 * time.Minute)
 	for i := 0; i < RefetchEvery; i++ {
 		mustNow(t, r.c)
 	}
+	r.settle()
 	if r.c.flagged {
 		t.Fatal("flag should clear once NTS confirms the host")
 	}
-	r.host.add(time.Second)
+	r.pass(time.Second)
 	if got := mustNow(t, r.c); !got.Equal(t0.Add(10*time.Minute + time.Second)) {
 		t.Fatalf("want host time again, got %v", got)
 	}
@@ -288,10 +318,11 @@ func TestPollVerdicts(t *testing.T) {
 	}
 
 	// In sync.
-	r.host.add(time.Minute)
+	r.pass(time.Minute)
+	calls := r.nts.calls
 	rep, err := r.poll(t, t0.Add(time.Minute+2*time.Second), 1)
-	if err != nil || rep.Verdict != VerdictInSync || rep.FloorMs != t0.Add(time.Minute).UnixMilli() || rep.Runtime != "virtual" {
-		t.Fatalf("in sync: %+v %v", rep, err)
+	if err != nil || rep.Verdict != VerdictInSync || rep.FloorMs != t0.Add(time.Minute).UnixMilli() || rep.Runtime != "virtual" || r.nts.calls != calls {
+		t.Fatalf("in sync: %+v %v (NTS calls %d)", rep, err, r.nts.calls-calls)
 	}
 	// Stale.
 	rep, err = r.poll(t, t0, 2)
@@ -299,12 +330,14 @@ func TestPollVerdicts(t *testing.T) {
 		t.Fatalf("stale: %+v %v", rep, err)
 	}
 	// Monitor wrong: the host agrees with NTS.
+	r.pass(sampleReuse)
 	r.nts.t = r.host.now()
 	rep, err = r.poll(t, r.host.now().Add(time.Hour), 3)
 	if err != nil || rep.Verdict != VerdictMonitorWrong || rep.Flagged || rep.NTS.TimeMs == 0 || len(rep.NTS.Servers) != 2 {
 		t.Fatalf("monitor wrong: %+v %v", rep, err)
 	}
 	// Host wrong: the monitor agrees with NTS.
+	r.pass(sampleReuse)
 	real := r.host.now().Add(time.Hour)
 	r.nts.t = real
 	rep, err = r.poll(t, real, 4)
@@ -314,7 +347,12 @@ func TestPollVerdicts(t *testing.T) {
 	if got := mustNow(t, r.c); !got.Equal(real) {
 		t.Fatalf("want frozen at NTS %v, got %v", real, got)
 	}
+	// What a poll finds is in its reply, never an incident.
+	if rs := r.rep.reasons(); len(rs) != 0 {
+		t.Fatalf("poll findings were sent as incidents: %v", rs)
+	}
 	// NTS unreachable on disagreement fails closed.
+	r.pass(sampleReuse)
 	r.nts.err = errors.New("blocked")
 	if _, err := r.poll(t, real.Add(3*time.Hour), 5); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("want ErrUnavailable, got %v", err)
@@ -393,4 +431,217 @@ func TestInstalledSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	installed.Store(nil)
+}
+
+// waitReport waits for an incident with reason to reach the reporter.
+func waitReport(t *testing.T, rep *fakeReporter, reason string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, r := range rep.reasons() {
+			if r == reason {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("no %s incident reported (got %v)", reason, rep.reasons())
+}
+
+// A host that freezes its clock (staying above the floor) is caught by the
+// monotonic clock: NTS is asked, the clock is flagged, and the condition is
+// reported once, not on every read.
+func TestFrozenHostCaughtByMonotonicClock(t *testing.T) {
+	r := newRig(t)
+	r.configure(t, 1)
+	mustNow(t, r.c) // boot: confirmed at t0
+	r.mono.add(Tolerance + time.Second)
+	r.nts.t = t0.Add(Tolerance + time.Second) // real time moved, the host did not
+	got := mustNow(t, r.c)
+	if !r.c.flagged || r.c.reason != ReasonHostClockWrong || !got.Equal(r.nts.t) {
+		t.Fatalf("got %v flagged=%v reason=%q", got, r.c.flagged, r.c.reason)
+	}
+	waitReport(t, r.rep, ReasonHostClockWrong)
+	for i := 0; i < 3*RefetchEvery; i++ {
+		_, _ = r.c.Now()
+		r.settle()
+	}
+	n := 0
+	for _, x := range r.rep.reasons() {
+		if x == ReasonHostClockWrong {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("host_clock_wrong reported %d times, want once until it changes", n)
+	}
+}
+
+// A slow host that NTS says is right (the monotonic clock was the odd one) is
+// re-confirmed, not flagged.
+func TestSlowHostConfirmedByNTS(t *testing.T) {
+	r := newRig(t)
+	mustNow(t, r.c)
+	r.mono.add(Tolerance + time.Second)
+	mustNow(t, r.c)
+	if r.c.flagged {
+		t.Fatal("flagged although NTS agrees with the host")
+	}
+}
+
+// Without a confirmation for selfCheckAfter, the runtime asks NTS by itself.
+func TestSelfCheckWithoutPolls(t *testing.T) {
+	r := newRig(t)
+	mustNow(t, r.c)
+	calls := r.nts.calls
+	r.pass(selfCheckAfter - time.Minute)
+	r.c.tick()
+	if r.nts.calls != calls {
+		t.Fatal("self-check ran early")
+	}
+	r.pass(time.Minute)
+	r.c.tick()
+	if r.nts.calls != calls+1 {
+		t.Fatal("no self-check after selfCheckAfter without a confirmation")
+	}
+}
+
+// An in-sync poll may not raise the floor faster than real time without NTS:
+// a host and a monitor key agreeing on a future time get checked, and lose.
+func TestInSyncPollRaiseIsCapped(t *testing.T) {
+	r := newRig(t)
+	r.configure(t, 1)
+	mustNow(t, r.c)
+	r.pass(time.Minute)
+	future := r.host.now().Add(2 * time.Hour)
+	r.host.set(future)
+	calls := r.nts.calls
+	rep, err := r.poll(t, future, 1)
+	if err != nil || r.nts.calls != calls+1 {
+		t.Fatalf("a jump past real elapsed time must ask NTS: %+v %v", rep, err)
+	}
+	if rep.Verdict != VerdictHostWrong || rep.FloorMs >= future.UnixMilli() {
+		t.Fatalf("floor pushed into the future: %+v", rep)
+	}
+	// Within real elapsed time (plus tolerance) no NTS is needed.
+	r2 := newRig(t)
+	r2.configure(t, 1)
+	mustNow(t, r2.c)
+	r2.pass(5 * time.Minute)
+	calls = r2.nts.calls
+	rep, err = r2.poll(t, r2.host.now(), 1)
+	if err != nil || rep.Verdict != VerdictInSync || r2.nts.calls != calls {
+		t.Fatalf("normal in-sync poll: %+v %v calls=%d", rep, err, r2.nts.calls-calls)
+	}
+	// And NTS confirming a large jump lets it through.
+	r3 := newRig(t)
+	r3.configure(t, 1)
+	mustNow(t, r3.c)
+	later := t0.Add(3 * time.Hour) // e.g. the enclave was down for three hours
+	r3.host.set(later)
+	r3.nts.t = later
+	r3.mono.add(sampleReuse)
+	rep, err = r3.poll(t, later, 1)
+	if err != nil || rep.Verdict != VerdictInSync || rep.FloorMs != later.UnixMilli() {
+		t.Fatalf("NTS-confirmed jump: %+v %v", rep, err)
+	}
+}
+
+// blockingNTS holds every quorum until released.
+type blockingNTS struct {
+	release chan struct{}
+	t       time.Time
+}
+
+func (b *blockingNTS) Quorum(ctx context.Context, _ time.Time) (Sample, error) {
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+		return Sample{}, ctx.Err()
+	}
+	return Sample{Time: b.t, Servers: []string{"a", "b"}}, nil
+}
+
+// Readers are not held up by a network operation whose outcome they do not
+// need: the state mutex is released during NTS.
+func TestReadsDoNotWaitForBackgroundNTS(t *testing.T) {
+	host := &fakeHost{t: t0}
+	mono := &fakeHost{t: t0}
+	nts := &blockingNTS{release: make(chan struct{}, 1), t: t0}
+	c, err := New(Options{Host: host.now, Mono: mono.now, NTS: nts, Reporter: &fakeReporter{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nts.release <- struct{}{}
+	if _, err := c.Now(); err != nil {
+		t.Fatal(err)
+	}
+	// A self-check is due and blocks in NTS.
+	mono.add(selfCheckAfter)
+	host.add(selfCheckAfter)
+	go c.tick()
+	deadline := time.Now().Add(time.Second)
+	for {
+		c.mu.Lock()
+		busy := c.op != nil
+		c.mu.Unlock()
+		if busy || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := c.Now(); done <- err }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a read waited for an unrelated NTS quorum")
+	}
+	nts.release <- struct{}{}
+}
+
+// While trusted time is unavailable, a signed poll retries NTS; an unsigned
+// one does not.
+func TestSignedPollRetriesNTSWhileFailingClosed(t *testing.T) {
+	r := newRig(t)
+	r.configure(t, 1)
+	r.nts.err = errors.New("blocked")
+	if _, err := r.c.Now(); err == nil {
+		t.Fatal("want fail closed")
+	}
+	calls := r.nts.calls
+	if _, err := r.c.Poll(PollRequest{EnclaveID: "enc-1", TMs: t0.UnixMilli(), KeyID: r.c.cfg.MonitorKeyID, Sig: "AAAA"}); !errors.Is(err, ErrBadPoll) {
+		t.Fatalf("want ErrBadPoll, got %v", err)
+	}
+	if r.nts.calls != calls {
+		t.Fatal("an unsigned poll triggered NTS")
+	}
+	r.nts.err = nil
+	rep, err := r.poll(t, t0, 1)
+	if err != nil || r.nts.calls != calls+1 || rep.Verdict != VerdictInSync || rep.TrustedTimeMs == 0 {
+		t.Fatalf("signed poll: %+v %v calls=%d", rep, err, r.nts.calls-calls)
+	}
+	if _, err := r.c.Now(); err != nil {
+		t.Fatalf("trusted time not back after the poll's NTS retry: %v", err)
+	}
+}
+
+// Issuing never blocks and never fails: without trusted time it uses the
+// floor, and says so.
+func TestIssueTimeWhileFailingClosed(t *testing.T) {
+	r := newRig(t)
+	r.nts.err = errors.New("blocked")
+	it, trusted := r.c.IssueTime()
+	if trusted || it.Before(MinTrustedTime) {
+		t.Fatalf("got %v trusted=%v", it, trusted)
+	}
+	r.nts.err = nil
+	r.c.fetchAt = time.Time{}
+	mustNow(t, r.c)
+	if it, trusted = r.c.IssueTime(); !trusted || !it.Equal(t0) {
+		t.Fatalf("healthy: got %v trusted=%v", it, trusted)
+	}
 }

@@ -146,8 +146,17 @@ const (
 
 // Poll applies a monitor poll. It returns ErrNotConfigured when no monitor is
 // pinned, ErrBadPoll when the poll is not the pinned monitor's, and an error
-// wrapping ErrUnavailable when the host and monitor disagree and NTS cannot
-// settle it (the clock then fails closed until NTS answers).
+// wrapping ErrUnavailable when NTS is needed and unreachable (the clock then
+// fails closed until NTS answers).
+//
+// Polls keep working while the clock fails closed: that is how the monitor
+// sees the problem and how the runtime recovers. A signed poll that arrives
+// while there is no trusted time triggers an NTS retry, after its signature
+// has been checked, so an unauthenticated caller cannot make the runtime
+// hammer NTS.
+//
+// What a poll finds goes in its reply only, never in an incident: the monitor
+// is already talking to the runtime, and an incident would make it poll again.
 func (c *Clock) Poll(req PollRequest) (PollReply, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -170,45 +179,66 @@ func (c *Clock) Poll(req PollRequest) (PollReply, error) {
 	}
 
 	reply := PollReply{EnclaveID: c.cfg.EnclaveID, Runtime: "virtual", ConfigKeyID: c.cfg.MonitorKeyID, NTS: PollNTS{Servers: []string{}}}
+	if c.needFetch {
+		if c.op != nil {
+			c.waitLocked()
+		}
+		if c.needFetch && c.op == nil {
+			if err := c.fetchLocked(true); err == nil {
+				reply.NTS = PollNTS{TimeMs: ms(c.sample.Time.UnixNano()), Servers: c.sample.Servers}
+			}
+		}
+	}
+
 	t := req.TMs * int64(time.Millisecond)
 	h := c.hostNow()
-	switch {
-	case t < c.floor:
-		// A replay or a slow monitor: it can say nothing about the floor.
-		reply.Verdict = VerdictIgnoredStale
-	case abs(h-t) <= int64(Tolerance):
-		c.raiseFloorLocked(h)
-		c.flagged, c.reason = false, ""
-		reply.Verdict = VerdictInSync
-	default:
-		c.fetchAt = time.Now()
-		s, err := c.quorumLocked()
+	settle := func(verdictIfHostRight string) error {
+		s, err := c.pollSampleLocked()
 		if err != nil {
-			c.needFetch = true
-			c.fetchErr = err
-			c.log.Error("CRITICAL: host and monitor disagree and NTS is unreachable; failing closed",
+			c.log.Error("CRITICAL: poll needs NTS and NTS is unreachable; failing closed",
 				zap.Time("host", time.Unix(0, h).UTC()), zap.Time("monitor", time.Unix(0, t).UTC()), zap.Error(err))
-			c.reportAsync(Incident{Reason: ReasonNTSUnreachable, HostTimeMs: ms(h), FloorMs: ms(c.floor)})
-			return PollReply{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
+			return err
 		}
-		c.needFetch, c.fetchErr, c.reads = false, nil, 0
 		h = c.hostNow()
 		n := s.Time.UnixNano()
 		reply.NTS = PollNTS{TimeMs: ms(n), Servers: s.Servers}
 		if abs(h-n) <= int64(Tolerance) {
-			c.raiseFloorLocked(h)
-			c.flagged, c.reason = false, ""
-			reply.Verdict = VerdictMonitorWrong
-			c.log.Error("CRITICAL: clock monitor disagrees with the host and NTS",
-				zap.Time("host", time.Unix(0, h).UTC()), zap.Time("monitor", time.Unix(0, t).UTC()), zap.Time("nts", s.Time))
-			c.reportAsync(Incident{Reason: ReasonMonitorClockWrong, HostTimeMs: ms(h), FloorMs: ms(c.floor), NTSTimeMs: ms(n)})
-		} else {
-			c.raiseFloorLocked(n)
-			c.flagged, c.reason = true, ReasonHostClockWrong
-			reply.Verdict = VerdictHostWrong
-			c.log.Error("CRITICAL: host clock disagrees with the monitor and NTS; time frozen at the NTS time",
-				zap.Time("host", time.Unix(0, h).UTC()), zap.Time("monitor", time.Unix(0, t).UTC()), zap.Time("nts", s.Time))
-			c.reportAsync(Incident{Reason: ReasonHostClockWrong, HostTimeMs: ms(h), FloorMs: ms(c.floor), NTSTimeMs: ms(n)})
+			c.confirmLocked(h)
+			reply.Verdict = verdictIfHostRight
+			if verdictIfHostRight == VerdictMonitorWrong {
+				c.log.Error("CRITICAL: clock monitor disagrees with the host and NTS",
+					zap.Time("host", time.Unix(0, h).UTC()), zap.Time("monitor", time.Unix(0, t).UTC()), zap.Time("nts", s.Time))
+			}
+			return nil
+		}
+		c.raiseFloorLocked(n)
+		c.flagged, c.reason = true, ReasonHostClockWrong
+		reply.Verdict = VerdictHostWrong
+		c.log.Error("CRITICAL: host clock disagrees with NTS; time frozen at the NTS time",
+			zap.Time("host", time.Unix(0, h).UTC()), zap.Time("monitor", time.Unix(0, t).UTC()), zap.Time("nts", s.Time))
+		return nil
+	}
+	switch {
+	case t < c.floor:
+		// A replay or a slow monitor: it can say nothing about the floor.
+		reply.Verdict = VerdictIgnoredStale
+	case abs(h-t) <= int64(Tolerance) && h <= c.pollRaiseCapLocked():
+		c.confirmLocked(h)
+		reply.Verdict = VerdictInSync
+	case abs(h-t) <= int64(Tolerance):
+		// Host and monitor agree on a time further ahead of the floor than
+		// real time has moved since it was last raised. Two parties holding
+		// the monitor key and the host could otherwise push the floor into
+		// the future and leave the enclave refusing every credential: NTS
+		// has to confirm the host first.
+		c.log.Warn("in-sync poll would raise the floor faster than real time; checking NTS",
+			zap.Time("host", time.Unix(0, h).UTC()), zap.Time("floor", time.Unix(0, c.floor).UTC()))
+		if err := settle(VerdictInSync); err != nil {
+			return PollReply{}, err
+		}
+	default:
+		if err := settle(VerdictMonitorWrong); err != nil {
+			return PollReply{}, err
 		}
 	}
 	if reply.Verdict != VerdictIgnoredStale {
@@ -235,6 +265,50 @@ func (c *Clock) Poll(req PollRequest) (PollReply, error) {
 		reply.TrustedTimeMs = ms(c.returnLocked(v))
 	}
 	return reply, nil
+}
+
+// pollRaiseCapLocked is the highest floor an in-sync poll may set without
+// NTS: the floor plus the real (monotonic) time since it was last raised plus
+// Tolerance, and never more than maxPollRaise above it.
+func (c *Clock) pollRaiseCapLocked() int64 {
+	var elapsed time.Duration
+	if !c.raiseMono.IsZero() {
+		elapsed = c.mono().Sub(c.raiseMono)
+	}
+	allow := elapsed + Tolerance
+	if allow > maxPollRaise {
+		allow = maxPollRaise
+	}
+	return c.floor + int64(allow)
+}
+
+// pollSampleLocked returns an NTS result for a poll: the one an operation in
+// flight is fetching, or one fetched in the last sampleReuse (projected on
+// the monotonic clock), or a fresh quorum. Failures set needFetch, so reads
+// fail closed; they are the poll's to report, not an incident's.
+func (c *Clock) pollSampleLocked() (Sample, error) {
+	if c.op != nil {
+		c.waitLocked()
+	}
+	if !c.needFetch && !c.sampleMono.IsZero() {
+		if age := c.mono().Sub(c.sampleMono); age < sampleReuse {
+			s := c.sample
+			s.Time = s.Time.Add(age)
+			return s, nil
+		}
+	}
+	op := c.beginLocked()
+	defer c.endLocked(op)
+	c.fetchAt = c.mono()
+	s, err := c.quorumUnlocked()
+	if err != nil {
+		c.needFetch = true
+		c.fetchErr = err
+		return Sample{}, fmt.Errorf("%w: %v", ErrUnavailable, err)
+	}
+	c.needFetch, c.fetchErr, c.reads = false, nil, 0
+	c.sample, c.sampleMono = s, c.mono()
+	return s, nil
 }
 
 func b64Decode(s string) ([]byte, error) {
