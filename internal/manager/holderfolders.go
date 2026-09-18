@@ -548,15 +548,28 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 	}
 	containerPath := path.Join(holderContainerMount, holders.Dir, g.HolderKey)
 	if st, open := s.holdersOpen.get(key); open {
-		if hostUID >= 0 && hostUID != st.HostUID {
-			if err := holders.Chown(hf.Mount, g.HolderKey, hostUID); err != nil {
-				s.log.Warn("holder chown", zap.Error(err))
-			}
-			st.HostUID = hostUID
-			s.holdersOpen.set(key, st)
+		// The keyring is the superblock's: a volume remounted under the
+		// state (a redeploy, 2026-09-18) has no key any more, and "open"
+		// would hand the app a folder every write answers ENOKEY on. Trust
+		// the state only when the kernel agrees; otherwise load the key
+		// again below.
+		if ks, err := holders.KeyStatus(hf.Mount, st.KeyID); err != nil || ks != holders.Present {
+			s.log.Warn("holder folder recorded open but its key is not loaded; reopening",
+				zap.String("container", name), zap.String("holder", g.HolderKey), zap.Error(err))
+			s.holdersOpen.drop(key)
+			open = false
 		}
-		s.answerOpen(w, name, hf.Mount, g, containerPath)
-		return
+		if open {
+			if hostUID >= 0 && hostUID != st.HostUID {
+				if err := holders.Chown(hf.Mount, g.HolderKey, hostUID); err != nil {
+					s.log.Warn("holder chown", zap.Error(err))
+				}
+				st.HostUID = hostUID
+				s.holdersOpen.set(key, st)
+			}
+			s.answerOpen(w, name, hf.Mount, g, containerPath)
+			return
+		}
 	}
 	if g.WrappedKey == "" {
 		// Consent stands but the key is not kept here (the app does not work
