@@ -142,7 +142,20 @@ type Verifier struct {
 	jwks   *jwksCache
 	jwksMu sync.RWMutex
 	log    *zap.Logger
+
+	// refreshMu serialises JWKS refreshes and guards lastRefresh. It is
+	// never held by a lookup that hits the cache.
+	refreshMu   sync.Mutex
+	lastRefresh time.Time
 }
+
+// oidcJWKSTTL is how long a fetched key set is served without refreshing.
+const oidcJWKSTTL = 5 * time.Minute
+
+// oidcJWKSMinRefresh bounds how often a cache miss may refresh the key set.
+// The kid is caller-chosen, so without it every request with an unknown
+// kid cost an OIDC discovery plus a JWKS fetch.
+const oidcJWKSMinRefresh = 10 * time.Second
 
 // NewVerifier creates a Verifier for OIDC token verification.
 func NewVerifier(oidcCfg *OIDCConfig, log *zap.Logger) (*Verifier, error) {
@@ -488,25 +501,35 @@ type oidcDiscovery struct {
 	JwksURI string `json:"jwks_uri"`
 }
 
+// getSigningKey returns the key for kid (or, with no kid, one matching alg).
+//
+// A hit on a fresh cache takes only the read lock. A miss or a stale cache
+// refreshes the key set, but at most once per oidcJWKSMinRefresh across all
+// callers, and the network round trip holds refreshMu, not jwksMu, so it
+// never blocks lookups that hit. It used to hold the jwks write lock across
+// discovery and fetch on every miss: a caller sending tokens with random
+// kids serialised every verification behind its own IdP round trips.
 func (v *Verifier) getSigningKey(kid, alg string) (*jwkKey, error) {
-	v.jwksMu.RLock()
-	if v.jwks != nil && time.Since(v.jwks.fetchedAt) < 5*time.Minute {
-		if key, ok := v.jwks.keys[kid]; ok {
-			v.jwksMu.RUnlock()
+	if key, fresh := v.cachedKey(kid, alg); key != nil && fresh {
+		return key, nil
+	}
+
+	v.refreshMu.Lock()
+	defer v.refreshMu.Unlock()
+
+	// Another caller may have refreshed while we waited.
+	if key, fresh := v.cachedKey(kid, alg); key != nil && fresh {
+		return key, nil
+	}
+	if time.Since(v.lastRefresh) < oidcJWKSMinRefresh {
+		// Refreshed moments ago: answer from what we have rather than
+		// fetch again for a kid the IdP did not publish.
+		if key, _ := v.cachedKey(kid, alg); key != nil {
 			return key, nil
 		}
+		return nil, fmt.Errorf("key %q not found in JWKS", kid)
 	}
-	v.jwksMu.RUnlock()
-
-	v.jwksMu.Lock()
-	defer v.jwksMu.Unlock()
-
-	// Double-check.
-	if v.jwks != nil && time.Since(v.jwks.fetchedAt) < 5*time.Minute {
-		if key, ok := v.jwks.keys[kid]; ok {
-			return key, nil
-		}
-	}
+	v.lastRefresh = time.Now()
 
 	jwksURI, err := v.discoverJWKS()
 	if err != nil {
@@ -516,20 +539,41 @@ func (v *Verifier) getSigningKey(kid, alg string) (*jwkKey, error) {
 	if err != nil {
 		return nil, err
 	}
+	v.jwksMu.Lock()
 	v.jwks = &jwksCache{keys: keys, fetchedAt: time.Now()}
+	v.jwksMu.Unlock()
 
-	if key, ok := keys[kid]; ok {
+	if key := findKey(keys, kid, alg); key != nil {
 		return key, nil
 	}
-	// If kid empty, find matching alg.
+	return nil, fmt.Errorf("key %q not found in JWKS", kid)
+}
+
+// cachedKey looks kid up in the cached key set, reporting whether the set
+// is within its TTL.
+func (v *Verifier) cachedKey(kid, alg string) (key *jwkKey, fresh bool) {
+	v.jwksMu.RLock()
+	defer v.jwksMu.RUnlock()
+	if v.jwks == nil {
+		return nil, false
+	}
+	return findKey(v.jwks.keys, kid, alg), time.Since(v.jwks.fetchedAt) < oidcJWKSTTL
+}
+
+// findKey returns the key with this kid or, when kid is empty, the first
+// signing key matching alg.
+func findKey(keys map[string]*jwkKey, kid, alg string) *jwkKey {
+	if key, ok := keys[kid]; ok {
+		return key
+	}
 	if kid == "" {
 		for _, k := range keys {
 			if k.Alg == alg || (k.Use == "sig" && k.Alg == "") {
-				return k, nil
+				return k
 			}
 		}
 	}
-	return nil, fmt.Errorf("key %q not found in JWKS", kid)
+	return nil
 }
 
 func (v *Verifier) discoverJWKS() (string, error) {
