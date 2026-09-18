@@ -206,6 +206,12 @@ type Server struct {
 	// caps brokers resource capabilities for the loaded apps (capabilities.go).
 	caps *capabilityBroker
 
+	// holdersOpen and events serve holder folders and the app event stream
+	// (holderfolders.go): which folders this process has open, and the
+	// listeners on GET /api/v1/resources/events.
+	holdersOpen *holderState
+	events      *eventHub
+
 	// staticUnsealed maps lowercased Hostname → []string path prefixes that
 	// the session-relay may serve in the CLEAR on the gateway-terminated leg
 	// (GET/HEAD only). Opt-in per app via the measured image label
@@ -291,6 +297,8 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 	// trusts, asks mgmt (enclave bearer) whether the payer may spend.
 	s.spend = newSpendGate(s.log, cfg.IdpIssuer, cfg.MgmtBaseURL, cfg.EnclaveToken)
 	s.caps = newCapabilityBroker(cfg.CapabilityStateDir, s.log)
+	s.holdersOpen = newHolderState()
+	s.events = newEventHub()
 	// Teach the launcher's image GC the FULL desired image set (every app in
 	// the registry), so a concurrent replay never prunes a sibling's cached
 	// image before that sibling loads. Without this the GC evicts an image an
@@ -334,6 +342,9 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		}
 		if strings.HasPrefix(r.URL.Path, capabilityWellKnown) {
 			return false // the wallet's attested fetch is plain HTTPS by design
+		}
+		if strings.HasPrefix(r.URL.Path, holderCapabilitiesPath) {
+			return false // the wallet's mint, list and revoke: bearer plus wallet proof, no session
 		}
 		// Opt-in public static UI: an app that serves its own browser shell
 		// from the enclave declares its HTML/JS/CSS prefixes (measured image
@@ -625,6 +636,14 @@ func (s *Server) Start(ctx context.Context) error {
 	// manager holds the binding key, pushes the wallet and serves it.
 	mux.HandleFunc("POST /api/v1/resources/sign", s.handleResourceSign)
 	mux.HandleFunc("POST /api/v1/resources/{resource}/request", s.handleResourceRequest)
+	// Holder folders and the event stream (holderfolders.go): open and close a
+	// holder's folder, list this app's folders and approved subjects, and
+	// receive approvals, revokes, opens and closes without polling.
+	mux.HandleFunc("POST /api/v1/resources/{resource}/open", s.handleResourceOpen)
+	mux.HandleFunc("POST /api/v1/resources/{resource}/close", s.handleResourceClose)
+	mux.HandleFunc("GET /api/v1/resources/{resource}/holders", s.handleResourceHolders)
+	mux.HandleFunc("GET /api/v1/resources/{resource}/subjects", s.handleResourceSubjects)
+	mux.HandleFunc("GET /api/v1/resources/events", s.handleResourceEvents)
 	mux.HandleFunc("GET /api/v1/resources/{resource}/status", s.handleResourceStatus)
 
 	// TLS certificate rotation (require manager role).
@@ -661,6 +680,15 @@ func (s *Server) Start(ctx context.Context) error {
 			if strings.HasPrefix(r.URL.Path, capabilityWellKnown) {
 				if name := s.launcher.AppHostnameToContainer(host); name != "" && len(s.launcher.ContainerResourceDecls(name)) > 0 {
 					s.serveCapabilityWellKnown(w, r, name)
+					return
+				}
+			}
+			// The holder-facing pair the wallet speaks to every resource
+			// service, served here for the kinds the enclave OS is the service
+			// of (app_storage) and for the caller-side revoke of every kind.
+			if strings.HasPrefix(r.URL.Path, holderCapabilitiesPath) {
+				if name := s.launcher.AppHostnameToContainer(host); name != "" && len(s.launcher.ContainerResourceDecls(name)) > 0 {
+					s.serveHolderCapabilities(w, r, name)
 					return
 				}
 			}

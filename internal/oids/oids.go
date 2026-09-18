@@ -124,6 +124,14 @@ const AppExtensionArcPrefix = "1.3.6.1.4.1.65230.5.4."
 // Omitted when no encrypted volume is attached.
 var WorkloadKeySource = oid(6, 1)
 
+// WorkloadStorage states what durable storage the manager ATTACHED to a
+// container, never what the app claims, as a comma-separated UTF-8 list:
+// "volume" (an encrypted app volume), "holder-folders" (per-holder folders
+// under the holders' own keys, opened only by the manager), "immutable-root"
+// (the app cannot write the volume root). Omitted for a plain volume, so
+// existing certificates do not change.
+var WorkloadStorage = oid(6, 2)
+
 // --- Arc 7, trust relationships -----------------------------------------
 
 // AttestedDependencySet carries a container's set of DIRECT attested
@@ -189,10 +197,10 @@ func PlatformExtensions(merkleRoot, runtimeVersionHash, combinedWorkloadsHash [3
 }
 
 // ContainerExtensions returns the workload extensions of a per-container leaf.
-// keySource may be empty to omit 6.1; appID (raw 16-byte UUID) empty omits 4.1.
-// App-defined 5.4.* extensions are pulled from the container by the Caddy
-// module at issuance and are not built here.
-func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef string, keySource string, appID []byte) []pkix.Extension {
+// keySource may be empty to omit 6.1; storage empty omits 6.2; appID (raw
+// 16-byte UUID) empty omits 4.1. App-defined 5.4.* extensions are pulled
+// from the container by the Caddy module at issuance and are not built here.
+func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef string, keySource, storage string, appID []byte) []pkix.Extension {
 	if i := strings.Index(imageRef, "@"); i >= 0 {
 		imageRef = imageRef[:i]
 	}
@@ -203,6 +211,9 @@ func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef
 	}
 	if keySource != "" {
 		exts = append(exts, Extension(WorkloadKeySource, []byte(keySource)))
+	}
+	if storage != "" {
+		exts = append(exts, Extension(WorkloadStorage, []byte(storage)))
 	}
 	if len(appID) > 0 {
 		exts = append(exts, Extension(WorkloadAppID, appID))

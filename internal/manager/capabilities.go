@@ -45,6 +45,7 @@ import (
 
 	ratls "enclave-os-mini/clients/go/ratls"
 
+	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/tdx"
 	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 	"go.uber.org/zap"
@@ -69,14 +70,20 @@ type capabilityAsk struct {
 	Permissions   []string        `json:"permissions"`
 	ResourceLabel string          `json:"resource_label"`
 	Request       json.RawMessage `json:"request"`
+	// Options are the declaration's options, verbatim (app_storage: quota,
+	// unattended); the wallet phrases them.
+	Options map[string]any `json:"options,omitempty"`
 }
 
 // capabilityPending is what the wallet fetches over RA-TLS.
 type capabilityPending struct {
-	Nonce         string        `json:"nonce"`
-	BindingPubkey string        `json:"binding_pubkey"`
-	ResourceApp   string        `json:"resource_app"`
-	Capability    capabilityAsk `json:"capability"`
+	Nonce         string `json:"nonce"`
+	BindingPubkey string `json:"binding_pubkey"`
+	ResourceApp   string `json:"resource_app"`
+	// ServiceURL, when set, is where the wallet mints instead of the
+	// resource app's own host: the enclave OS itself, for app_storage.
+	ServiceURL string        `json:"service_url,omitempty"`
+	Capability capabilityAsk `json:"capability"`
 
 	container string
 	appID     string
@@ -97,6 +104,20 @@ type capabilityGrant struct {
 	// the time. A declaration that later asks for more (or less) is a new
 	// question, not a granted one; see stale.
 	Permissions []string `json:"permissions,omitempty"`
+	// Kind and Subject are recorded so the app's subjects can be listed and
+	// a holder's capabilities found without a second store. Records from
+	// before they were kept have neither.
+	Kind    string `json:"kind,omitempty"`
+	Subject string `json:"subject,omitempty"`
+
+	// Holder folders (holderfolders.go): the folder name, the kernel's
+	// identifier of the holder's key, whether the app may work unattended,
+	// and then the holder's key WRAPPED under the app's DEK branch. Never the
+	// raw key.
+	HolderKey  string `json:"holder_key,omitempty"`
+	KeyID      string `json:"key_id,omitempty"`
+	Unattended bool   `json:"unattended,omitempty"`
+	WrappedKey string `json:"wrapped_key,omitempty"`
 }
 
 func (g *capabilityGrant) usable() bool {
@@ -296,6 +317,7 @@ func (b *capabilityBroker) create(container, appID, resourceApp, subject string,
 			Permissions:   append([]string(nil), decl.Permissions...),
 			ResourceLabel: decl.Label,
 			Request:       req,
+			Options:       decl.Options,
 		},
 		container: container,
 		appID:     appID,
@@ -342,6 +364,8 @@ func (b *capabilityBroker) resolve(nonce, status, capabilityID string, result ma
 		ServiceResult: result,
 		At:            time.Now().UTC(),
 		Permissions:   append([]string(nil), p.Capability.Permissions...),
+		Kind:          p.Capability.Kind,
+		Subject:       p.subject,
 	}
 	key := grantKey(p.appID, p.resource, p.subject)
 	b.grants[key] = g
@@ -407,6 +431,8 @@ type capabilityDecl struct {
 	Permissions []string
 	// ResourceApp is stamped by the control plane; see resourceAppFor.
 	ResourceApp string
+	// Options are the declaration's options, verbatim.
+	Options map[string]any
 }
 
 // ---- App-facing loopback endpoints -------------------------------------
@@ -419,7 +445,7 @@ func (s *Server) resourceDecl(container, resource string) (capabilityDecl, bool)
 			if label == "" {
 				label = d.Name
 			}
-			return capabilityDecl{Kind: d.Kind, Name: d.Name, Label: label, Permissions: d.Permissions, ResourceApp: d.ResourceApp}, true
+			return capabilityDecl{Kind: d.Kind, Name: d.Name, Label: label, Permissions: d.Permissions, ResourceApp: d.ResourceApp, Options: d.Options}, true
 		}
 	}
 	return capabilityDecl{}, false
@@ -442,6 +468,9 @@ func (s *Server) resourceDecl(container, resource string) (capabilityDecl, bool)
 // An unresolved kind returns "" and the caller refuses the ask, so a fleet
 // with no service for a kind cannot be talked into consenting to one.
 func (s *Server) resourceAppFor(decl capabilityDecl) string {
+	if decl.Kind == launcher.AppStorageKind {
+		return resourceAppSelf
+	}
 	if decl.ResourceApp != "" {
 		return decl.ResourceApp
 	}
@@ -479,6 +508,9 @@ func (s *Server) handleResourceRequest(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusNotImplemented, "no resource service for kind "+decl.Kind)
 		return
 	}
+	if resourceApp == resourceAppSelf {
+		resourceApp = appID
+	}
 	if g := s.caps.granted(appID, resource, body.Subject); g != nil {
 		switch {
 		case g.usable() && !body.Retry && !g.stale(decl):
@@ -511,6 +543,9 @@ func (s *Server) handleResourceRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	host := s.launcher.ContainerHostname(name)
+	if decl.Kind == launcher.AppStorageKind {
+		p.ServiceURL = "https://" + host + holderCapabilitiesPath
+	}
 	go s.pushCapabilityRequest(name, body.Subject, p.Nonce, host)
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"status": capabilityStatusPending, "nonce": p.Nonce, "app_host": host,
@@ -723,4 +758,123 @@ func (s *Server) headerIdentity(container string) (leafB64, challengeB64, eviden
 	return base64.StdEncoding.EncodeToString(block.Bytes),
 		base64.StdEncoding.EncodeToString(challenge),
 		base64.StdEncoding.EncodeToString(quote), nil
+}
+
+// resourceAppSelf marks a kind the enclave OS serves itself (app_storage):
+// the resource app is the calling app's own id.
+const resourceAppSelf = "self"
+
+// resolveHolder records an app_storage approval: the outcome plus the
+// holder folder's name, the kernel's key identifier and, when the app works
+// unattended, the holder's key wrapped under the app's DEK branch.
+func (b *capabilityBroker) resolveHolder(nonce, capabilityID string, result map[string]string, holderKey, keyID, wrapped string, unattended bool) (*capabilityPending, *capabilityGrant, error) {
+	p, g, err := b.resolve(nonce, "approved", capabilityID, result)
+	if err != nil {
+		return nil, nil, err
+	}
+	b.mu.Lock()
+	g.HolderKey = holderKey
+	g.KeyID = keyID
+	g.WrappedKey = wrapped
+	g.Unattended = unattended
+	key := grantKey(p.appID, p.resource, p.subject)
+	b.mu.Unlock()
+	if err := b.persist(p.appID, key, g); err != nil {
+		b.log.Warn("holder outcome not persisted (holds for this run)", zap.String("app_id", p.appID), zap.Error(err))
+	}
+	return p, g, nil
+}
+
+// grantsFor lists every recorded outcome of an app, from memory and from
+// the volume (records from before Kind and Subject were kept come back
+// without them and are skipped by callers that need those).
+func (b *capabilityBroker) grantsFor(appID string) []*capabilityGrant {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	seen := map[string]bool{}
+	var out []*capabilityGrant
+	if b.dir != "" {
+		entries, _ := os.ReadDir(filepath.Join(b.appDir(appID), "grants"))
+		for _, e := range entries {
+			if !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			key := strings.TrimSuffix(e.Name(), ".json")
+			if g, ok := b.grants[key]; ok {
+				out = append(out, g)
+				seen[key] = true
+				continue
+			}
+			raw, err := os.ReadFile(filepath.Join(b.appDir(appID), "grants", e.Name()))
+			if err != nil {
+				continue
+			}
+			var g capabilityGrant
+			if json.Unmarshal(raw, &g) != nil {
+				continue
+			}
+			b.grants[key] = &g
+			out = append(out, &g)
+			seen[key] = true
+		}
+	}
+	for key, g := range b.grants {
+		if seen[key] {
+			continue
+		}
+		// In-memory only (no dir): every grant belongs to some app; keep the
+		// ones whose key matches this app's records by re-deriving it.
+		if g.Subject != "" && grantKey(appID, g.Resource, g.Subject) == key {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// byCapabilityID finds an app's recorded outcome by the id the wallet holds.
+func (b *capabilityBroker) byCapabilityID(appID, capabilityID string) (string, *capabilityGrant) {
+	if capabilityID == "" {
+		return "", nil
+	}
+	for _, g := range b.grantsFor(appID) {
+		if g.CapabilityID == capabilityID && g.Subject != "" {
+			return grantKey(appID, g.Resource, g.Subject), g
+		}
+	}
+	return "", nil
+}
+
+// revoke marks an outcome revoked and drops what must not outlive it: the
+// wrapped key. The record stays (status "revoked") so the app's status
+// route says so rather than "unknown", until the holder approves again.
+func (b *capabilityBroker) revoke(appID, key string) {
+	b.mu.Lock()
+	g, ok := b.grants[key]
+	if !ok {
+		b.mu.Unlock()
+		return
+	}
+	g.Status = "revoked"
+	g.WrappedKey = ""
+	g.KeyID = ""
+	g.At = time.Now().UTC()
+	b.mu.Unlock()
+	if err := b.persist(appID, key, g); err != nil {
+		b.log.Warn("revoke not persisted (holds for this run)", zap.String("app_id", appID), zap.Error(err))
+	}
+}
+
+// pendingFor returns the unexpired ask already outstanding for (container,
+// resource, subject), so a caller that asks again while the holder has not
+// answered gets the same nonce and no second push.
+func (b *capabilityBroker) pendingFor(container, resource, subject string) (*capabilityPending, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.sweepLocked()
+	for _, p := range b.pending {
+		if p.container == container && p.resource == resource && p.subject == subject {
+			return p, true
+		}
+	}
+	return nil, false
 }

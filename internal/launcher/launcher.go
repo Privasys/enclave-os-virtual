@@ -559,6 +559,16 @@ type Launcher struct {
 	// die with the VM and silently defeat its purpose.
 	sovereignBranches map[string][]byte
 
+	// holderBranches holds, per container, the one-way branch of the same DEK
+	// from which the manager derives the key wrapping each holder's folder
+	// key (holderfolders.go). Same rule: vault-backed volumes only.
+	holderBranches map[string][]byte
+
+	// storageFacts is the attested storage statement per container (OID
+	// 6.2, oids.WorkloadStorage): what the manager attached, never what the
+	// app claims. Empty for a plain volume.
+	storageFacts map[string]string
+
 	// configAPI tracks the optional config-API decoration per container.
 	// nil entries (or a missing key) mean the container is not frozen.
 	// Guarded by freezeMu (NOT l.mu): Statuses() must stay readable while
@@ -682,6 +692,8 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		mintedIdentities:  make(map[string]map[[32]byte]time.Time),
 		attestationTokens: make(map[string]string),
 		sovereignBranches: make(map[string][]byte),
+		holderBranches:    make(map[string][]byte),
+		storageFacts:      make(map[string]string),
 		readyCh:           make(chan struct{}),
 	}
 
@@ -1541,6 +1553,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// VM).
 	var volEncryption string
 	var sovereignBranch []byte
+	var holderBranch []byte
 	if req.Storage != "" {
 		if l.volMgr == nil {
 			return nil, fmt.Errorf("launcher: encrypted storage requested but no 'containers' VG available")
@@ -1585,6 +1598,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 			// S_N later needs no vault round-trip; the DEK itself is
 			// still dropped after luksOpen as before.
 			sovereignBranch = deriveSovereignBranch(keyHex)
+			holderBranch = deriveHolderBranch(keyHex)
 		}
 		vi, err := l.volMgr.Create(req.Name, req.Storage, volumeKey, volReconstructed)
 		if err != nil {
@@ -1597,6 +1611,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		}
 		// Auto-inject the volume mount: /run/containers/<name>:/data
 		spec.Volumes = append(spec.Volumes, vi.MountPath+":/data")
+		// Holder folders (holderfolders.go): the layout an app_storage
+		// declaration needs, or a failed load.
+		if err := l.enableHolderFolders(req.Name, req.ResourceDecls, holderBranch); err != nil {
+			return nil, err
+		}
 	}
 
 	// Start container. Inject runtime env vars (vault token, manager
@@ -1762,6 +1781,12 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	if sovereignBranch != nil {
 		l.sovereignBranches[req.Name] = sovereignBranch
 	}
+	if holderBranch != nil {
+		l.holderBranches[req.Name] = holderBranch
+	}
+	if fact := storageFact(req.Storage != "", declaresAppStorage(req.ResourceDecls)); fact != "" {
+		l.storageFacts[req.Name] = fact
+	}
 	l.freezeMu.Lock()
 	if req.ConfigAPI != nil {
 		l.configAPI[req.Name] = req.ConfigAPI
@@ -1915,6 +1940,8 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	delete(l.persistentVolume, name)
 	delete(l.oidExts, name)
 	delete(l.sovereignBranches, name)
+	delete(l.holderBranches, name)
+	delete(l.storageFacts, name)
 	l.freezeMu.Lock()
 	delete(l.configAPI, name)
 	delete(l.configured, name)
@@ -2214,7 +2241,7 @@ func (l *Launcher) ContainerExtensions(containerName string) ([]pkix.Extension, 
 	digest := l.imageDigests[containerName]
 	volEnc := l.volumeEncryption[containerName]
 
-	return oids.ContainerExtensions(root, digest, spec.Image, volEnc, l.appIDs[containerName]), nil
+	return oids.ContainerExtensions(root, digest, spec.Image, volEnc, l.storageFacts[containerName], l.appIDs[containerName]), nil
 }
 
 // TPMEvents returns the application event log for RTMR[3] replay verification.
@@ -2429,7 +2456,7 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string, port
 	// that). Includes the platform-assigned app id at OID 3.6 — the same
 	// mgmt-provided value stamped on vault identity leaves (MintVaultIdentity),
 	// never the container's self-declared /.well-known extensions.
-	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc, l.appIDs[containerName])
+	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc, l.storageFacts[containerName], l.appIDs[containerName])
 
 	// Attested dependency set (OID 6.1): the platform-declared DIRECT
 	// dependencies, canonical SDK encoding. Manager-owned — the issuance

@@ -1289,3 +1289,14 @@ func digestToBytes(digest string) ([]byte, error) {
 	}
 	return hex.DecodeString(parts[1])
 }
+
+// HostUIDFor maps a uid inside a remapped container to the host uid that
+// owns its files (the single-range id map above). Callers that create files
+// on the host for a container process to own, such as holder folders, need
+// it; without the remap the ids are the same.
+func HostUIDFor(containerUID int) int {
+	if containerUID < 0 || containerUID >= usernsMapSize {
+		return containerUID
+	}
+	return usernsHostBaseUID + containerUID
+}

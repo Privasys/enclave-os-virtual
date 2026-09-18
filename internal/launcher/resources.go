@@ -12,6 +12,10 @@ type ResourceDecl struct {
 	Permissions []string `json:"permissions"`
 	Mount       string   `json:"mount,omitempty"`
 
+	// Options are the declaration's options, verbatim, for kinds that take
+	// some (app_storage: quota, unattended). The wallet phrases them.
+	Options map[string]any `json:"options,omitempty"`
+
 	// ResourceApp is the app id of the service that will mint this
 	// capability, stamped by the CONTROL PLANE and never read from the app's
 	// own manifest.

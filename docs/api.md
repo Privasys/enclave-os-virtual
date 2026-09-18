@@ -405,6 +405,80 @@ retries NTS first, so a poll can bring the runtime back.
 | 409 | No clock monitor pinned yet |
 | 503 | The poll needs NTS (a disagreement, or a raise larger than real elapsed time) and NTS is unreachable: the runtime fails closed until NTS answers |
 
+## Container-facing: holder folders and the event stream
+
+A container app reaches these on the manager's internal address with its
+own `PRIVASYS_CONTAINER_TOKEN` as the Bearer. They exist for apps that keep
+per-user data in custody without being able to read it without that user's
+standing consent.
+
+An app declares the resource in its manifest:
+
+```json
+"resources": [{"kind": "app_storage", "name": "holders", "label": "Your working files",
+               "permissions": ["read", "write"], "options": {"unattended": true}}]
+```
+
+The manager then keeps one folder per holder under `holders/` at the root of
+the app's encrypted volume (`/data/holders/<holder>` inside the container),
+each encrypted by the kernel with that holder's key. The app never sees a
+key and never names a path. The volume root and `holders/` are immutable to
+the app, so it has no unkeyed place to write. The holder's wallet delivers
+the key when the holder approves; with `unattended: true` the manager keeps
+a copy wrapped under a key derived from the app's own vault-backed volume
+key, so the folder reopens after a restart with no phone involved. The
+attested certificate states what was attached (OID 6.2, `WorkloadStorage`).
+
+### POST /api/v1/resources/{resource}/open
+
+Body: `{"subject": "<the holder>", "uid": 10001}`. `uid` (optional) is the
+container uid that will own the folder.
+
+| Status | Body |
+|--------|------|
+| 200 | `{"status":"open","path":"/data/holders/<holder>","capability_id":..., "used_bytes":...,"unattended":...}` |
+| 409 | `{"status":"needs_holder","nonce":...,"app_host":...}`: no approval yet, or no key kept here; the holder's wallet has been asked |
+| 403 | `{"status":"declined"}` or `{"status":"revoked"}` |
+| 501 | the app has no vault-backed volume, or declares no such resource |
+
+### POST /api/v1/resources/{resource}/close
+
+Body: `{"subject": "<the holder>"}`. Removes the holder's key from the
+kernel. `200 {"status":"closed"}` once the kernel reports the key absent;
+`202 {"status":"busy","processes":n}` while files under the folder are still
+in use (the key is then "incompletely removed" and those files stay readable
+until the processes end).
+
+### GET /api/v1/resources/{resource}/holders
+
+`{"holders":[{"key":"<holder>","state":"open|locked","used_bytes":...,"unattended":...}]}`
+
+### GET /api/v1/resources/{resource}/subjects
+
+The subjects with a recorded outcome for the resource, so an app keeps no
+record of its own: `{"subjects":[{"subject":...,"status":"approved|denied|revoked","capability_id":...,"at":...}]}`.
+
+### GET /api/v1/resources/events
+
+`text/event-stream`. `event:` is one of `capability.approved`,
+`capability.denied`, `capability.revoked`, `holder.opened`, `holder.closed`;
+`data:` is `{"resource","subject","capability_id","at"}`. There is no replay:
+a client reads status on connect and then listens.
+
+### The wallet's side, on the app's hostname
+
+`POST`, `GET` and `DELETE /{id}` under `/__privasys/v1/capabilities` on the
+app's public hostname are answered by the manager, not the app. A mint
+(`POST`) carries the holder's bearer and the wallet-instance proof, and
+`{"nonce","kind":"app_storage","setup":{"key_b64":"<64 bytes>","unattended":true}}`.
+`DELETE /{id}` revokes and verifies: the key is removed, whatever still holds
+files is stopped, and the answer is `{"status":"closed_and_verified"}` only
+once the kernel reports the key absent (`409` otherwise, `410` when already
+revoked). For a capability of another kind, `DELETE` drops the manager's
+record of the approval, so the app stops seeing it as approved.
+
+---
+
 ---
 
 ## Error format
