@@ -226,14 +226,10 @@ func (h *Attest) serveEvidence(w http.ResponseWriter, r *http.Request, g *RATLSC
 		return
 	}
 
-	// The quote time is trusted time, never the host clock: a client judges
-	// the quote's freshness by it. No trusted time, no evidence.
-	now, err := trustedNow()
-	if err != nil {
-		h.logger.Error("no trusted time; refusing to serve evidence", zap.Error(err))
-		h.fail(w, http.StatusServiceUnavailable, "trusted time unavailable")
-		return
-	}
+	// The quote time comes from the manager's clock, not the host's: a client
+	// judges the quote's freshness by it. Evidence is always served (see
+	// clock.go): a stale quote time is the verifier's to refuse.
+	now := issueTime()
 
 	resp := attestResponse{V: protocolVersion, Mode: req.Mode, TEE: g.attester.Name(), ClientEvidence: "none"}
 	var gpu []byte

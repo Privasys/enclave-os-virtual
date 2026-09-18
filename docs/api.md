@@ -366,10 +366,17 @@ the RA-TLS channel it travels on. Reached on the enclave's `-mgr` hostname
 `seq` (decimal).
 
 The runtime compares `t_ms` with its host clock. Within 10 s, the host time
-is confirmed and raises the floor. Otherwise it asks NTS servers, which
-decide whether the monitor or the host is wrong; a wrong host freezes
-trusted time at the NTS time and flags the clock. A `t_ms` below the floor is
-ignored (a replay or a slow monitor).
+is confirmed and raises the floor, by no more than the real time elapsed
+since the last raise plus 10 s (never more than an hour) unless NTS confirms
+the host. Otherwise it asks NTS servers (at most 8 s), which decide whether
+the monitor or the host is wrong; a wrong host freezes trusted time at the
+NTS time and flags the clock. A `t_ms` below the floor is ignored (a replay
+or a slow monitor). What a poll finds is reported in its reply only, never
+as an incident.
+
+The endpoint keeps answering while the runtime has no trusted time (Caddy
+always serves its certificate), and a poll whose signature verifies then
+retries NTS first, so a poll can bring the runtime back.
 
 **Response** `200 OK`
 
@@ -396,7 +403,7 @@ ignored (a replay or a slow monitor).
 | 400 | Malformed body |
 | 401 | Wrong enclave id, key id, or signature |
 | 409 | No clock monitor pinned yet |
-| 503 | Host and monitor disagree and NTS is unreachable: the runtime fails closed until NTS answers |
+| 503 | The poll needs NTS (a disagreement, or a raise larger than real elapsed time) and NTS is unreachable: the runtime fails closed until NTS answers |
 
 ---
 

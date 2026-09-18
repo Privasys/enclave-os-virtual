@@ -30,9 +30,10 @@
 //
 // # Time
 //
-// Leaf validity and quote times come from the manager's trusted clock, never
-// the host clock (see clock.go). When the manager cannot vouch for the time,
-// no certificate and no evidence are served.
+// Leaf validity and quote times come from the manager's clock, never the host
+// clock (see clock.go). Issuing is not a verification decision, so it never
+// fails over time: without trusted time the manager answers the floor, the
+// latest time it can vouch for.
 //
 // # Build
 //
@@ -199,14 +200,9 @@ func (g *RATLSCertGetter) Provision(ctx caddy.Context) error {
 // changes never rotate the key before its 24 hours are up.
 func (g *RATLSCertGetter) GetCertificate(_ context.Context, hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	sni := hello.ServerName
-	// Validity is judged and stamped in trusted time. Without it no
-	// certificate is served: the handshake fails closed.
-	now, err := trustedNow()
-	if err != nil {
-		g.logger.Error("no trusted time; refusing to serve a certificate",
-			zap.String("server_name", sni), zap.Error(err))
-		return nil, err
-	}
+	// Validity is stamped from the manager's clock, not the host's. The
+	// handshake never waits on or fails over time (see clock.go).
+	now := issueTime()
 	lk := leafKeyFor(sni, now)
 
 	g.mu.RLock()
@@ -227,7 +223,7 @@ func (g *RATLSCertGetter) GetCertificate(_ context.Context, hello *tls.ClientHel
 }
 
 // mint signs a leaf for lk carrying the hostname's OID extensions and no
-// evidence. now is trusted time.
+// evidence. now is the issuing time (see clock.go).
 func (g *RATLSCertGetter) mint(lk *leafKey, hello *tls.ClientHelloInfo, now time.Time) (*tls.Certificate, time.Time, error) {
 	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {

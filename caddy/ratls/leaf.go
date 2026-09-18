@@ -54,8 +54,8 @@ var leaves = struct {
 }{bySNI: map[string]*leafKey{}, bySPKI: map[[32]byte]*leafKey{}}
 
 // leafKeyFor returns the current key of an SNI, rotating it when it is older
-// than leafLifetime and purging keys past their retention. now is trusted
-// time: a key's age sets its certificate's validity.
+// than leafLifetime and purging keys past their retention. now is the
+// issuing time (see clock.go): a key's age sets its certificate's validity.
 func leafKeyFor(sni string, now time.Time) *leafKey {
 	leaves.mu.Lock()
 	defer leaves.mu.Unlock()
@@ -115,7 +115,7 @@ func reportData(spkiHash [32]byte, binding []byte) [64]byte {
 
 // deterministicQuote returns the cached deterministic quote of lk, minting it
 // when there is none, when it is older than leafLifetime, or when the GPU
-// evidence it commits to has changed. now is trusted time: the quote commits
+// evidence it commits to has changed. now is the issuing time: the quote commits
 // to it.
 func (lk *leafKey) deterministicQuote(g *RATLSCertGetter, now time.Time) (*cachedQuote, error) {
 	gpu, gpuSum, gpuOK := loadGPUEvidence(g.GPUEvidenceDir)

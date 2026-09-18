@@ -13,65 +13,85 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 )
 
-// Trusted time for the module. Leaf validity and quote timestamps must not
-// come from the host clock (a host that rolls it back could get an expired
-// certificate or a stale quote accepted), and Caddy runs as its own process,
-// so it asks the measured manager, which keeps the trusted clock. The manager
-// serves it on a root-only Unix socket in its runtime directory: nothing
-// Caddy proxies can reach it.
+// Issuing time for the module. Leaf validity and quote times should not come
+// from the host clock (a host that rolls it back could keep an expired leaf or
+// a stale quote in service), and Caddy runs as its own process, so the module
+// asks the measured manager, which keeps the trusted clock, over a root-only
+// Unix socket in the manager's runtime directory that nothing Caddy proxies
+// can reach.
+//
+// Issuing is not a verification decision: whoever checks a certificate or a
+// quote judges its dates against their own clock. So the module never refuses
+// a handshake or evidence over time. When the manager has no trusted time it
+// answers the floor (the latest time it can vouch for); when the manager
+// cannot be reached at all the module reuses its last answer, and before any
+// answer the host clock. Blocking instead would make the enclave unreachable,
+// including the manager API and the clock poll that lets it recover.
 const (
 	// clockSocket must match trustedtime.DefaultLocalSocket in the manager
 	// (a separate module, not a Go dependency of this one).
 	clockSocket = "/run/manager/clock.sock"
 	// clockCacheFor bounds how long one answer is reused.
 	clockCacheFor = time.Second
-	// clockTimeout bounds one request. The manager answers at once unless its
-	// clock is mid NTS fetch; a handshake then waits rather than proceeding on
-	// an unchecked time.
-	clockTimeout = 10 * time.Second
+	// clockTimeout bounds one request. The manager answers without touching
+	// the network, so this only matters when it is down or wedged.
+	clockTimeout = 2 * time.Second
 )
 
-// errNoTrustedTime is returned when the manager cannot vouch for the time;
-// callers fail closed (no certificate, no evidence).
-var errNoTrustedTime = errors.New("ra_tls: no trusted time")
-
-// trustedClock is a 1-second cache in front of the manager's clock. Fetches
-// are serialised, so a burst of handshakes costs one request.
-type trustedClock struct {
+// issueClock is a 1-second cache in front of the manager's issuing time.
+// Fetches are serialised, so a burst of handshakes costs one request.
+type issueClock struct {
 	fetch func(ctx context.Context) (time.Time, error)
+	host  func() time.Time
+	log   func(msg string, err error)
 
 	mu      sync.Mutex
 	value   time.Time
 	fetched time.Time // monotonic
 }
 
-var clock = &trustedClock{fetch: fetchManagerTime}
+var clock = &issueClock{
+	fetch: fetchManagerTime,
+	host:  time.Now,
+	log: func(msg string, err error) {
+		if g := current.Load(); g != nil && g.logger != nil {
+			g.logger.Warn(msg, zap.Error(err))
+		}
+	},
+}
 
-// now returns the trusted time, from the cache when it is under a second old.
-// It never returns less than a previous answer.
-func (c *trustedClock) now() (time.Time, error) {
+// now returns the issuing time, from the cache when it is under a second old.
+// It never fails and never returns less than a previous answer.
+func (c *issueClock) now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.fetched.IsZero() && time.Since(c.fetched) < clockCacheFor {
-		return c.value, nil
+		return c.value
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), clockTimeout)
 	defer cancel()
 	t, err := c.fetch(ctx)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("%w: %v", errNoTrustedTime, err)
+		if c.value.IsZero() {
+			c.log("manager clock unreachable and no earlier answer; issuing with the host clock", err)
+			return c.host().UTC()
+		}
+		c.log("manager clock unreachable; issuing with its last answer", err)
+		return c.value
 	}
 	if t.Before(c.value) {
 		t = c.value
 	}
 	c.value, c.fetched = t, time.Now()
-	return t, nil
+	return t
 }
 
-// trustedNow is what the module's time-sensitive paths call.
-func trustedNow() (time.Time, error) { return clock.now() }
+// issueTime is what the module stamps on leaves and quotes.
+func issueTime() time.Time { return clock.now() }
 
 var clockHTTP = &http.Client{
 	Transport: &http.Transport{
@@ -84,7 +104,7 @@ var clockHTTP = &http.Client{
 	},
 }
 
-// fetchManagerTime asks the manager for the trusted time.
+// fetchManagerTime asks the manager for the issuing time.
 func fetchManagerTime(ctx context.Context) (time.Time, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://manager/now", nil)
 	if err != nil {
@@ -96,14 +116,14 @@ func fetchManagerTime(ctx context.Context) (time.Time, error) {
 	}
 	defer resp.Body.Close()
 	var body struct {
-		UnixMs int64  `json:"unix_ms"`
-		Error  string `json:"error"`
+		UnixMs  int64 `json:"unix_ms"`
+		Trusted bool  `json:"trusted"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&body); err != nil {
 		return time.Time{}, fmt.Errorf("unreadable answer (%d): %w", resp.StatusCode, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return time.Time{}, fmt.Errorf("manager answered %d: %s", resp.StatusCode, body.Error)
+		return time.Time{}, fmt.Errorf("manager answered %d", resp.StatusCode)
 	}
 	if body.UnixMs <= 0 {
 		return time.Time{}, errors.New("manager answered no time")

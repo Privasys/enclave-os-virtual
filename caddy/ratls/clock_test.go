@@ -10,48 +10,57 @@ import (
 	"time"
 )
 
-func TestTrustedClockCacheAndFailClosed(t *testing.T) {
+func TestIssueClockCacheAndFallbacks(t *testing.T) {
 	base := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
-	answer, fail, calls := base, false, 0
-	c := &trustedClock{fetch: func(context.Context) (time.Time, error) {
-		calls++
-		if fail {
-			return time.Time{}, errors.New("manager down")
-		}
-		return answer, nil
-	}}
+	hostT := base.Add(-time.Hour)
+	answer, fail, calls := base, true, 0
+	c := &issueClock{
+		fetch: func(context.Context) (time.Time, error) {
+			calls++
+			if fail {
+				return time.Time{}, errors.New("manager down")
+			}
+			return answer, nil
+		},
+		host: func() time.Time { return hostT },
+		log:  func(string, error) {},
+	}
 
-	got, err := c.now()
-	if err != nil || !got.Equal(base) || calls != 1 {
-		t.Fatalf("first read: %v %v calls=%d", got, err, calls)
+	// Manager down and nothing known yet: the host clock, never a failure.
+	if got := c.now(); !got.Equal(hostT) {
+		t.Fatalf("first read with the manager down: %v", got)
+	}
+	fail = false
+	if got := c.now(); !got.Equal(base) || calls != 2 {
+		t.Fatalf("manager answer: %v calls=%d", got, calls)
 	}
 	// Within a second the cached answer is reused.
 	answer = base.Add(time.Hour)
-	if got, _ := c.now(); !got.Equal(base) || calls != 1 {
+	if got := c.now(); !got.Equal(base) || calls != 2 {
 		t.Fatalf("cache not used: %v calls=%d", got, calls)
 	}
 	// After a second it asks again, and never goes backwards.
 	c.fetched = time.Now().Add(-2 * clockCacheFor)
 	answer = base.Add(-time.Hour)
-	if got, _ := c.now(); !got.Equal(base) || calls != 2 {
+	if got := c.now(); !got.Equal(base) || calls != 3 {
 		t.Fatalf("went backwards or did not refetch: %v calls=%d", got, calls)
 	}
-	// An unreachable manager fails closed, even with a stale value cached.
+	// Manager unreachable later: the last answer, never a failure.
 	c.fetched = time.Now().Add(-2 * clockCacheFor)
 	fail = true
-	if _, err := c.now(); !errors.Is(err, errNoTrustedTime) {
-		t.Fatalf("want fail closed, got %v", err)
+	if got := c.now(); !got.Equal(base) {
+		t.Fatalf("want the last answer, got %v", got)
 	}
 }
 
-func TestLeafValidityFollowsTrustedTime(t *testing.T) {
+func TestLeafValidityFollowsIssueTime(t *testing.T) {
 	now := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
 	lk := leafKeyFor("clock-test.example", now)
 	if !lk.created.Equal(now) {
-		t.Fatalf("key created at %v, want the trusted %v", lk.created, now)
+		t.Fatalf("key created at %v, want %v", lk.created, now)
 	}
-	// Past its lifetime in trusted time, the key rotates.
+	// Past its lifetime, the key rotates.
 	if next := leafKeyFor("clock-test.example", now.Add(leafLifetime+time.Minute)); next == lk {
-		t.Fatal("key not rotated after its lifetime in trusted time")
+		t.Fatal("key not rotated after its lifetime")
 	}
 }

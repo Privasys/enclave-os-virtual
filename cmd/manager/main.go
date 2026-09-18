@@ -321,13 +321,16 @@ func runServe(args []string) error {
 		return clock.Run(gctx)
 	})
 
-	// Trusted time for Caddy's RA-TLS module (its own process), on a root-only
-	// Unix socket in the manager's runtime directory. A failure here is logged,
-	// not fatal: the module then fails closed (no certificate, no evidence),
-	// and the management API stays up to say why.
+	// Issuing time for Caddy's RA-TLS module (its own process), on a root-only
+	// Unix socket in the manager's runtime directory: trusted time when there
+	// is one, the floor otherwise. Certificates and evidence are always
+	// served; only verification decisions fail closed, so the management API
+	// and the clock poll stay reachable while trusted time is unavailable.
+	// A failure here is logged, not fatal: the module then falls back to its
+	// last answer, or to the host clock before it ever had one.
 	g.Go(func() error {
 		if err := trustedtime.ServeLocal(gctx, trustedtime.DefaultLocalSocket, clock, log); err != nil {
-			log.Error("trusted time local socket failed; RA-TLS will fail closed", zap.Error(err))
+			log.Error("issuing time local socket failed; RA-TLS falls back to its last answer or the host clock", zap.Error(err))
 		}
 		return nil
 	})

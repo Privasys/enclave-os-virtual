@@ -47,25 +47,22 @@ func TestHTTPReporterReceipt(t *testing.T) {
 }
 
 func TestLocalHandler(t *testing.T) {
-	h := LocalHandler(sourceFunc(func() (time.Time, error) { return t0, nil }))
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, LocalPath, nil))
-	var body localReply
-	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if rec.Code != 200 || body.UnixMs != t0.UnixMilli() {
-		t.Fatalf("got %d %s", rec.Code, rec.Body)
-	}
-	h = LocalHandler(sourceFunc(func() (time.Time, error) { return time.Time{}, ErrUnavailable }))
-	rec = httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, LocalPath, nil))
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("want 503, got %d", rec.Code)
+	for _, trusted := range []bool{true, false} {
+		h := LocalHandler(issuerFunc(func() (time.Time, bool) { return t0, trusted }))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, LocalPath, nil))
+		var body localReply
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		// Always 200: issuing never fails, even while trusted time does.
+		if rec.Code != 200 || body.UnixMs != t0.UnixMilli() || body.Trusted != trusted {
+			t.Fatalf("got %d %s", rec.Code, rec.Body)
+		}
 	}
 }
 
-type sourceFunc func() (time.Time, error)
+type issuerFunc func() (time.Time, bool)
 
-func (f sourceFunc) Now() (time.Time, error) { return f() }
+func (f issuerFunc) IssueTime() (time.Time, bool) { return f() }
 
 // The default reporter must reach the monitor enclave through the gateway's
 // splice path: it advertises the RA-TLS ALPN, and it accepts a certificate

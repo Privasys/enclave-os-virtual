@@ -207,41 +207,56 @@ A TDX guest takes its wall clock from the host, and every expiry check
 (tokens, vouchers, quote freshness, certificate validity, verdict windows)
 rests on it. A host that rolls its clock back could get an expired credential
 accepted. The manager therefore never reads the host clock for a security
-decision: it reads `internal/trustedtime`, and Caddy's RA-TLS module reads the
-same clock from the manager over a root-only Unix socket
-(`/run/manager/clock.sock`, cached for at most a second).
+decision: it reads `internal/trustedtime`.
 
 - **Floor.** The highest trusted time seen, kept on `/data` with a flag and
   its reason, and never below a compiled `MinTrustedTime`. A read returns the
-  host time while it is not behind the floor, and never less than the
-  previous read.
+  host time while it is not behind the floor and has kept pace with the
+  monotonic clock, and never less than the previous read.
 - **NTS (RFC 8915).** Two servers picked at random from ten compiled-in
   servers (one per operator) must agree within 2 s, else a third decides by
-  majority. NTS-KE certificates are checked against the floor, not the host
-  clock, and NTP replies slower than 2 s (measured on the monotonic clock)
-  are refused. The list is never configuration: changing it is a runtime
-  roll.
+  majority, all within 8 s. NTS-KE certificates are checked against the
+  floor, not the host clock, and NTP replies slower than 2 s (measured on
+  the monotonic clock) are refused. The list is never configuration:
+  changing it is a runtime roll.
+- **Monotonic clock.** Go's monotonic clock (the TSC on TDX, which the host
+  cannot change) measures real elapsed time since the host time was last
+  confirmed. A host clock that fell more than 10 s behind it (frozen or run
+  slow while staying above the floor) is checked against NTS.
 - **Boot.** One NTS fetch must succeed before the first time-sensitive
   decision. Until then every such decision fails closed.
 - **Monitor poll.** A platform monitor polls `POST /api/v1/clock/poll` with a
   signed "the time is at least T" (see [docs/api.md](docs/api.md)). T that
-  agrees with the host (10 s) confirms the host time and raises the floor. On
-  disagreement NTS decides who is wrong. The monitor's T never becomes
-  trusted time on its own.
+  agrees with the host (10 s) confirms the host time and raises the floor,
+  by no more than the monotonic time since the last raise plus 10 s (never
+  more than an hour) unless NTS confirms the host. On disagreement NTS
+  decides who is wrong. The monitor's T never becomes trusted time on its
+  own. Without a confirmation for 15 minutes the runtime checks itself
+  against NTS.
 - **Host wrong.** Trusted time freezes at the NTS time (never an offset from
   the host clock, which would still move at the host's pace) and the clock is
-  flagged. While flagged, every 100th read refetches NTS; the flag clears once
-  the host is back at or above the floor and within 10 s of NTS.
+  flagged. While flagged, every 100th read refetches NTS in the background;
+  the flag clears once the host is back at or above the floor and within
+  10 s of NTS.
 - **Host behind the floor** (by more than 1 s) is an incident: it is posted to
-  the monitor's incident URL with a fresh 32-byte nonce, and the monitor's
-  Ed25519 receipt (bytes `privasys-clock-receipt/v1`, `enclave_id`, `nonce`,
+  the monitor's incident URL with a fresh 32-byte nonce, over the RA-TLS ALPN
+  so the gateway splices it to the monitor enclave, and the monitor's Ed25519
+  receipt (bytes `privasys-clock-receipt/v1`, `enclave_id`, `nonce`,
   `incident_id`, joined with `\n`) must verify under the pinned key within
   5 s. Then NTS is fetched and the clock is flagged. With no monitor pinned
   yet, incidents are logged only.
+- **Incidents and polls.** What a poll finds is reported in its reply only.
+  Conditions found elsewhere (host behind the floor, boot, a failed refetch,
+  the monotonic and self checks) are sent as incidents, once per condition
+  until it changes.
 - **Fail closed.** No receipt, no NTS answer, or no majority: a trusted-time
-  read returns an error, never a zero time, and every caller refuses what
-  depended on it. Without trusted time Caddy serves no certificate and no
-  evidence.
+  read returns an error, never a zero time, and every verification decision
+  refuses what depended on it. Issuing is different: Caddy's RA-TLS module
+  stamps leaves and quote times with the manager's issuing time (trusted time,
+  or the floor while there is none), read over a root-only Unix socket
+  (`/run/manager/clock.sock`, cached for at most a second). Certificates and
+  evidence are always served, so the manager API and the poll stay reachable,
+  and a signed poll that arrives while the clock fails closed retries NTS.
 
 The monitor is pinned by the management service through
 `PUT /api/v1/clock/config`. A swapped key can only cause NTS fetches and false
