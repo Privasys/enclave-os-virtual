@@ -654,6 +654,7 @@ func (s *Server) Start(ctx context.Context) error {
 	dispatcher := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := hostOnly(r.Host)
 		if _, ok := s.lookupAppHost(host); ok {
+			setRouteLabel(r, "app")
 			// Wallet-facing capability endpoints live on the app's hostname but
 			// are answered by the manager for any app that declares resources
 			// (before the ingress gate: the wallet presents no client cert).
@@ -744,6 +745,8 @@ func (s *Server) Start(ctx context.Context) error {
 			return
 		}
 		mux.ServeHTTP(w, r)
+		// The mux records the pattern it matched on r; empty when none did.
+		setRouteLabel(r, r.Pattern)
 	})
 
 	s.server = &http.Server{
@@ -1706,13 +1709,50 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	promhttp.Handler().ServeHTTP(w, r)
 }
 
+// routeLabelKey carries a *string the dispatcher fills with the bounded
+// label a request is counted under.
+type routeLabelKey struct{}
+
+// setRouteLabel records the label under which the request is counted.
+func setRouteLabel(r *http.Request, label string) {
+	if p, ok := r.Context().Value(routeLabelKey{}).(*string); ok {
+		*p = label
+	}
+}
+
+// metricMethods are the methods counted under their own name.
+var metricMethods = map[string]bool{
+	http.MethodGet: true, http.MethodHead: true, http.MethodPost: true,
+	http.MethodPut: true, http.MethodPatch: true, http.MethodDelete: true,
+	http.MethodOptions: true,
+}
+
+// metricsMiddleware counts requests by method, route and status.
+//
+// Every label must come from a bounded set. The path label used to be
+// r.URL.Path: this middleware wraps the whole listener, app traffic
+// included, so each distinct path any client sent became a permanent
+// series in the manager's memory (and the paths of other apps' users were
+// kept and served on /metrics). It is now "app" for proxied app traffic,
+// the matched pattern for the manager's own API, and "other" otherwise;
+// an unknown method is counted as "OTHER".
 func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		route := new(string)
+		r = r.WithContext(context.WithValue(r.Context(), routeLabelKey{}, route))
 		rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(rw, r)
+		label := *route
+		if label == "" {
+			label = "other"
+		}
+		method := r.Method
+		if !metricMethods[method] {
+			method = "OTHER"
+		}
 		apiRequests.WithLabelValues(
-			r.Method,
-			r.URL.Path,
+			method,
+			label,
 			fmt.Sprintf("%d", rw.statusCode),
 		).Inc()
 	})
