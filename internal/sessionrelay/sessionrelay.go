@@ -88,6 +88,11 @@ const (
 	defaultTTL = 15 * time.Minute
 	initPath   = "/__privasys/session-bootstrap"
 
+	// defaultMaxSessions caps live sessions per manager; gcInterval is how
+	// often expired ones are swept. See Manager.admit.
+	defaultMaxSessions = 50_000
+	gcInterval         = 30 * time.Second
+
 	// EncAuth rebind rate limit: at most rebindRateLimit voucher-backed
 	// bootstrap attempts (accepted or rejected) per sid per window. A
 	// misbehaving iframe re-bootstrapping in a tight loop burns CPU on
@@ -103,6 +108,11 @@ type Manager struct {
 	sessions map[string]*Session
 	ttl      time.Duration
 	now      func() time.Time
+
+	// maxSessions caps the live session table; lastGC is the last sweep of
+	// expired sessions. See admit.
+	maxSessions int
+	lastGC      time.Time
 
 	// Per-app session-relay identity keys (enc_pub), keyed by hostKey(Host).
 	// Each app fronted by the manager gets its OWN enc_pub — vault-backed
@@ -213,6 +223,7 @@ func NewManager() *Manager {
 		muxUsedStreams:         make(map[string]map[uint64]struct{}),
 		ttl:                    defaultTTL,
 		now:                    time.Now,
+		maxSessions:            defaultMaxSessions,
 	}
 }
 
@@ -543,10 +554,11 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 	}
 	sess.Sub = sub
 
-	m.mu.Lock()
-	m.gcLocked()
-	m.sessions[sessionID] = sess
-	m.mu.Unlock()
+	if !m.admit(sessionID, sess) {
+		w.Header().Set("Retry-After", "30")
+		http.Error(w, "too many sessions", http.StatusServiceUnavailable)
+		return
+	}
 
 	resp := initResponse{
 		SessionID:     sessionID,
@@ -713,6 +725,38 @@ func (m *Manager) evictLocked(id string) {
 	delete(m.sessions, id)
 	delete(m.muxSessionStreams, id)
 	delete(m.muxUsedStreams, id)
+}
+
+// admit stores a new session unless the table is full.
+//
+// Bootstrap is unauthenticated by design (a session is a transport handle;
+// identity comes later), so the number of live sessions is whatever rate a
+// client sends at times the TTL. It used to be unbounded, and every
+// bootstrap swept the whole table under the global lock that every sealed
+// request also takes, so the cost of each new session grew with the
+// number of sessions a client had already created.
+//
+// Now the table holds at most maxSessions; past that a bootstrap is
+// refused and existing sessions carry on. Expired sessions are swept every
+// gcInterval, or at most once a second while the table is full, not on
+// every insert. Lookups check expiry themselves, so a later sweep never
+// extends a session.
+func (m *Manager) admit(id string, sess *Session) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	full := len(m.sessions) >= m.maxSessions
+	since := now.Sub(m.lastGC)
+	if since >= gcInterval || (full && since >= time.Second) {
+		m.gcLocked()
+		m.lastGC = now
+		full = len(m.sessions) >= m.maxSessions
+	}
+	if full {
+		return false
+	}
+	m.sessions[id] = sess
+	return true
 }
 
 func (m *Manager) gcLocked() {
