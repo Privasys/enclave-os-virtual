@@ -169,6 +169,18 @@ type capabilityBroker struct {
 	keys    map[string]ed25519.PrivateKey // app id hex -> key
 	pending map[string]*capabilityPending // nonce -> ask
 	grants  map[string]*capabilityGrant   // grantKey -> outcome
+	// settled remembers, for the pending TTL, which outcome consumed a nonce:
+	// the wallet mints a holder folder here and then reports the outcome to
+	// "the app" on the nonce route, which is this same process. That second
+	// call must find the ask settled, not unknown.
+	settled map[string]*settledAsk // nonce -> outcome
+}
+
+// settledAsk is what the nonce route can still say about a consumed nonce.
+type settledAsk struct {
+	container string
+	grant     *capabilityGrant
+	at        time.Time
 }
 
 func newCapabilityBroker(dir string, log *zap.Logger) *capabilityBroker {
@@ -181,6 +193,7 @@ func newCapabilityBroker(dir string, log *zap.Logger) *capabilityBroker {
 		keys:    map[string]ed25519.PrivateKey{},
 		pending: map[string]*capabilityPending{},
 		grants:  map[string]*capabilityGrant{},
+		settled: map[string]*settledAsk{},
 	}
 }
 
@@ -345,6 +358,24 @@ func (b *capabilityBroker) sweepLocked() {
 			delete(b.pending, n)
 		}
 	}
+	for n, s := range b.settled {
+		if s.at.Before(cut) {
+			delete(b.settled, n)
+		}
+	}
+}
+
+// settledBy returns the outcome that consumed nonce, when it was settled
+// within the pending TTL and for this container.
+func (b *capabilityBroker) settledBy(nonce, container string) (*capabilityGrant, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.sweepLocked()
+	s, ok := b.settled[nonce]
+	if !ok || s.container != container {
+		return nil, false
+	}
+	return s.grant, true
 }
 
 // resolve records the outcome and consumes the nonce (single use: a replayed
@@ -369,6 +400,7 @@ func (b *capabilityBroker) resolve(nonce, status, capabilityID string, result ma
 	}
 	key := grantKey(p.appID, p.resource, p.subject)
 	b.grants[key] = g
+	b.settled[nonce] = &settledAsk{container: p.container, grant: g, at: g.At}
 	b.mu.Unlock()
 	if err := b.persist(p.appID, key, g); err != nil {
 		// The outcome holds for this process either way; failing the wallet's
@@ -656,8 +688,30 @@ func (s *Server) serveCapabilityWellKnown(w http.ResponseWriter, r *http.Request
 		// credential by design. A forged result can only point the app at
 		// coordinates bound to a key it does not hold, which fails on first
 		// use; so it costs a failed call and a log line, not access.
-		if p, ok := s.caps.get(body.Nonce); !ok || p.container != container {
+		p, ok := s.caps.get(body.Nonce)
+		if !ok || p.container != container {
+			// A holder folder is minted at this enclave OS (holderfolders.go),
+			// which settles the ask; the wallet then tells "the app" as it
+			// does for every kind, and the app's host is this process. The
+			// outcome was recorded, and the wallet must hear that rather
+			// than "unknown", or it reports to the holder a grant that stands
+			// as one that failed.
+			if g, settled := s.caps.settledBy(body.Nonce, container); settled {
+				if g.Status == body.Status && (body.CapabilityID == "" || body.CapabilityID == g.CapabilityID) {
+					s.writeJSON(w, http.StatusOK, map[string]string{"status": g.Status})
+					return
+				}
+				s.jsonError(w, http.StatusConflict, "this request was already settled otherwise")
+				return
+			}
 			s.jsonError(w, http.StatusNotFound, "unknown or expired capability request")
+			return
+		}
+		// A holder folder without its key is not approved: the approval IS
+		// the mint, with the holder's key, on the holder-authenticated route.
+		// A bare "approved" here would record consent no folder can honour.
+		if p.Capability.Kind == launcher.AppStorageKind && body.Status == "approved" {
+			s.jsonError(w, http.StatusConflict, "a holder folder is approved by minting at "+holderCapabilitiesPath+", with the holder's key")
 			return
 		}
 		p, g, err := s.caps.resolve(body.Nonce, body.Status, body.CapabilityID, body.ServiceResult)

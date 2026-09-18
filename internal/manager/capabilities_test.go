@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"go.uber.org/zap"
 )
 
@@ -104,6 +105,58 @@ func TestCapabilityWellKnownScopedToContainer(t *testing.T) {
 	s.serveCapabilityWellKnown(rec, httptest.NewRequest("POST", capabilityResultPath, strings.NewReader(`{"nonce":"x","status":"maybe"}`)), "ctr-a")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad status: %d", rec.Code)
+	}
+}
+
+// A holder folder is minted at the enclave OS, which settles the ask; the
+// wallet then reports the outcome on the nonce route as for every kind. That
+// report must find the ask settled (200), a report that disagrees with what
+// was recorded is a conflict, and a bare "approved" for a holder folder,
+// without the mint, records nothing.
+func TestCapabilityResultAfterHolderMintAndWithoutIt(t *testing.T) {
+	s := &Server{log: zap.NewNop(), caps: newCapabilityBroker("", nil)}
+	decl := testDecl
+	decl.Kind = launcher.AppStorageKind
+	decl.Name = "workspace"
+	p, _ := s.caps.create("ctr-a", "app1", resourceAppSelf, "sub", decl)
+
+	// The mint settles it (what mintHolderCapability records, in short).
+	if _, _, err := s.caps.resolveHolder(p.Nonce, "cap-7", map[string]string{"path": "/data/holders/x"}, "x", "k", "", true); err != nil {
+		t.Fatal(err)
+	}
+	post := func(body, container string) int {
+		rec := httptest.NewRecorder()
+		s.serveCapabilityWellKnown(rec, httptest.NewRequest("POST", capabilityResultPath, strings.NewReader(body)), container)
+		return rec.Code
+	}
+	same := `{"nonce":"` + p.Nonce + `","status":"approved","capability_id":"cap-7"}`
+	if c := post(same, "ctr-a"); c != http.StatusOK {
+		t.Fatalf("outcome after the mint: %d", c)
+	}
+	if c := post(same, "ctr-b"); c != http.StatusNotFound {
+		t.Fatalf("settled ask on another host: %d", c)
+	}
+	if c := post(`{"nonce":"`+p.Nonce+`","status":"denied"}`, "ctr-a"); c != http.StatusConflict {
+		t.Fatalf("a report that disagrees: %d", c)
+	}
+	if c := post(`{"nonce":"`+p.Nonce+`","status":"approved","capability_id":"other"}`, "ctr-a"); c != http.StatusConflict {
+		t.Fatalf("another capability id: %d", c)
+	}
+
+	// Without the mint, "approved" on the nonce route is refused and records
+	// nothing; "denied" is delivered as for any kind.
+	p2, _ := s.caps.create("ctr-a", "app1", resourceAppSelf, "sub2", decl)
+	if c := post(`{"nonce":"`+p2.Nonce+`","status":"approved","capability_id":"cap-8"}`, "ctr-a"); c != http.StatusConflict {
+		t.Fatalf("approval without the key: %d", c)
+	}
+	if g := s.caps.granted("app1", "workspace", "sub2"); g != nil {
+		t.Fatalf("nothing must be recorded: %+v", g)
+	}
+	if c := post(`{"nonce":"`+p2.Nonce+`","status":"denied"}`, "ctr-a"); c != http.StatusOK {
+		t.Fatalf("denial: %d", c)
+	}
+	if g := s.caps.granted("app1", "workspace", "sub2"); !g.denied() {
+		t.Fatalf("denial must be recorded: %+v", g)
 	}
 }
 
