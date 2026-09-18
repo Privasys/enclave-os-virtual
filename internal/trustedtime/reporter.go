@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -38,17 +39,47 @@ func ReceiptSignedBytes(enclaveID, nonce, incidentID string) []byte {
 	return []byte("privasys-clock-receipt/v1\n" + enclaveID + "\n" + nonce + "\n" + incidentID)
 }
 
-// HTTPReporter posts incidents over plain HTTPS (system roots). TLS only
-// carries the report: what authenticates the answer is the receipt signature
-// under the pinned monitor key, bound to a fresh 32-byte nonce.
+// RATLSALPN is the ALPN an RA-TLS client advertises. The platform gateway
+// splices connections that carry it straight through to the enclave, which
+// terminates TLS itself; connections without it are terminated at the
+// gateway and re-dialled inward in plaintext.
+const RATLSALPN = "privasys-ratls/1"
+
+// HTTPReporter posts incidents to the monitor. What authenticates the answer
+// is the receipt signature under the pinned monitor key, bound to a fresh
+// 32-byte nonce; TLS only carries the report.
 type HTTPReporter struct {
 	Client *http.Client
 }
 
-// NewHTTPReporter returns a reporter with a default client. The caller's
-// context bounds each report.
+// NewHTTPReporter returns a reporter whose client reaches the monitor
+// enclave end to end. The caller's context bounds each report.
+//
+// The client advertises RATLSALPN so the gateway splices the connection to
+// the monitor enclave. Without it the gateway terminates TLS and forwards the
+// request in plaintext, and the monitor's runtime refuses plaintext /api/* on
+// that leg (sealed transport required): no receipt could ever arrive, and a
+// host behind the floor would fail closed for good.
+//
+// The certificate the monitor presents is an RA-TLS certificate chained to
+// the platform's own CA, not a web PKI one, so web PKI verification is
+// skipped. That costs nothing here: the connection stays encrypted, and the
+// receipt signature under the pinned key is the authentication. A party in
+// the middle can drop or delay a report (which fails closed), never forge a
+// receipt.
 func NewHTTPReporter() *HTTPReporter {
-	return &HTTPReporter{Client: &http.Client{}}
+	return &HTTPReporter{Client: &http.Client{Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{
+			MinVersion:         tls.VersionTLS13,
+			NextProtos:         []string{RATLSALPN, "http/1.1"},
+			InsecureSkipVerify: true, // see above: the receipt signature authenticates
+		},
+		// The marker goes first so the gateway splices; http/1.1 follows
+		// because the enclave's TLS server does not list the marker, and TLS
+		// 1.3 aborts a handshake with no common protocol. No h2: the exchange
+		// is HTTP/1.1 over the spliced connection.
+		ForceAttemptHTTP2: false,
+	}}}
 }
 
 // Report implements Reporter.

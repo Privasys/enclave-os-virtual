@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -65,3 +66,36 @@ func TestLocalHandler(t *testing.T) {
 type sourceFunc func() (time.Time, error)
 
 func (f sourceFunc) Now() (time.Time, error) { return f() }
+
+// The default reporter must reach the monitor enclave through the gateway's
+// splice path: it advertises the RA-TLS ALPN, and it accepts a certificate
+// that is not web PKI (the receipt signature is the authentication).
+func TestHTTPReporterSplicesWithRATLSALPN(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	cfg := MonitorConfig{
+		EnclaveID:    "enc-1",
+		MonitorKey:   base64.RawURLEncoding.EncodeToString(pub),
+		MonitorKeyID: KeyID(pub),
+	}
+	var offered []string
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+		var in incidentBody
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		sig := ed25519.Sign(priv, ReceiptSignedBytes(in.EnclaveID, in.Nonce, "inc-1"))
+		_ = json.NewEncoder(w).Encode(receipt{IncidentID: "inc-1", Nonce: in.Nonce, KeyID: cfg.MonitorKeyID, Sig: base64.RawURLEncoding.EncodeToString(sig)})
+	}))
+	srv.TLS = &tls.Config{GetConfigForClient: func(h *tls.ClientHelloInfo) (*tls.Config, error) {
+		offered = h.SupportedProtos
+		return nil, nil
+	}}
+	srv.StartTLS() // self-signed: no web PKI chain
+	defer srv.Close()
+	cfg.IncidentURL = srv.URL
+	if err := NewHTTPReporter().Report(context.Background(), cfg, Incident{Reason: ReasonHostBehindFloor}); err != nil {
+		t.Fatal(err)
+	}
+	if len(offered) == 0 || offered[0] != RATLSALPN {
+		t.Fatalf("offered ALPN %q, want %q first (the gateway would terminate, not splice)", offered, RATLSALPN)
+	}
+}
