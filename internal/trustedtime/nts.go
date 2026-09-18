@@ -80,32 +80,46 @@ func (q *NTSQuorum) Quorum(ctx context.Context, floor time.Time) (Sample, error)
 		r   reading
 		err error
 	}
-	ch := make(chan result, 2)
-	for i := 0; i < 2; i++ {
-		go func(s string) {
+	// Buffered for all three, so a query still running when the deadline
+	// passes can finish without blocking; its result is dropped.
+	ch := make(chan result, 3)
+	start := func(s string) {
+		go func() {
 			r, err := q.query(ctx, s, floor)
 			ch <- result{r, err}
-		}(pick(i))
+		}()
 	}
 	var ok []reading
 	var errs []string
-	for i := 0; i < 2; i++ {
-		res := <-ch
-		if res.err != nil {
-			errs = append(errs, res.err.Error())
-			continue
+	// collect waits for n results or the deadline, whichever comes first:
+	// the quorum as a whole never outlives ctx, whatever a server (or the
+	// host holding its packets) does.
+	collect := func(n int) {
+		for i := 0; i < n; i++ {
+			select {
+			case res := <-ch:
+				if res.err != nil {
+					errs = append(errs, res.err.Error())
+					continue
+				}
+				ok = append(ok, res.r)
+			case <-ctx.Done():
+				errs = append(errs, "deadline: "+ctx.Err().Error())
+				return
+			}
 		}
-		ok = append(ok, res.r)
 	}
+	start(pick(0))
+	start(pick(1))
+	collect(2)
 	if s, found := agreeing(ok); found {
 		return s, nil
 	}
-	// Disagreement or a missing reply: a third server decides.
-	r, err := q.query(ctx, pick(2), floor)
-	if err != nil {
-		errs = append(errs, err.Error())
-	} else {
-		ok = append(ok, r)
+	// Disagreement or a missing reply: a third server decides, if time is
+	// left.
+	if ctx.Err() == nil {
+		start(pick(2))
+		collect(1)
 	}
 	if s, found := agreeing(ok); found {
 		return s, nil
@@ -149,7 +163,7 @@ func queryNTS(ctx context.Context, server string, floor time.Time) (reading, err
 	var d net.Dialer
 	opt := &nts.SessionOptions{
 		TLSConfig: floorTLSConfig(server, floor),
-		Timeout:   keTimeout,
+		Timeout:   within(ctx, keTimeout),
 		Dialer: func(network, addr string, cfg *tls.Config) (*tls.Conn, error) {
 			dctx, cancel := context.WithTimeout(ctx, keTimeout)
 			defer cancel()
@@ -183,7 +197,7 @@ func queryNTS(ctx context.Context, server string, floor time.Time) (reading, err
 		return reading{}, err
 	}
 	start := time.Now()
-	resp, err := sess.QueryWithOptions(&ntp.QueryOptions{Timeout: maxRTT})
+	resp, err := sess.QueryWithOptions(&ntp.QueryOptions{Timeout: within(ctx, maxRTT)})
 	recv := time.Now()
 	if err != nil {
 		return reading{}, fmt.Errorf("%s: query: %w", server, err)
@@ -251,4 +265,18 @@ func verifyAgainstFloor(certs []*x509.Certificate, host string, floor time.Time,
 		return fmt.Errorf("nts: certificate of %s: %w", host, err)
 	}
 	return nil
+}
+
+// within returns d, shortened to what is left before ctx's deadline, so no
+// single network step outlives the quorum's budget.
+func within(ctx context.Context, d time.Duration) time.Duration {
+	if dl, ok := ctx.Deadline(); ok {
+		if left := time.Until(dl); left < d {
+			if left <= 0 {
+				return time.Millisecond
+			}
+			return left
+		}
+	}
+	return d
 }

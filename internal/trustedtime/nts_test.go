@@ -169,3 +169,23 @@ func TestLiveNTS(t *testing.T) {
 	}
 	t.Logf("quorum %v from %v (host offset %s)", s.Time, s.Servers, s.Time.Sub(time.Now()))
 }
+
+// A quorum never outlives its context, whatever the servers do.
+func TestQuorumHonoursDeadline(t *testing.T) {
+	q := &NTSQuorum{
+		servers: []string{"a", "b", "c"},
+		query: func(ctx context.Context, s string, _ time.Time) (reading, error) {
+			time.Sleep(2 * time.Second) // a server, or the host, holding the reply
+			return reading{server: s, est: t0, recv: time.Now()}, nil
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := q.Quorum(ctx, t0); err == nil {
+		t.Fatal("want an error past the deadline")
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("quorum took %s past a 200ms deadline", d)
+	}
+}

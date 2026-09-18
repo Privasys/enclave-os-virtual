@@ -77,8 +77,10 @@ const (
 	// signed receipt.
 	receiptTimeout = 5 * time.Second
 
-	// ntsTimeout bounds one quorum (key exchange plus NTP legs).
-	ntsTimeout = 20 * time.Second
+	// ntsTimeout bounds one whole quorum, key exchanges and NTP legs of every
+	// server included. It is kept well inside the monitor's poll timeout, so a
+	// host that delays NTS traffic makes a poll fail closed, not time out.
+	ntsTimeout = 8 * time.Second
 )
 
 // MinTrustedTime is the lowest floor a runtime ever starts from, so a fresh
