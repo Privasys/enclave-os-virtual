@@ -51,7 +51,7 @@ func TestHolderFoldersOnALoopDevice(t *testing.T) {
 	defer func() {
 		_ = setImmutable(mount, false)
 		_ = setImmutable(filepath.Join(mount, Dir), false)
-		exec.Command("umount", mount).Run()
+		exec.Command("umount", "-l", mount).Run()
 	}()
 
 	// Enable on a MOUNTED volume without the feature: tune2fs -O encrypt.

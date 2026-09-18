@@ -488,7 +488,7 @@ func holdersOf(folder string) []int {
 	var pids []int
 	for _, e := range entries {
 		pid, err := strconv.Atoi(e.Name())
-		if err != nil || pid == os.Getpid() {
+		if err != nil {
 			continue
 		}
 		if pidUses(pid, marker, st.Dev) {
