@@ -56,6 +56,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/oids"
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
 	"github.com/Privasys/enclave-os-virtual/internal/tpm"
+	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 	"github.com/Privasys/enclave-os-virtual/internal/vaultkey"
 	"github.com/Privasys/enclave-os-virtual/internal/volume"
 
@@ -1269,8 +1270,10 @@ func (l *Launcher) PrimaryAttestationServer() (url, token string) {
 // token's lifetime. Returns "" when the enclave credential is not configured or
 // the fetch fails (the verifier then fails closed).
 func (l *Launcher) ingressAttestationToken() string {
+	// Read before taking l.mu: a trusted-time read can wait on an NTS fetch.
+	now, nowErr := trustedtime.Now()
 	l.mu.Lock()
-	if l.ingressAttTok != "" && time.Now().Before(l.ingressAttExp) {
+	if nowErr == nil && l.ingressAttTok != "" && now.Before(l.ingressAttExp) {
 		tok := l.ingressAttTok
 		l.mu.Unlock()
 		return tok
@@ -1291,7 +1294,15 @@ func (l *Launcher) ingressAttestationToken() string {
 	// mgmt vends its cached service token, which may have only a minute
 	// left, and a verifier that kept it for 5 minutes presented an expired
 	// bearer to the attestation server (401) and refused every caller.
-	exp := time.Now().Add(5 * time.Minute)
+	// The deadline is in trusted time (the token's exp is wall time); with no
+	// trusted time the token is used once and not cached.
+	var exp time.Time
+	if now, err := trustedtime.Now(); err == nil {
+		exp = now.Add(5 * time.Minute)
+	}
+	if exp.IsZero() {
+		return tok
+	}
 	if tokExp, ok := bearerExpiry(tok); ok {
 		if early := tokExp.Add(-30 * time.Second); early.Before(exp) {
 			exp = early
@@ -2697,12 +2708,15 @@ func (l *Launcher) MintIdentity(name string) (certPEM, keyPEM []byte, err error)
 	if err != nil {
 		return nil, nil, err
 	}
+	// MintIdentity succeeded, so trusted time answered a moment ago; if it
+	// fails now, sweeping is simply skipped.
+	now, nowErr := trustedtime.Now()
 	l.mu.Lock()
 	if l.mintedIdentities[name] == nil {
 		l.mintedIdentities[name] = make(map[[32]byte]time.Time)
 	}
 	for h, exp := range l.mintedIdentities[name] {
-		if time.Now().After(exp) {
+		if nowErr == nil && now.After(exp) {
 			delete(l.mintedIdentities[name], h)
 		}
 	}
@@ -2712,12 +2726,17 @@ func (l *Launcher) MintIdentity(name string) (certPEM, keyPEM []byte, err error)
 }
 
 // ContainerOwnsIdentity reports whether spkiHash is the key of an unexpired
-// identity minted for the named container.
+// identity minted for the named container, by trusted time. Without trusted
+// time it reports false.
 func (l *Launcher) ContainerOwnsIdentity(name string, spkiHash [32]byte) bool {
+	now, err := trustedtime.Now()
+	if err != nil {
+		return false
+	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	exp, ok := l.mintedIdentities[name][spkiHash]
-	return ok && time.Now().Before(exp)
+	return ok && now.Before(exp)
 }
 
 // mintContainerToken returns a fresh 32-byte hex-encoded random token.

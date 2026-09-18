@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 )
 
 // Wallet-originated call proof.
@@ -103,12 +105,20 @@ func (v *WalletCallVerifier) IsWalletCall(r *http.Request) (instance string, ok 
 	if wia == "" || proof == "" {
 		return "", false
 	}
-	holder, thumb, err := v.verifyWIA(wia)
+	// Without trusted time neither the attestation's expiry nor the proof's
+	// freshness can be checked, so the call is simply not wallet-class (the
+	// exemption is a discount: failing closed charges normally).
+	now, err := trustedtime.Now()
+	if err != nil {
+		v.log.Warn("wallet call not checked: no trusted time", zap.Error(err))
+		return "", false
+	}
+	holder, thumb, err := v.verifyWIA(wia, now)
 	if err != nil {
 		v.log.Debug("wallet attestation rejected", zap.Error(err))
 		return "", false
 	}
-	if err := verifyCallProof(proof, holder, r.Method, r.URL.Path); err != nil {
+	if err := verifyCallProof(proof, holder, r.Method, r.URL.Path, now); err != nil {
 		v.log.Debug("wallet call proof rejected", zap.Error(err))
 		return "", false
 	}
@@ -118,12 +128,12 @@ func (v *WalletCallVerifier) IsWalletCall(r *http.Request) (instance string, ok 
 // verifyWIA checks the token is a wia+jwt signed by the wallet-provider
 // key and returns the holder key it binds plus a stable, non-identifying
 // instance thumbprint.
-func (v *WalletCallVerifier) verifyWIA(token string) (*ecdsa.PublicKey, string, error) {
+func (v *WalletCallVerifier) verifyWIA(token string, now time.Time) (*ecdsa.PublicKey, string, error) {
 	claims, err := v.verifySigned(token, wiaTyp)
 	if err != nil {
 		return nil, "", err
 	}
-	if exp, ok := claims["exp"].(float64); ok && time.Now().Unix() > int64(exp) {
+	if exp, ok := claims["exp"].(float64); ok && now.Unix() > int64(exp) {
 		return nil, "", errors.New("wallet attestation expired")
 	}
 	cnf, _ := claims["cnf"].(map[string]interface{})
@@ -230,8 +240,8 @@ func (v *WalletCallVerifier) lookupLocked(kid string) *jwkKey {
 
 // verifyCallProof checks a wallet-pop+jwt signed by the holder key and
 // bound to this request: htm/htu must match the method and path, and iat
-// must be fresh.
-func verifyCallProof(proof string, holder *ecdsa.PublicKey, method, path string) error {
+// must be fresh against now (trusted time).
+func verifyCallProof(proof string, holder *ecdsa.PublicKey, method, path string, now time.Time) error {
 	parts := strings.Split(proof, ".")
 	if len(parts) != 3 {
 		return errors.New("malformed proof")
@@ -282,7 +292,7 @@ func verifyCallProof(proof string, holder *ecdsa.PublicKey, method, path string)
 	if c.HTU != path {
 		return fmt.Errorf("proof bound to path %q, request is %q", c.HTU, path)
 	}
-	if d := time.Since(time.Unix(int64(c.IAT), 0)); d > proofFreshness || d < -proofFreshness {
+	if d := now.Sub(time.Unix(int64(c.IAT), 0)); d > proofFreshness || d < -proofFreshness {
 		return errors.New("proof outside the freshness window")
 	}
 	return nil

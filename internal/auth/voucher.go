@@ -9,7 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
+
+	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 )
 
 // splitJWT splits a compact JWS into its three segments, or returns nil when it
@@ -104,7 +105,11 @@ func (v *Verifier) VerifyVoucher(tokenStr string) (*VoucherClaims, error) {
 	if raw.Exp == 0 {
 		return nil, errors.New("auth: voucher has no exp")
 	}
-	if time.Now().Unix() > int64(raw.Exp) {
+	now, err := trustedtime.Now()
+	if err != nil {
+		return nil, fmt.Errorf("auth: cannot check voucher expiry: %w", err)
+	}
+	if now.Unix() > int64(raw.Exp) {
 		return nil, errors.New("auth: voucher expired")
 	}
 	if raw.JTI == "" {

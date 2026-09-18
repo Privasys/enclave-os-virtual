@@ -46,6 +46,7 @@ import (
 	ratls "enclave-os-mini/clients/go/ratls"
 
 	"github.com/Privasys/enclave-os-virtual/internal/tdx"
+	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 	"go.uber.org/zap"
 )
 
@@ -701,8 +702,14 @@ func (s *Server) headerIdentity(container string) (leafB64, challengeB64, eviden
 	if err != nil {
 		return "", "", "", err
 	}
+	// The challenge carries the time it was made, which the verifier checks
+	// for freshness: stamp it with trusted time, never the host clock.
+	issued, err := trustedtime.Now()
+	if err != nil {
+		return "", "", "", err
+	}
 	challenge := make([]byte, ratls.ContextLen)
-	binary.BigEndian.PutUint64(challenge[:8], uint64(time.Now().Unix()))
+	binary.BigEndian.PutUint64(challenge[:8], uint64(issued.Unix()))
 	if _, err := rand.Read(challenge[8:]); err != nil {
 		return "", "", "", err
 	}

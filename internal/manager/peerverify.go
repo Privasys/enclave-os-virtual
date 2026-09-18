@@ -19,6 +19,7 @@ import (
 	ratls "enclave-os-mini/clients/go/ratls"
 
 	"github.com/Privasys/enclave-os-virtual/internal/tdx"
+	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 	"go.uber.org/zap"
 )
 
@@ -53,7 +54,22 @@ type peerVerdict struct {
 	certFP [32]byte
 	host   string
 	info   ratls.CertInfo
-	at     time.Time
+	// at is the trusted time of the verification, mono the local monotonic
+	// instant. The window must hold on both: trusted time cannot be rolled
+	// back by the host, and the monotonic clock keeps moving while trusted
+	// time is frozen.
+	at   time.Time
+	mono time.Time
+}
+
+// current reports whether the verdict is still inside verdictTTL. Without
+// trusted time it is not.
+func (pv *peerVerdict) current() bool {
+	now, err := trustedtime.Now()
+	if err != nil {
+		return false
+	}
+	return time.Since(pv.mono) <= verdictTTL && now.Sub(pv.at) <= verdictTTL
 }
 
 // ingressVerifier holds the per-host allowed-caller policies and the
@@ -183,7 +199,7 @@ func (v *ingressVerifier) enforce(r *http.Request) error {
 	v.mu.RLock()
 	verdict := v.verdicts[conn]
 	v.mu.RUnlock()
-	if verdict == nil || verdict.certFP != fp || time.Since(verdict.at) > verdictTTL {
+	if verdict == nil || verdict.certFP != fp || !verdict.current() {
 		// A caller that presents a certificate must have proven it on this
 		// connection (present), and within the re-attestation window.
 		return fmt.Errorf("caller presented a certificate without current evidence on this connection (attest with client evidence first)")
@@ -327,16 +343,19 @@ func (v *ingressVerifier) verifyPeerEvidence(req *peerEvidenceRequest) error {
 		return fmt.Errorf("caller did not satisfy any allowed-caller entry: %w", lastErr)
 	}
 
+	at, err := trustedtime.Now()
+	if err != nil {
+		return fmt.Errorf("cannot record the caller's verdict: %w", err)
+	}
 	v.mu.Lock()
 	if len(v.verdicts) > 4096 {
-		now := time.Now()
 		for k, vd := range v.verdicts {
-			if now.Sub(vd.at) > verdictTTL {
+			if time.Since(vd.mono) > verdictTTL {
 				delete(v.verdicts, k)
 			}
 		}
 	}
-	v.verdicts[req.Conn] = &peerVerdict{certFP: sha256.Sum256(certDER), host: host, info: info, at: time.Now()}
+	v.verdicts[req.Conn] = &peerVerdict{certFP: sha256.Sum256(certDER), host: host, info: info, at: at, mono: time.Now()}
 	v.mu.Unlock()
 	v.log.Debug("ingress caller verified",
 		zap.String("host", host),
@@ -509,6 +528,11 @@ func (s *Server) handleEgressEvidence(w http.ResponseWriter, r *http.Request) {
 	preimage = append(preimage, ctx...)
 	preimage = append(preimage, hctx...)
 	reportData := sha512.Sum512(preimage)
+	quoteAt, err := trustedtime.Now()
+	if err != nil {
+		s.jsonError(w, http.StatusServiceUnavailable, "no trusted time for the quote: "+err.Error())
+		return
+	}
 	quote, err := tdx.GetQuote(reportData)
 	if err != nil {
 		s.log.Warn("egress evidence quote failed", zap.String("container", name), zap.Error(err))
@@ -522,7 +546,7 @@ func (s *Server) handleEgressEvidence(w http.ResponseWriter, r *http.Request) {
 		"tee":          "tdx",
 		"quote":        base64.RawURLEncoding.EncodeToString(quote),
 		"gpu_evidence": nil,
-		"quote_time":   time.Now().UTC().Format(ratls.QuoteTimeLayout),
+		"quote_time":   quoteAt.UTC().Format(ratls.QuoteTimeLayout),
 	})
 }
 

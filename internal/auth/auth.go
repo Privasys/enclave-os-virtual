@@ -45,6 +45,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 )
 
 // ContainerPermission represents a permitted container in a JWT
@@ -250,7 +252,13 @@ func (v *Verifier) verifyClaims(tokenStr string) (map[string]interface{}, error)
 	if !ok {
 		return nil, errors.New("auth: OIDC token has no exp claim")
 	}
-	now := time.Now().Unix()
+	// Trusted time, never the host clock: a host that rolls its clock back
+	// must not get an expired token accepted. No trusted time, no token.
+	trusted, err := trustedtime.Now()
+	if err != nil {
+		return nil, fmt.Errorf("auth: cannot check token expiry: %w", err)
+	}
+	now := trusted.Unix()
 	if now > int64(exp) {
 		return nil, errors.New("auth: OIDC token expired")
 	}

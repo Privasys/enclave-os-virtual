@@ -40,6 +40,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 )
 
 const (
@@ -488,14 +490,21 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "encauth rate-limited", http.StatusTooManyRequests)
 			return
 		}
-		payload, vErr := verifier.Verify(req.EncAuth, VerifyContext{
-			EncStaticPub:              encPubBytes,
-			QuoteDigest:               quoteDigest,
-			HasQuoteDigest:            hasQuoteDigest,
-			ExpectedWorkloadDigest:    expectedWorkloadDigest,
-			HasExpectedWorkloadDigest: hasExpectedWorkloadDigest,
-			Now:                       m.now(),
-		})
+		// The voucher's validity window is judged by trusted time, never the
+		// host clock; without trusted time the voucher is refused and the
+		// bootstrap falls through to the legacy path like any other refusal.
+		var payload *EncAuthPayload
+		verifyAt, vErr := trustedtime.Now()
+		if vErr == nil {
+			payload, vErr = verifier.Verify(req.EncAuth, VerifyContext{
+				EncStaticPub:              encPubBytes,
+				QuoteDigest:               quoteDigest,
+				HasQuoteDigest:            hasQuoteDigest,
+				ExpectedWorkloadDigest:    expectedWorkloadDigest,
+				HasExpectedWorkloadDigest: hasExpectedWorkloadDigest,
+				Now:                       verifyAt,
+			})
+		}
 		if vErr != nil {
 			// Fall through to legacy bootstrap path so the SDK can
 			// retry with a fresh FIDO2 ceremony. Surface the raw error

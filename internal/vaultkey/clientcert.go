@@ -18,6 +18,7 @@ import (
 
 	"github.com/Privasys/enclave-os-virtual/internal/oids"
 	"github.com/Privasys/enclave-os-virtual/internal/tdx"
+	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 )
 
 // RA-TLS v2 client identity of a container (and of the manager's own vault
@@ -51,7 +52,12 @@ func MintIdentity(imageDigest, appID []byte) (*Identity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("vaultkey: serial: %w", err)
 	}
-	now := time.Now()
+	// Validity from trusted time: a host that rolled its clock back must not
+	// get an identity whose window it chose.
+	now, err := trustedtime.Now()
+	if err != nil {
+		return nil, fmt.Errorf("vaultkey: identity validity: %w", err)
+	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: "enclave-os-virtual client"},
@@ -107,7 +113,11 @@ func clientCertificateFn(imageDigest, appID []byte) func(*tls.CertificateRequest
 	return func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 		identityCache.mu.Lock()
 		defer identityCache.mu.Unlock()
-		if id := identityCache.m[key]; id != nil && time.Now().Add(time.Minute).Before(id.NotAfter) {
+		now, err := trustedtime.Now()
+		if err != nil {
+			return nil, fmt.Errorf("vaultkey: %w", err)
+		}
+		if id := identityCache.m[key]; id != nil && now.Add(time.Minute).Before(id.NotAfter) {
 			return id.Cert, nil
 		}
 		id, err := MintIdentity(imageDigest, appID)
@@ -125,6 +135,10 @@ func clientEvidenceFn() ratls.ClientEvidenceSource {
 	return func(req ratls.ClientEvidenceRequest) (*ratls.ClientEvidence, error) {
 		var rd [64]byte
 		copy(rd[:], req.ReportData)
+		quoteAt, err := trustedtime.Now()
+		if err != nil {
+			return nil, fmt.Errorf("vaultkey: quote time: %w", err)
+		}
 		quote, err := tdx.GetQuote(rd)
 		if err != nil {
 			return nil, fmt.Errorf("vaultkey: TDX quote: %w", err)
@@ -132,7 +146,7 @@ func clientEvidenceFn() ratls.ClientEvidenceSource {
 		return &ratls.ClientEvidence{
 			TEE:       "tdx",
 			Quote:     quote,
-			QuoteTime: time.Now().UTC().Format(ratls.QuoteTimeLayout),
+			QuoteTime: quoteAt.UTC().Format(ratls.QuoteTimeLayout),
 		}, nil
 	}
 }

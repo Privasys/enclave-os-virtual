@@ -15,6 +15,8 @@ import (
 	"enclave-os-mini/clients/go/spend"
 
 	"go.uber.org/zap"
+
+	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 )
 
 // Spend tokens (acting-subject plan v2): the paying user behind a call.
@@ -124,6 +126,16 @@ func (g *spendGate) enforce(r *http.Request, host, calleeAppID string) (int, err
 	}
 	if payer == nil {
 		return 0, nil
+	}
+	// The verifier judged the token's exp by the host clock; judge it again by
+	// trusted time, so a host that rolled its clock back cannot revive an
+	// expired spend token. No trusted time, no payer.
+	now, err := trustedtime.Now()
+	if err != nil {
+		return http.StatusForbidden, fmt.Errorf("spend token refused: %w", err)
+	}
+	if !payer.TokenExp.IsZero() && now.After(payer.TokenExp) {
+		return http.StatusForbidden, fmt.Errorf("spend token refused: expired")
 	}
 	if ok, reason := g.billable(r.Context(), payer); !ok {
 		g.log.Info("payer may not spend", zap.String("host", host),
