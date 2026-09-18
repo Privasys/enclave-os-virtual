@@ -664,6 +664,7 @@ func (s *Server) Start(ctx context.Context) error {
 			r.Header.Del(voucherJTIHeader)
 			r.Header.Del(voucherProviderHeader)
 			r.Header.Del(voucherClaimsHeader)
+			r.Header.Del(voucherRPIDHeader)
 			// Freeze gate: if the container declared a config_api at
 			// load time and has not yet been configured, serve only
 			// requests matching that endpoint and return 503 for
@@ -1727,6 +1728,15 @@ const (
 	voucherJTIHeader      = "X-Privasys-Voucher-Jti"
 	voucherProviderHeader = "X-Privasys-Voucher-Provider"
 	voucherClaimsHeader   = "X-Privasys-Voucher-Claims"
+	// voucherRPIDHeader carries the relying party the disclosure is billed to.
+	//
+	// The voucher has always named it, but the runtime parsed it and discarded
+	// it, so nothing established that the party presenting a voucher was the
+	// one it was minted for: any holder could spend it. The runtime cannot
+	// make that check itself — it has no notion of which relying party is
+	// calling, only which attested app is — so it forwards the verified value
+	// and the app, which does know the RP it authenticated, compares them.
+	voucherRPIDHeader = "X-Privasys-Voucher-Rp-Id"
 )
 
 // serveAppWithVoucher proxies an app request, metering it against a disclosure
@@ -1754,6 +1764,7 @@ func (s *Server) serveAppWithVoucher(w http.ResponseWriter, r *http.Request) {
 	r.Header.Set(voucherJTIHeader, vc.JTI)
 	r.Header.Set(voucherProviderHeader, vc.Provider)
 	r.Header.Set(voucherClaimsHeader, strings.Join(vc.Claims, ","))
+	r.Header.Set(voucherRPIDHeader, vc.RPID)
 
 	rw := &statusRecorder{ResponseWriter: w}
 	s.appProxy.ServeHTTP(rw, r)
