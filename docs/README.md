@@ -4,7 +4,7 @@ Documentation for Enclave OS (Virtual).
 
 | Document | Description |
 |----------|-------------|
-| [api.md](api.md) | API reference — all management endpoints |
+| [api.md](api.md) | API reference: all management endpoints, including the trusted-time clock routes |
 | [bootstrap.md](bootstrap.md) | Authentication model and bootstrap sequence |
 | [ra-tls.md](ra-tls.md) | RA-TLS architecture, OID extensions, Caddy integration |
 | [setup.md](setup.md) | Certificates, OIDC configuration, manager flags, systemd |

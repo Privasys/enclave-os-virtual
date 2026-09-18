@@ -4,6 +4,8 @@
 
 Enclave OS (Virtual) runs OCI containers inside [Intel TDX](https://www.intel.com/content/www/us/en/developer/tools/trust-domain-extensions/overview.html) (or AMD SEV-SNP) Confidential VMs. Every container image digest, declared `config_api`, volume mount, and platform configuration is measured into a deterministic Merkle tree and embedded in X.509 certificate extensions via RA-TLS. Per-deployment configuration is delivered in-process to the container's `config_api` endpoint and frozen by the manager; subsequent requests are blocked until configuration completes. Clients can verify the full workload stack in a single TLS handshake — no out-of-band attestation protocol required.
 
+The manager never takes the host's clock on trust: every expiry and freshness check reads a [trusted time](#trusted-time), confirmed against a signed floor from the platform clock monitor and against NTS servers, and failing closed for verification decisions when it cannot be confirmed.
+
 Part of the [Privasys](https://privasys.org) Confidential Computing platform, alongside [Enclave OS (Mini)](https://github.com/Privasys/enclave-os-mini) (SGX/WASM).
 
 ## Architecture
@@ -221,15 +223,22 @@ decision: it reads `internal/trustedtime`.
   changing it is a runtime roll.
 - **Boot.** One NTS fetch must succeed before the first time-sensitive
   decision. Until then every such decision fails closed.
-- **Monitor poll.** A platform monitor polls `POST /api/v1/clock/poll` with a
-  signed "the time is at least T" (see [docs/api.md](docs/api.md)). T that
+- **Monitor poll.** The platform clock monitor (`platform-monitoring`, an
+  instance of
+  [container-app-service-monitoring](https://github.com/Privasys/container-app-service-monitoring/blob/main/docs/platform-clock.md))
+  polls `POST /api/v1/clock/poll` every 5 minutes with a signed "the time is
+  at least T" (see [docs/api.md](docs/api.md#post-apiv1clockpoll)). T that
   agrees with the host (10 s) confirms the host time and raises the floor,
   by no more than the monotonic time since the last raise plus 10 s (never
   more than an hour) unless NTS confirms the host. On disagreement NTS
   decides who is wrong. The monitor's T never becomes trusted time on its
   own. The runtime does not police the host between polls: a host that
   blocks them is the monitor's to deal with (it quarantines an enclave
-  that misses them).
+  that misses two polls in a row).
+- **Quarantine.** When a poll shows a wrong host clock, no trusted time, or
+  drift over 10 s, the monitor has the platform quarantine the enclave: the
+  gateways refuse its app routes (503 with `Retry-After`) and keep its
+  `-mgr` route, so polls still reach this API. A clean poll releases it.
 - **Host wrong.** Trusted time freezes at the NTS time (never an offset from
   the host clock, which would still move at the host's pace) and the clock is
   flagged. While flagged, every 100th read refetches NTS in the background;
