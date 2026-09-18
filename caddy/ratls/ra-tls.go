@@ -28,6 +28,12 @@
 // with SHA-256(gpu_evidence) appended to the binding on a GPU host (the
 // "tdx-gpu" evidence family).
 //
+// # Time
+//
+// Leaf validity and quote times come from the manager's trusted clock, never
+// the host clock (see clock.go). When the manager cannot vouch for the time,
+// no certificate and no evidence are served.
+//
 // # Build
 //
 //	xcaddy build --with github.com/Privasys/enclave-os-virtual/caddy/ratls=.
@@ -193,16 +199,24 @@ func (g *RATLSCertGetter) Provision(ctx caddy.Context) error {
 // changes never rotate the key before its 24 hours are up.
 func (g *RATLSCertGetter) GetCertificate(_ context.Context, hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	sni := hello.ServerName
-	lk := leafKeyFor(sni)
+	// Validity is judged and stamped in trusted time. Without it no
+	// certificate is served: the handshake fails closed.
+	now, err := trustedNow()
+	if err != nil {
+		g.logger.Error("no trusted time; refusing to serve a certificate",
+			zap.String("server_name", sni), zap.Error(err))
+		return nil, err
+	}
+	lk := leafKeyFor(sni, now)
 
 	g.mu.RLock()
 	c, ok := g.cache[sni]
 	g.mu.RUnlock()
-	if ok && c.spkiHash == lk.spkiHash && time.Now().Before(c.notAfter) {
+	if ok && c.spkiHash == lk.spkiHash && now.Before(c.notAfter) {
 		return c.cert, nil
 	}
 
-	cert, notAfter, err := g.mint(lk, hello)
+	cert, notAfter, err := g.mint(lk, hello, now)
 	if err != nil {
 		return nil, err
 	}
@@ -213,8 +227,8 @@ func (g *RATLSCertGetter) GetCertificate(_ context.Context, hello *tls.ClientHel
 }
 
 // mint signs a leaf for lk carrying the hostname's OID extensions and no
-// evidence.
-func (g *RATLSCertGetter) mint(lk *leafKey, hello *tls.ClientHelloInfo) (*tls.Certificate, time.Time, error) {
+// evidence. now is trusted time.
+func (g *RATLSCertGetter) mint(lk *leafKey, hello *tls.ClientHelloInfo, now time.Time) (*tls.Certificate, time.Time, error) {
 	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("ra_tls: serial number generation failed: %w", err)
@@ -250,7 +264,7 @@ func (g *RATLSCertGetter) mint(lk *leafKey, hello *tls.ClientHelloInfo) (*tls.Ce
 		certCN = "enclave-default"
 	}
 
-	now := time.Now().UTC().Truncate(time.Minute)
+	now = now.UTC().Truncate(time.Minute)
 	notAfter := lk.created.Add(leafLifetime)
 	template := &x509.Certificate{
 		SerialNumber:          serialNumber,

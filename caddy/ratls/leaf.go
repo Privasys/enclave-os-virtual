@@ -54,11 +54,11 @@ var leaves = struct {
 }{bySNI: map[string]*leafKey{}, bySPKI: map[[32]byte]*leafKey{}}
 
 // leafKeyFor returns the current key of an SNI, rotating it when it is older
-// than leafLifetime and purging keys past their retention.
-func leafKeyFor(sni string) *leafKey {
+// than leafLifetime and purging keys past their retention. now is trusted
+// time: a key's age sets its certificate's validity.
+func leafKeyFor(sni string, now time.Time) *leafKey {
 	leaves.mu.Lock()
 	defer leaves.mu.Unlock()
-	now := time.Now()
 	for h, lk := range leaves.bySPKI {
 		if now.Sub(lk.created) > leafLifetime+previousRetention {
 			delete(leaves.bySPKI, h)
@@ -115,15 +115,16 @@ func reportData(spkiHash [32]byte, binding []byte) [64]byte {
 
 // deterministicQuote returns the cached deterministic quote of lk, minting it
 // when there is none, when it is older than leafLifetime, or when the GPU
-// evidence it commits to has changed.
-func (lk *leafKey) deterministicQuote(g *RATLSCertGetter) (*cachedQuote, error) {
+// evidence it commits to has changed. now is trusted time: the quote commits
+// to it.
+func (lk *leafKey) deterministicQuote(g *RATLSCertGetter, now time.Time) (*cachedQuote, error) {
 	gpu, gpuSum, gpuOK := loadGPUEvidence(g.GPUEvidenceDir)
 	lk.mu.Lock()
 	defer lk.mu.Unlock()
-	if lk.det != nil && time.Since(lk.det.minted) < leafLifetime && (!gpuOK || lk.det.gpuSum == gpuSum) && (gpuOK || lk.det.gpu == nil) {
+	if lk.det != nil && now.Sub(lk.det.minted) < leafLifetime && (!gpuOK || lk.det.gpuSum == gpuSum) && (gpuOK || lk.det.gpu == nil) {
 		return lk.det, nil
 	}
-	now := time.Now().UTC().Truncate(time.Minute)
+	now = now.UTC().Truncate(time.Minute)
 	quoteTime := now.Format(quoteTimeLayout)
 	binding := gpuBinding([]byte(quoteTime), gpuSum, gpuOK)
 	rd := reportData(lk.spkiHash, binding)

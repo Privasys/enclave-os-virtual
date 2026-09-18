@@ -226,11 +226,20 @@ func (h *Attest) serveEvidence(w http.ResponseWriter, r *http.Request, g *RATLSC
 		return
 	}
 
+	// The quote time is trusted time, never the host clock: a client judges
+	// the quote's freshness by it. No trusted time, no evidence.
+	now, err := trustedNow()
+	if err != nil {
+		h.logger.Error("no trusted time; refusing to serve evidence", zap.Error(err))
+		h.fail(w, http.StatusServiceUnavailable, "trusted time unavailable")
+		return
+	}
+
 	resp := attestResponse{V: protocolVersion, Mode: req.Mode, TEE: g.attester.Name(), ClientEvidence: "none"}
 	var gpu []byte
 	switch req.Mode {
 	case "deterministic":
-		cq, err := lk.deterministicQuote(g)
+		cq, err := lk.deterministicQuote(g, now)
 		if err != nil {
 			h.logger.Error("deterministic quote failed", zap.Error(err))
 			h.fail(w, http.StatusServiceUnavailable, "quote provider unavailable")
@@ -262,7 +271,7 @@ func (h *Attest) serveEvidence(w http.ResponseWriter, r *http.Request, g *RATLSC
 			return
 		}
 		resp.Quote = b64.EncodeToString(quote)
-		resp.QuoteTime = time.Now().UTC().Format(quoteTimeLayout)
+		resp.QuoteTime = now.UTC().Format(quoteTimeLayout)
 	}
 	if len(gpu) > 0 {
 		s := b64.EncodeToString(gpu)
