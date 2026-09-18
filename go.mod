@@ -9,6 +9,8 @@ go 1.25.0
 require (
 	enclave-os-mini/clients/go v0.0.0
 	github.com/Privasys/enclave-vaults-client/go v0.0.0
+	github.com/beevik/ntp v1.5.0
+	github.com/beevik/nts v0.3.2
 	github.com/coder/websocket v1.8.15
 	github.com/containerd/containerd/api v1.8.0
 	github.com/containerd/containerd/v2 v2.0.4
@@ -42,8 +44,6 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/Microsoft/hcsshim v0.12.9 // indirect
 	github.com/aead/cmac v0.0.0-20160719120800-7af84192f0b1 // indirect
-	github.com/beevik/ntp v1.5.0 // indirect
-	github.com/beevik/nts v0.3.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/containerd/cgroups/v3 v3.0.3 // indirect
@@ -105,3 +105,5 @@ require (
 // github.com/Privasys/enclave-os-virtual/caddy/ratls
 // github.com/caddyserver/caddy/v2 v2.9.1
 // github.com/google/go-tdx-guest v0.3.1
+
+replace github.com/secure-io/siv-go => ./third_party/siv-go
