@@ -1759,6 +1759,26 @@ func (s *Server) serveAppWithVoucher(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusForbidden, "invalid disclosure voucher")
 		return
 	}
+	// Replay gate. Settlement is idempotent at the ledger, so without a
+	// per-jti claim a voucher presented twice delivered twice and was charged
+	// once. Semantics are "one paid attempt": the claim is taken here and
+	// finalised only on delivery, so a failed disclosure releases it and the
+	// voucher can be presented again.
+	//
+	// Fails open when the management service is unreachable — see Claim.
+	if s.settler != nil {
+		claimCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		granted := s.settler.Claim(claimCtx, vc.JTI)
+		cancel()
+		if !granted {
+			s.log.Warn("disclosure voucher already delivered",
+				zap.String("jti", vc.JTI))
+			s.jsonError(w, http.StatusConflict,
+				"this disclosure voucher has already been delivered")
+			return
+		}
+	}
+
 	// The raw voucher never reaches the app; the verified claims do.
 	r.Header.Del(voucherHeader)
 	r.Header.Set(voucherJTIHeader, vc.JTI)

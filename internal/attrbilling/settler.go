@@ -87,3 +87,51 @@ func (s *Settler) post(ctx context.Context, jti, action string) error {
 	}
 	return nil
 }
+
+// Claim asks the management service for the disclosure claim on a voucher,
+// reporting whether the enclave may proceed.
+//
+// This is the replay gate. Settlement is idempotent at the ledger, so without
+// it a second delivery of the same voucher settled to a no-op and the relying
+// party obtained the disclosure again without being charged. The record cannot
+// live in the enclave: its memory is per-process, lost on restart, and not
+// shared when an app runs on more than one enclave.
+//
+// It FAILS OPEN. When the management service cannot be reached, or the settler
+// is not configured, the disclosure proceeds. The exposure that creates is a
+// replayable voucher, bounded by its own expiry; the alternative is refusing
+// paid disclosures whenever mgmt is unavailable. This mirrors the choice the
+// billing path already makes when a caller's billability is unknown.
+func (s *Settler) Claim(ctx context.Context, jti string) bool {
+	if s == nil {
+		return true
+	}
+	url := fmt.Sprintf("%s/api/v1/enclave/attribute-vouchers/%s/claim",
+		s.base, neturl.PathEscape(jti))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		s.log.Warn("voucher claim: build request", zap.String("jti", jti), zap.Error(err))
+		return true
+	}
+	req.Header.Set("Authorization", "Bearer "+s.token)
+	resp, err := s.http.Do(req)
+	if err != nil {
+		s.log.Warn("voucher claim: unreachable, proceeding",
+			zap.String("jti", jti), zap.Error(err))
+		return true
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+
+	switch {
+	case resp.StatusCode == http.StatusConflict:
+		// Refused: already delivered, or a fresh attempt is in flight.
+		return false
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return true
+	default:
+		s.log.Warn("voucher claim: unexpected status, proceeding",
+			zap.String("jti", jti), zap.Int("status", resp.StatusCode))
+		return true
+	}
+}
