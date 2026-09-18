@@ -342,8 +342,18 @@ func TestSetConfigRules(t *testing.T) {
 		IncidentURL:   "https://m.example/api/v1/clock/incidents",
 		ConfigVersion: 3,
 	}
-	if err := r.c.SetConfig(good); !errors.Is(err, ErrStaleConfig) {
+	// The same version is a retry: accepted, and the held config stays.
+	held := r.c.cfg
+	if err := r.c.SetConfig(good); err != nil {
 		t.Fatalf("same version: %v", err)
+	}
+	if r.c.cfg != held {
+		t.Fatal("a same-version push replaced the held config")
+	}
+	lower := good
+	lower.ConfigVersion = 2
+	if err := r.c.SetConfig(lower); !errors.Is(err, ErrStaleConfig) {
+		t.Fatalf("lower version: %v", err)
 	}
 	bad := good
 	bad.ConfigVersion = 4

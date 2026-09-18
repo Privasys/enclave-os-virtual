@@ -75,9 +75,18 @@ func TestClockConfigAndPoll(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("config: %d %s", rec.Code, rec.Body)
 	}
-	// The same version again is stale.
+	// The same version again is a retry: 200, no change.
 	rec = httptest.NewRecorder()
 	s.handleClockConfig(rec, withRole(httptest.NewRequest(http.MethodPut, "/api/v1/clock/config", bytes.NewReader(body)), "manager"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("same-version config: %d", rec.Code)
+	}
+	// A lower version is stale.
+	older := cfg
+	older.ConfigVersion = 1
+	oldBody, _ := json.Marshal(older)
+	rec = httptest.NewRecorder()
+	s.handleClockConfig(rec, withRole(httptest.NewRequest(http.MethodPut, "/api/v1/clock/config", bytes.NewReader(oldBody)), "manager"))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("stale config: %d", rec.Code)
 	}

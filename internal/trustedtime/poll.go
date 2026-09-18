@@ -48,13 +48,14 @@ func KeyID(pub []byte) string {
 // Config errors the HTTP layer maps to status codes.
 var (
 	ErrInvalidConfig = errors.New("invalid clock config")
-	ErrStaleConfig   = errors.New("config_version is not higher than the current one")
+	ErrStaleConfig   = errors.New("config_version is lower than the current one")
 	ErrNotConfigured = errors.New("no clock monitor configured")
 	ErrBadPoll       = errors.New("poll rejected")
 )
 
-// SetConfig validates and persists a monitor config. It refuses a version
-// that is not higher than the current one.
+// SetConfig validates and persists a monitor config. A lower version than the
+// current one is refused; the same version is a no-op (the management service
+// retries its push); only a higher one replaces the config.
 func (c *Clock) SetConfig(cfg MonitorConfig) error {
 	if cfg.EnclaveID == "" {
 		return fmt.Errorf("%w: enclave_id is required", ErrInvalidConfig)
@@ -76,8 +77,19 @@ func (c *Clock) SetConfig(cfg MonitorConfig) error {
 	cfg.MonitorKeyID = strings.ToLower(cfg.MonitorKeyID)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if cfg.ConfigVersion <= c.cfg.ConfigVersion {
+	if cfg.ConfigVersion < c.cfg.ConfigVersion {
 		return fmt.Errorf("%w (have %d, got %d)", ErrStaleConfig, c.cfg.ConfigVersion, cfg.ConfigVersion)
+	}
+	if cfg.ConfigVersion == c.cfg.ConfigVersion && c.cfg.configured() {
+		// A re-push of the version already held (a retry): accepted as a
+		// no-op. The held config stays; a change needs a higher version.
+		if cfg != c.cfg {
+			c.log.Warn("clock config re-pushed at the same version with different content; keeping the held one",
+				zap.Int64("config_version", cfg.ConfigVersion),
+				zap.String("held_key_id", c.cfg.MonitorKeyID),
+				zap.String("pushed_key_id", cfg.MonitorKeyID))
+		}
+		return nil
 	}
 	c.cfg = cfg
 	c.persistLocked()

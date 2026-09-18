@@ -17,9 +17,10 @@ const maxClockBody = 16 * 1024
 
 // handleClockConfig handles PUT /api/v1/clock/config: the management service
 // pins the clock monitor (its Ed25519 key, key id, incident URL and the id it
-// knows this enclave by). Manager role only; a config_version that is not
-// higher than the current one is refused with 409, so a replayed older config
-// can never swap the key back.
+// knows this enclave by). Manager role only. A config_version lower than the
+// current one is refused with 409, so a replayed older config can never swap
+// the key back; the current version again is a 200 no-op, because the
+// management service re-pushes until a poll reply shows the key id.
 func (s *Server) handleClockConfig(w http.ResponseWriter, r *http.Request) {
 	result := r.Context().Value(authResultKey).(*auth.AuthResult)
 	if !result.HasManagerAccess() {
