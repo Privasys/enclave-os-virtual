@@ -126,24 +126,16 @@ func TestTarOCILayoutSkipsLostFound(t *testing.T) {
 	}
 }
 
-func TestDiskFamily(t *testing.T) {
-	cases := []struct {
-		name   string
-		family string
-		ok     bool
-	}{
-		{"confidential-ai-prod-385944bfdc9e", "confidential-ai-prod", true},
-		{"confidential-ai-prod-dbc6a56cfc45", "confidential-ai-prod", true},
-		{"model-qwen36-35b-a3b-fp8", "", false},          // suffix not hex
-		{"confidential-ai-prod", "", false},              // "prod" too short/not hex
-		{"noseparator", "", false},
-		{"x-deadbeef01", "x", true},
-		{"trailing-DEADBEEF01", "", false},               // uppercase = not our convention
+// A pinned disk that is not attached fails the load; nothing is swapped in.
+func TestRequireDiskPresent(t *testing.T) {
+	if err := RequireDiskPresent("ghcr.io/privasys/app@sha256:ab"); err != nil {
+		t.Errorf("registry ref: %v", err)
 	}
-	for _, c := range cases {
-		fam, ok := diskFamily(c.name)
-		if ok != c.ok || fam != c.family {
-			t.Errorf("diskFamily(%q) = (%q,%v), want (%q,%v)", c.name, fam, ok, c.family, c.ok)
-		}
+	err := RequireDiskPresent("disk://no-such-app-prod-0123456789ab@sha256:ab")
+	if err == nil || !strings.Contains(err.Error(), "redeploy from the platform") {
+		t.Errorf("missing disk: got %v, want a refusal naming the remedy", err)
+	}
+	if err := RequireDiskPresent("disk://../etc@sha256:ab"); err == nil {
+		t.Error("traversal ref accepted")
 	}
 }
