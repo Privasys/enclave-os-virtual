@@ -2,7 +2,8 @@
 
 The management API is exposed exclusively through Caddy on `:443` at
 `manager.<machine-name>.<hostname>`, secured with RA-TLS. All endpoints
-except `/healthz` require an OIDC bearer token in the `Authorization` header.
+except `/healthz` and `/api/v1/clock/poll` (authenticated by its signature)
+require an OIDC bearer token in the `Authorization` header.
 
 See [setup.md](setup.md) for configuration and OIDC provider setup.
 
@@ -18,6 +19,8 @@ See [setup.md](setup.md) for configuration and OIDC provider setup.
 | DELETE | `/api/v1/containers/{name}` | Bearer | Manager | Unload a container |
 | PUT | `/api/v1/tls` | Bearer | Manager | Rotate intermediary CA cert+key |
 | PUT | `/api/v1/attestation-servers` | Bearer | Manager | Update attestation servers (URLs + tokens) |
+| PUT | `/api/v1/clock/config` | Bearer | Manager | Pin the clock monitor (key, incident URL) |
+| POST | `/api/v1/clock/poll` | Ed25519 signature | — | Clock monitor floor poll |
 
 "Monitoring+" means the `privasys-platform:monitoring` role or the
 `privasys-platform:manager` role (manager implies monitoring).
@@ -297,6 +300,103 @@ platform verifies quotes against authenticated attestation servers.
 | 400 | Missing or empty servers array |
 | 401 | Missing or invalid bearer token |
 | 403 | Insufficient role |
+
+---
+
+### PUT /api/v1/clock/config
+
+Pin the clock monitor: the platform service that polls this runtime with a
+signed "the time is at least T" and receives its clock incidents (see
+[Trusted time](../README.md#trusted-time)). Sent by the management service.
+The config is kept on the encrypted `/data` volume.
+
+**Request body**
+
+```json
+{
+  "enclave_id": "3f0c...-uuid",
+  "monitor_key": "base64url, no padding, 32-byte Ed25519 public key",
+  "monitor_key_id": "0123456789abcdef",
+  "incident_url": "https://monitor.example/api/v1/clock/incidents",
+  "config_version": 3
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `enclave_id` | string | The id the management service knows this enclave by. Must match the manager's `--enclave-id` when one is set |
+| `monitor_key` | string | The monitor's Ed25519 public key |
+| `monitor_key_id` | string | First 16 hex characters of lowercase hex SHA-256 of the raw 32-byte key; must match `monitor_key` |
+| `incident_url` | string | `https://` URL incidents are posted to |
+| `config_version` | int | A lower version than the one held is refused; the same version is a no-op; a higher one replaces the config |
+
+**Response** `200 OK`
+
+```json
+{ "status": "ok", "monitor_key_id": "0123456789abcdef", "config_version": 3 }
+```
+
+**Error responses**
+
+| Status | Condition |
+|--------|----------|
+| 400 | Invalid body, key, key id, URL or enclave id |
+| 401 | Missing or invalid bearer token |
+| 403 | Insufficient role |
+| 409 | `config_version` lower than the one held |
+
+---
+
+### POST /api/v1/clock/poll
+
+The clock monitor's poll. No bearer token: the Ed25519 signature under the
+pinned monitor key is the authentication, and the reply is authentic through
+the RA-TLS channel it travels on. Reached on the enclave's `-mgr` hostname
+(or by IP), which gateways keep routing while an enclave is quarantined.
+
+**Request body**
+
+```json
+{ "enclave_id": "3f0c...-uuid", "t_ms": 1789000000000, "seq": 42,
+  "key_id": "0123456789abcdef", "sig": "base64url" }
+```
+
+`sig` is the Ed25519 signature of the UTF-8 bytes of these lines joined with
+`\n` (no trailing newline): `privasys-clock-floor/v1`, `enclave_id`, `t_ms`,
+`seq` (decimal).
+
+The runtime compares `t_ms` with its host clock. Within 10 s, the host time
+is confirmed and raises the floor. Otherwise it asks NTS servers, which
+decide whether the monitor or the host is wrong; a wrong host freezes
+trusted time at the NTS time and flags the clock. A `t_ms` below the floor is
+ignored (a replay or a slow monitor).
+
+**Response** `200 OK`
+
+```json
+{ "enclave_id": "3f0c...-uuid", "runtime": "virtual",
+  "host_time_ms": 1789000000123, "trusted_time_ms": 1789000000123,
+  "floor_ms": 1789000000123, "flagged": false, "reason": "",
+  "verdict": "in_sync",
+  "nts": { "time_ms": 0, "servers": [] },
+  "config_key_id": "0123456789abcdef" }
+```
+
+| Field | Description |
+|-------|-------------|
+| `verdict` | `in_sync`, `monitor_clock_wrong`, `host_clock_wrong` or `ignored_stale` |
+| `flagged`, `reason` | The clock's flag: `host_clock_wrong` or `host_behind_floor`. `reason` is `nts_unreachable` with `trusted_time_ms` 0 while the runtime has no trusted time (boot fetch or a refetch failing) |
+| `nts` | The NTS result this poll used, when it needed one (`time_ms` 0 otherwise) |
+| `config_key_id` | The monitor key id this runtime holds; the management service re-pushes the config until it matches |
+
+**Error responses**
+
+| Status | Condition |
+|--------|----------|
+| 400 | Malformed body |
+| 401 | Wrong enclave id, key id, or signature |
+| 409 | No clock monitor pinned yet |
+| 503 | Host and monitor disagree and NTS is unreachable: the runtime fails closed until NTS answers |
 
 ---
 

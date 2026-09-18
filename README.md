@@ -201,6 +201,52 @@ Each container receives an independent **LVM logical volume** with its own LUKS2
 
 Container volumes live on the data PD's LVM volume group (not on the boot disk). Choose the PD size at instance creation time (e.g. `--create-disk=size=50,device-name=data` for ~46 GB of container storage).
 
+## Trusted time
+
+A TDX guest takes its wall clock from the host, and every expiry check
+(tokens, vouchers, quote freshness, certificate validity, verdict windows)
+rests on it. A host that rolls its clock back could get an expired credential
+accepted. The manager therefore never reads the host clock for a security
+decision: it reads `internal/trustedtime`, and Caddy's RA-TLS module reads the
+same clock from the manager over a root-only Unix socket
+(`/run/manager/clock.sock`, cached for at most a second).
+
+- **Floor.** The highest trusted time seen, kept on `/data` with a flag and
+  its reason, and never below a compiled `MinTrustedTime`. A read returns the
+  host time while it is not behind the floor, and never less than the
+  previous read.
+- **NTS (RFC 8915).** Two servers picked at random from ten compiled-in
+  servers (one per operator) must agree within 2 s, else a third decides by
+  majority. NTS-KE certificates are checked against the floor, not the host
+  clock, and NTP replies slower than 2 s (measured on the monotonic clock)
+  are refused. The list is never configuration: changing it is a runtime
+  roll.
+- **Boot.** One NTS fetch must succeed before the first time-sensitive
+  decision. Until then every such decision fails closed.
+- **Monitor poll.** A platform monitor polls `POST /api/v1/clock/poll` with a
+  signed "the time is at least T" (see [docs/api.md](docs/api.md)). T that
+  agrees with the host (10 s) confirms the host time and raises the floor. On
+  disagreement NTS decides who is wrong. The monitor's T never becomes
+  trusted time on its own.
+- **Host wrong.** Trusted time freezes at the NTS time (never an offset from
+  the host clock, which would still move at the host's pace) and the clock is
+  flagged. While flagged, every 100th read refetches NTS; the flag clears once
+  the host is back at or above the floor and within 10 s of NTS.
+- **Host behind the floor** (by more than 1 s) is an incident: it is posted to
+  the monitor's incident URL with a fresh 32-byte nonce, and the monitor's
+  Ed25519 receipt (bytes `privasys-clock-receipt/v1`, `enclave_id`, `nonce`,
+  `incident_id`, joined with `\n`) must verify under the pinned key within
+  5 s. Then NTS is fetched and the clock is flagged. With no monitor pinned
+  yet, incidents are logged only.
+- **Fail closed.** No receipt, no NTS answer, or no majority: a trusted-time
+  read returns an error, never a zero time, and every caller refuses what
+  depended on it. Without trusted time Caddy serves no certificate and no
+  evidence.
+
+The monitor is pinned by the management service through
+`PUT /api/v1/clock/config`. A swapped key can only cause NTS fetches and false
+alarms, never a wrong trusted time, because the monitor only triggers checks.
+
 ## Kernel hardening (BadAML mitigation)
 
 The disk image ships a patched Ubuntu HWE kernel with the **CVM guard** - a
