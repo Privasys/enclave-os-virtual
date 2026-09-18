@@ -32,6 +32,8 @@
 // POST   /api/v1/containers/{name}/sovereign-seal - version-bound sealing key S_N (container token, self only)
 // PUT    /api/v1/tls                 - rotate the intermediary CA cert+key
 // PUT    /api/v1/attestation-servers  - update attestation servers and tokens
+// PUT    /api/v1/clock/config        - pin the clock monitor (key, incident URL); manager role
+// POST   /api/v1/clock/poll          - clock monitor floor poll (Ed25519-signed, no bearer)
 // GET    /metrics                    - Prometheus metrics
 package manager
 
@@ -63,6 +65,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/network"
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
+	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 )
 
 const (
@@ -174,6 +177,11 @@ type Config struct {
 	// the same. An unknown kind resolves to nothing and the ask is refused,
 	// which is the direction to fail in.
 	ResourceApps map[string]string
+
+	// Clock is the trusted clock behind every security decision. It answers
+	// the clock monitor's polls and takes its config from the management
+	// service. nil disables both routes (dev/test only).
+	Clock *trustedtime.Clock
 }
 
 // Server is the management API server.
@@ -624,6 +632,15 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Attestation server management (require manager role).
 	mux.HandleFunc("PUT /api/v1/attestation-servers", s.requireAuth(s.handleSetAttestationServers))
+
+	// Trusted clock (clock.go). The management service pins the clock monitor
+	// (manager role). The monitor's poll carries no bearer: its Ed25519
+	// signature under the pinned key is the authentication, so it stays
+	// outside requireAuth. It arrives on the -mgr hostname (or by IP), which
+	// is never an app host, so the dispatcher below hands it to this mux
+	// without the app gates.
+	mux.HandleFunc("PUT /api/v1/clock/config", s.requireAuth(s.handleClockConfig))
+	mux.HandleFunc("POST /api/v1/clock/poll", s.handleClockPoll)
 
 	// Dispatch by Host header so the session-relay middleware can apply
 	// uniformly to both the platform API and every container app. Caddy

@@ -33,6 +33,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/manager"
 	"github.com/Privasys/enclave-os-virtual/internal/network"
 	"github.com/Privasys/enclave-os-virtual/internal/runtimestatus"
+	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 )
 
 const version = "0.2.0"
@@ -210,6 +211,20 @@ func runServe(args []string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Trusted clock: every security decision reads its time from here, never
+	// from the host clock directly. Installed before anything can serve a
+	// request; reads fail closed until its boot NTS fetch has succeeded. The
+	// state (floor, flag, monitor config) lives on the encrypted /data volume.
+	clock, err := trustedtime.New(trustedtime.Options{
+		StatePath: "/data/manager-clock.json",
+		EnclaveID: *rsEnclaveID,
+		Log:       log,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to load the trusted clock: %w", err)
+	}
+	trustedtime.Install(clock)
+
 	// Derive the management API hostname.
 	var platformHostname string
 	if *platformHostnameFlag != "" {
@@ -280,6 +295,7 @@ func runServe(args []string) error {
 		// Resource-capability state (P2) lives beside the registry on /data.
 		CapabilityStateDir: "/data/manager-capabilities",
 		ResourceApps:       resourceApps(),
+		Clock:              clock,
 	}
 	srv := manager.New(mgrCfg, log, l, verifier)
 
@@ -298,6 +314,22 @@ func runServe(args []string) error {
 
 	g.Go(func() error {
 		return srv.Start(gctx)
+	})
+
+	// Boot NTS fetch, and retries while the clock is failing closed.
+	g.Go(func() error {
+		return clock.Run(gctx)
+	})
+
+	// Trusted time for Caddy's RA-TLS module (its own process), on a root-only
+	// Unix socket in the manager's runtime directory. A failure here is logged,
+	// not fatal: the module then fails closed (no certificate, no evidence),
+	// and the management API stays up to say why.
+	g.Go(func() error {
+		if err := trustedtime.ServeLocal(gctx, trustedtime.DefaultLocalSocket, clock, log); err != nil {
+			log.Error("trusted time local socket failed; RA-TLS will fail closed", zap.Error(err))
+		}
+		return nil
 	})
 
 	// Optional runtime-status push sender.
