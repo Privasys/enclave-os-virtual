@@ -13,12 +13,12 @@ package trustedtime
 // Changing it is a runtime roll.
 //
 // Backups that also passed the handshake, for when an entry has to be
-// replaced: nts.time.nl, 1.nts.nothingtohide.nl, ntp.miuku.net,
+// replaced: 1.nts.nothingtohide.nl, ntp.miuku.net,
 // time.cincura.net, ntp01.maillink.ch.
 var NTSServers = [...]string{
 	"nts.netnod.se",           // Netnod (internet exchange), anycast, Sweden
 	"ptbtime1.ptb.de",         // PTB (national metrology institute), Germany
-	"ntppool1.time.nl",        // TimeNL (SIDN, the .nl registry), Netherlands
+	"nts.time.nl",             // TimeNL (SIDN, the .nl registry), Netherlands
 	"time.cloudflare.com",     // Cloudflare, anycast, served from EU sites
 	"ntp3.fau.de",             // FAU Erlangen-Nuernberg (university), Germany
 	"ntp1.cam.ac.uk",          // University of Cambridge, UK
