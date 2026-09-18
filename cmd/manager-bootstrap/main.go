@@ -65,6 +65,10 @@ func main() {
 		// creation on k vaults; reboots retry mgmt/vault transients.
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
+		if err := startTrustedClock(ctx, log, 10*time.Minute); err != nil {
+			fmt.Fprintf(os.Stderr, "manager-bootstrap: %v\n", err)
+			os.Exit(1)
+		}
 		dek, err := bootstrap.ResolveDataDEK(ctx, log, cfg, device)
 		if errors.Is(err, bootstrap.ErrNotVaultManaged) {
 			fmt.Fprintln(os.Stderr, "manager-bootstrap: volume is not vault-managed (BYOK fallback)")
@@ -109,6 +113,10 @@ func main() {
 		// Same budget as the boot path: reconstruct plus a create on k vaults.
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
+		if err := startTrustedClock(ctx, log, 10*time.Minute); err != nil {
+			fmt.Fprintf(os.Stderr, "manager-bootstrap: %v\n", err)
+			os.Exit(1)
+		}
 		if err := bootstrap.RotateDataDEK(ctx, log, cfg, device, b); err != nil {
 			fmt.Fprintf(os.Stderr, "manager-bootstrap: %v\n", err)
 			os.Exit(1)
@@ -124,6 +132,10 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "-measurements" {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
+		if err := startTrustedClock(ctx, zap.NewNop(), time.Minute); err != nil {
+			fmt.Fprintf(os.Stderr, "manager-bootstrap: measurements not reported: %v\n", err)
+			return
+		}
 		if err := bootstrap.ReportMeasurements(ctx, cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "manager-bootstrap: measurements not reported: %v\n", err)
 		}
@@ -134,6 +146,11 @@ func main() {
 	// the self-registration path resolves it from instance metadata.
 	// No overall deadline: the registration flow legitimately blocks
 	// until an admin approves (per-request timeouts still apply).
+	// Registration must not stall on a missing clock: anything in it that
+	// needs trusted time fails and retries on its own.
+	if err := startTrustedClock(context.Background(), zap.NewNop(), 2*time.Minute); err != nil {
+		fmt.Fprintf(os.Stderr, "manager-bootstrap: %v (continuing)\n", err)
+	}
 	if err := bootstrap.Run(context.Background(), cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "manager-bootstrap: %v\n", err)
 		os.Exit(1)
