@@ -187,6 +187,9 @@ func (h *eventHub) subscribe(container string) (chan resourceEvent, func()) {
 }
 
 func (h *eventHub) emit(container string, ev resourceEvent) {
+	if h == nil {
+		return
+	}
 	if ev.At == "" {
 		ev.At = time.Now().UTC().Format(time.RFC3339)
 	}

@@ -722,6 +722,9 @@ func (s *Server) serveCapabilityWellKnown(w http.ResponseWriter, r *http.Request
 		s.log.Info("capability outcome recorded",
 			zap.String("container", p.container), zap.String("resource", p.resource),
 			zap.String("status", g.Status), zap.String("capability_id", g.CapabilityID))
+		// The app follows the event stream for this (holderfolders.go): an
+		// outcome it only learns of by reading the status is a poll.
+		s.events.emit(p.container, resourceEvent{Type: "capability." + g.Status, Resource: p.resource, Subject: p.subject, CapabilityID: g.CapabilityID})
 		s.writeJSON(w, http.StatusOK, map[string]string{"status": g.Status})
 	default:
 		s.jsonError(w, http.StatusNotFound, "not found")
