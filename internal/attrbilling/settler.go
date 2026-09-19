@@ -88,8 +88,22 @@ func (s *Settler) post(ctx context.Context, jti, action string) error {
 	return nil
 }
 
-// Claim asks the management service for the disclosure claim on a voucher,
-// reporting whether the enclave may proceed.
+// ClaimResult is the outcome of a disclosure claim.
+type ClaimResult int
+
+const (
+	// ClaimGranted: this presentation may be disclosed.
+	ClaimGranted ClaimResult = iota
+	// ClaimDelivered: the voucher was already delivered, or an attempt is in
+	// flight.
+	ClaimDelivered
+	// ClaimUnavailable: no answer that grants the claim. The request could
+	// not be sent, failed at the network, timed out, or got a status other
+	// than 2xx or 409.
+	ClaimUnavailable
+)
+
+// Claim asks the management service for the disclosure claim on a voucher.
 //
 // This is the replay gate. Settlement is idempotent at the ledger, so without
 // it a second delivery of the same voucher settled to a no-op and the relying
@@ -97,41 +111,38 @@ func (s *Settler) post(ctx context.Context, jti, action string) error {
 // live in the enclave: its memory is per-process, lost on restart, and not
 // shared when an app runs on more than one enclave.
 //
-// It FAILS OPEN. When the management service cannot be reached, or the settler
-// is not configured, the disclosure proceeds. The exposure that creates is a
-// replayable voucher, bounded by its own expiry; the alternative is refusing
-// paid disclosures whenever mgmt is unavailable. This mirrors the choice the
-// billing path already makes when a caller's billability is unknown.
-func (s *Settler) Claim(ctx context.Context, jti string) bool {
+// It fails closed: only a 2xx grants the claim. The host carries this call, so
+// a gate that proceeded on a network failure could be switched off by the
+// host dropping it.
+func (s *Settler) Claim(ctx context.Context, jti string) ClaimResult {
 	if s == nil {
-		return true
+		return ClaimUnavailable
 	}
 	url := fmt.Sprintf("%s/api/v1/enclave/attribute-vouchers/%s/claim",
 		s.base, neturl.PathEscape(jti))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		s.log.Warn("voucher claim: build request", zap.String("jti", jti), zap.Error(err))
-		return true
+		return ClaimUnavailable
 	}
 	req.Header.Set("Authorization", "Bearer "+s.token)
 	resp, err := s.http.Do(req)
 	if err != nil {
-		s.log.Warn("voucher claim: unreachable, proceeding",
+		s.log.Warn("voucher claim: unreachable, refusing",
 			zap.String("jti", jti), zap.Error(err))
-		return true
+		return ClaimUnavailable
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 
 	switch {
 	case resp.StatusCode == http.StatusConflict:
-		// Refused: already delivered, or a fresh attempt is in flight.
-		return false
+		return ClaimDelivered
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
-		return true
+		return ClaimGranted
 	default:
-		s.log.Warn("voucher claim: unexpected status, proceeding",
+		s.log.Warn("voucher claim: unexpected status, refusing",
 			zap.String("jti", jti), zap.Int("status", resp.StatusCode))
-		return true
+		return ClaimUnavailable
 	}
 }

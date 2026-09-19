@@ -1850,18 +1850,24 @@ func (s *Server) serveAppWithVoucher(w http.ResponseWriter, r *http.Request) {
 	// finalised only on delivery, so a failed disclosure releases it and the
 	// voucher can be presented again.
 	//
-	// Fails open when the management service is unreachable — see Claim.
-	if s.settler != nil {
-		claimCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		granted := s.settler.Claim(claimCtx, vc.JTI)
-		cancel()
-		if !granted {
-			s.log.Warn("disclosure voucher already delivered",
-				zap.String("jti", vc.JTI))
-			s.jsonError(w, http.StatusConflict,
-				"this disclosure voucher has already been delivered")
-			return
-		}
+	// Fails closed: a voucher is disclosed only under a granted claim. A host
+	// with no settler configured cannot take one, so it refuses vouchers.
+	claimCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	claim := s.settler.Claim(claimCtx, vc.JTI)
+	cancel()
+	switch claim {
+	case attrbilling.ClaimGranted:
+	case attrbilling.ClaimDelivered:
+		s.log.Warn("disclosure voucher already delivered",
+			zap.String("jti", vc.JTI))
+		s.jsonError(w, http.StatusConflict,
+			"this disclosure voucher has already been delivered")
+		return
+	default:
+		w.Header().Set("Retry-After", "5")
+		s.jsonError(w, http.StatusServiceUnavailable,
+			"disclosure vouchers cannot be claimed right now")
+		return
 	}
 
 	// The raw voucher never reaches the app; the verified claims do.
