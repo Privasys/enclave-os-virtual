@@ -477,6 +477,19 @@ once the kernel reports the key absent (`409` otherwise, `410` when already
 revoked). For a capability of another kind, `DELETE` drops the manager's
 record of the approval, so the app stops seeing it as approved.
 
+### The holder's window onto their folder
+
+`GET` and `DELETE /__privasys/v1/holders/files?path=<relative>` on the app's
+public hostname, with the holder's bearer only: a directory answers a JSON
+listing (`{"label","path","entries":[{"name","dir","size","modified"}],
+"used_bytes"}`), a file answers its bytes as an attachment, `DELETE` removes
+a file or a directory tree (never the folder itself, which a revoke ends).
+Read and delete, no write: what is in the folder is the app's work under the
+holder's key. The path is confined to the folder (cleaned, resolved through
+symlinks, refused when it leaves it). A closed folder is opened from the
+wrapped copy when the app works unattended, `409` otherwise. This is what
+lets the holder's Drive or wallet show the folder without holding a copy.
+
 ---
 
 ---

@@ -346,6 +346,9 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		if strings.HasPrefix(r.URL.Path, holderCapabilitiesPath) {
 			return false // the wallet's mint, list and revoke: bearer plus wallet proof, no session
 		}
+		if strings.HasPrefix(r.URL.Path, holderFilesPath) {
+			return false // the holder's window onto their folder: bearer, no session
+		}
 		// Opt-in public static UI: an app that serves its own browser shell
 		// from the enclave declares its HTML/JS/CSS prefixes (measured image
 		// label). Those GET/HEAD loads are public code with no user data, so
@@ -689,6 +692,13 @@ func (s *Server) Start(ctx context.Context) error {
 			if strings.HasPrefix(r.URL.Path, holderCapabilitiesPath) {
 				if name := s.launcher.AppHostnameToContainer(host); name != "" && len(s.launcher.ContainerResourceDecls(name)) > 0 {
 					s.serveHolderCapabilities(w, r, name)
+					return
+				}
+			}
+			// The holder's window onto their folder (holderfiles.go).
+			if strings.HasPrefix(r.URL.Path, holderFilesPath) {
+				if name := s.launcher.AppHostnameToContainer(host); name != "" && len(s.launcher.ContainerResourceDecls(name)) > 0 {
+					s.serveHolderFiles(w, r, name)
 					return
 				}
 			}
