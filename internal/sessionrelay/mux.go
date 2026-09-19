@@ -351,6 +351,7 @@ func (mc *muxConn) handleOpen(sid string, stream uint64, payload []byte) {
 // run completes a registered stream: derive the per-stream keystream, verify
 // the SDK's sealed open, dial the app WebSocket, ack, then pump both ways.
 func (st *muxStream) run(openEnv []byte) {
+	defer st.recoverStream()
 	st.c2sPrefix, st.s2cPrefix = st.sess.wsStreamPrefixes(st.streamHex)
 	st.ad = []byte("WS:" + st.path + ":" + st.sess.ID + ":" + st.streamHex)
 
@@ -396,6 +397,7 @@ func (st *muxStream) run(openEnv []byte) {
 
 	// gateway -> app: unseal each queued DATA payload in arrival order.
 	go func() {
+		defer st.recoverStream()
 		var next uint64 = 1 // ctr 0 was the open envelope
 		for {
 			var sealed []byte
@@ -454,6 +456,15 @@ func (st *muxStream) sealAndSend(pt []byte, s2c *uint64) error {
 // shutdown tears the stream down exactly once. notifyGateway controls whether
 // a CLOSE frame is sent back (false when the gateway itself closed the
 // stream or the write side is already known broken).
+// recoverStream turns a panic on a stream goroutine into that stream's close.
+// These goroutines are started by the mux, outside net/http's per-connection
+// recovery, so an unrecovered panic would end the whole manager process.
+func (st *muxStream) recoverStream() {
+	if r := recover(); r != nil {
+		st.shutdown(websocket.StatusInternalError, "stream failed", true)
+	}
+}
+
 func (st *muxStream) shutdown(code websocket.StatusCode, reason string, notifyGateway bool) {
 	st.once.Do(func() {
 		st.cancel()

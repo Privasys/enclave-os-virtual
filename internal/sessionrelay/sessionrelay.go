@@ -956,10 +956,11 @@ func readCborText(in []byte, off int) (string, int, error) {
 	if err != nil {
 		return "", 0, err
 	}
-	if end+int(n) > len(in) {
+	l, err := cborLen(in, end, n)
+	if err != nil {
 		return "", 0, errors.New("cbor: text overrun")
 	}
-	return string(in[end : end+int(n)]), end + int(n), nil
+	return string(in[end : end+l]), end + l, nil
 }
 
 func readCborBytes(in []byte, off int) ([]byte, int, error) {
@@ -973,12 +974,23 @@ func readCborBytes(in []byte, off int) ([]byte, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	if end+int(n) > len(in) {
+	l, err := cborLen(in, end, n)
+	if err != nil {
 		return nil, 0, errors.New("cbor: bytes overrun")
 	}
-	out := make([]byte, n)
-	copy(out, in[end:end+int(n)])
-	return out, end + int(n), nil
+	out := make([]byte, l)
+	copy(out, in[end:end+l])
+	return out, end + l, nil
+}
+
+// cborLen bounds a length argument by what remains after end, comparing as
+// uint64 before any conversion: int(n) wraps negative for n >= 2^63 and
+// would pass an `end+int(n) > len(in)` check.
+func cborLen(in []byte, end int, n uint64) (int, error) {
+	if end > len(in) || n > uint64(len(in)-end) {
+		return 0, errors.New("cbor: length overrun")
+	}
+	return int(n), nil
 }
 
 func readCborArgument(in []byte, off int) (uint64, int, error) {
