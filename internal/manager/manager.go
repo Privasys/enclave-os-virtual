@@ -237,6 +237,10 @@ type Server struct {
 	// without the container app having to implement the protocol itself.
 	appProxy *httputil.ReverseProxy
 
+	// delivered remembers the vouchers this manager has already served, so a
+	// repeat it can answer itself does not go to the platform's record.
+	delivered *deliveredVouchers
+
 	// policy holds each app's pinned policy key and last accepted sequence.
 	// nil when signed app policy is not configured.
 	policy *apppolicy.Store
@@ -301,6 +305,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		sessionRelay: sr,
 		settler:      attrbilling.New(attrbilling.Config{MgmtBaseURL: cfg.MgmtBaseURL, EnclaveToken: cfg.EnclaveToken, Signer: cfg.EnclaveSigner}, log),
 		policy:       newPolicyStore(cfg.AppPolicyPath, v, log),
+		delivered:    newDeliveredVouchers(),
 		apiFees:      apifees.Open(feesPath, log),
 		walletCall:   auth.NewWalletCallVerifier(cfg.WalletProviderJWKS, log),
 	}
@@ -1894,6 +1899,16 @@ func (s *Server) serveAppWithVoucher(w http.ResponseWriter, r *http.Request) {
 	//
 	// Fails closed: a voucher is disclosed only under a granted claim. A host
 	// with no settler configured cannot take one, so it refuses vouchers.
+	// A voucher this enclave has already served is spent, and it can say so
+	// without asking. The platform's record still spans restarts and other
+	// enclaves; this answers the case it need not be asked about.
+	if s.delivered.Seen(vc.JTI, time.Now()) {
+		s.log.Warn("disclosure voucher already delivered by this enclave",
+			zap.String("jti", vc.JTI))
+		s.jsonError(w, http.StatusConflict,
+			"this disclosure voucher has already been delivered")
+		return
+	}
 	claimCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	claim := s.settler.Claim(claimCtx, vc.JTI)
 	cancel()
@@ -1928,6 +1943,11 @@ func (s *Server) serveAppWithVoucher(w http.ResponseWriter, r *http.Request) {
 	if s.settler != nil {
 		status := rw.status
 		jti := vc.JTI
+		if status == 0 || (status >= 200 && status < 300) {
+			s.delivered.Record(jti, time.Now())
+		} else {
+			s.delivered.Forget(jti)
+		}
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
