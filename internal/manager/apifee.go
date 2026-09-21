@@ -95,7 +95,7 @@ func (s *Server) serveAppBilled(w http.ResponseWriter, r *http.Request, containe
 	pt, priced := s.priceForRequest(containerName, r)
 	if !priced {
 		stripWalletProof(r)
-		s.serveAppWithVoucher(w, r)
+		s.serveAppWithVoucher(w, r, containerName)
 		return
 	}
 	rule := pt.Rule
@@ -114,7 +114,7 @@ func (s *Server) serveAppBilled(w http.ResponseWriter, r *http.Request, containe
 				zap.String("instance", instance))
 			stripWalletProof(r)
 			r.Header.Del(billingApprovedHeader)
-			s.serveAppWithVoucher(w, r)
+			s.serveAppWithVoucher(w, r, containerName)
 			return
 		}
 	}
@@ -147,7 +147,7 @@ func (s *Server) serveAppBilled(w http.ResponseWriter, r *http.Request, containe
 	r.Header.Del(billingApprovedHeader)
 
 	bw := &billedResponseWriter{ResponseWriter: w, charged: expected}
-	s.serveAppWithVoucher(bw, r)
+	s.serveAppWithVoucher(bw, r, containerName)
 
 	// Charge only on delivery: a failed call costs nothing. status 0 means
 	// the handler wrote a body with no explicit status — an implicit 200.

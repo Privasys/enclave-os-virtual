@@ -608,6 +608,12 @@ type Launcher struct {
 	// multi-minute image import.
 	prices map[string]apifees.Table
 
+	// attributeProviders is the marketplace namespace each container
+	// attests for, from the same measured label. Empty for every app that
+	// is not an attester, which is all but one of them. Guarded by
+	// freezeMu, alongside prices, and read on the same request path.
+	attributeProviders map[string]string
+
 	// freezeMu guards configAPI + configured. Always acquired AFTER l.mu
 	// when both are held (writers inside Load/Unload); Statuses takes it
 	// alone.
@@ -697,6 +703,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		configured:        make(map[string]bool),
 		configOwners:      make(map[string][]string),
 		prices:            make(map[string]apifees.Table),
+		attributeProviders: make(map[string]string),
 		failures:          make(map[string]string),
 		billingFrozen:     make(map[string]string),
 		containerTokens:   make(map[string]string),
@@ -1544,10 +1551,19 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// missing or unparsable label prices nothing (unpriced is safe,
 	// mis-priced is not).
 	var priceTable apifees.Table
+	// The marketplace namespace this app attests for, from the same measured
+	// label. Only an app that declares one may consume a disclosure voucher,
+	// so that an ordinary app cannot spend an attester's.
+	var attributeProvider string
 	if labels, lerr := l.mgr.ImageLabels(ctx, img); lerr != nil {
 		l.log.Warn("image labels unreadable; app runs unpriced",
 			zap.String("name", req.Name), zap.Error(lerr))
 	} else if raw := labels[apifees.ManifestLabel]; raw != "" {
+		if ns := apifees.ParseAttributeProvider(raw); ns != "" {
+			attributeProvider = ns
+			l.log.Info("attribute provider declared",
+				zap.String("name", req.Name), zap.String("namespace", ns))
+		}
 		tbl, perr := apifees.ParseManifest(raw)
 		if perr != nil {
 			l.log.Warn("org.privasys.manifest label unparsable; app runs unpriced",
@@ -1823,6 +1839,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		l.prices[req.Name] = priceTable
 	} else {
 		delete(l.prices, req.Name) // idempotent reload with prices removed
+	}
+	if attributeProvider != "" {
+		l.attributeProviders[req.Name] = attributeProvider
+	} else {
+		delete(l.attributeProviders, req.Name)
 	}
 	l.freezeMu.Unlock()
 	l.clearFailure(req.Name)
@@ -2637,6 +2658,16 @@ func (l *Launcher) ContainerPrices(name string) apifees.Table {
 	l.freezeMu.RLock()
 	defer l.freezeMu.RUnlock()
 	return l.prices[name]
+}
+
+// ContainerAttributeProvider returns the marketplace namespace this container
+// attests for, from its measured manifest, or "" when it declares none. An app
+// that declares none is not an attester: it must never consume a disclosure
+// voucher, however the voucher reached it.
+func (l *Launcher) ContainerAttributeProvider(name string) string {
+	l.freezeMu.RLock()
+	defer l.freezeMu.RUnlock()
+	return l.attributeProviders[name]
 }
 
 // ContainerFreezeState reports the current freeze state for the given

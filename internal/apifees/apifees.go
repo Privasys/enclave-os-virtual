@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -93,6 +94,47 @@ type manifestDoc struct {
 	Configure struct {
 		Endpoint string `json:"endpoint"`
 	} `json:"configure"`
+	XPrivasys struct {
+		// AttributeProvider is the marketplace namespace this app attests
+		// for ("privasys" for the identity verifier). A disclosure voucher
+		// names the provider whose work it pays for, and only an app that
+		// declares that namespace may consume one.
+		//
+		// It belongs in the manifest, next to the prices, because the label
+		// is covered by the image digest the launcher verifies and attests.
+		// The alternative was a provider-to-app mapping delivered by the
+		// control plane, which would have made the runtime enforce something
+		// nobody could verify.
+		AttributeProvider string `json:"attribute_provider"`
+	} `json:"x-privasys"`
+}
+
+// ParseAttributeProvider reads the marketplace namespace an app attests for
+// from its manifest label, or "" when it declares none. An app that declares
+// none is not an attester and must never consume a disclosure voucher.
+func ParseAttributeProvider(raw string) string {
+	doc, err := decodeManifest(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(doc.XPrivasys.AttributeProvider)
+}
+
+// decodeManifest accepts both label encodings in the wild: raw JSON, or
+// base64-encoded JSON.
+func decodeManifest(raw string) (*manifestDoc, error) {
+	var doc manifestDoc
+	if err := json.Unmarshal([]byte(raw), &doc); err == nil {
+		return &doc, nil
+	}
+	decoded, derr := base64.StdEncoding.DecodeString(raw)
+	if derr != nil {
+		return nil, fmt.Errorf("apifees: manifest label is neither JSON nor base64 JSON")
+	}
+	if err := json.Unmarshal(decoded, &doc); err != nil {
+		return nil, fmt.Errorf("apifees: manifest label parse: %w", err)
+	}
+	return &doc, nil
 }
 
 // ParseManifest builds the price table from the raw org.privasys.manifest

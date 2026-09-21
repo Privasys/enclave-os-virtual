@@ -1874,7 +1874,7 @@ const (
 // A request with no voucher proxies unchanged — the app itself decides whether
 // a given operation requires one (a missing voucher simply yields no authorised
 // claims, so a paid endpoint refuses).
-func (s *Server) serveAppWithVoucher(w http.ResponseWriter, r *http.Request) {
+func (s *Server) serveAppWithVoucher(w http.ResponseWriter, r *http.Request, containerName string) {
 	tok := r.Header.Get(voucherHeader)
 	if tok == "" || s.verifier == nil {
 		s.appProxy.ServeHTTP(w, r)
@@ -1884,6 +1884,27 @@ func (s *Server) serveAppWithVoucher(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.log.Warn("disclosure voucher rejected", zap.Error(err))
 		s.jsonError(w, http.StatusForbidden, "invalid disclosure voucher")
+		return
+	}
+	// A voucher pays one provider for its attestation work. Only an app that
+	// declares that provider's namespace in its measured manifest may consume
+	// one: without this, any app reached with a voucher header had the claim
+	// taken and, on its own unrelated 2xx, the relying party charged for a
+	// disclosure that never happened.
+	//
+	// An app that declares no namespace is let through with a warning while
+	// the attesters gain their declaration. Tighten to a refusal once every
+	// deployed attester declares one; until then this closes the mismatched
+	// case and leaves the silent one visible in the log.
+	if ns := s.launcher.ContainerAttributeProvider(containerName); ns == "" {
+		s.log.Warn("disclosure voucher presented to an app that declares no attribute provider",
+			zap.String("container", containerName), zap.String("voucher_provider", vc.Provider))
+	} else if !strings.EqualFold(ns, vc.Provider) {
+		s.log.Warn("disclosure voucher is for another provider",
+			zap.String("container", containerName),
+			zap.String("declares", ns), zap.String("voucher_provider", vc.Provider))
+		s.jsonError(w, http.StatusForbidden,
+			"this disclosure voucher is not for this app's attribute provider")
 		return
 	}
 	// Replay gate. Settlement is idempotent at the ledger, so without a
