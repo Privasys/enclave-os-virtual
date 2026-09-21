@@ -493,6 +493,11 @@ type Launcher struct {
 	appPolicy      map[string][]byte // container name → OID 7.3 value (seq || sha256(document))
 	// approvedConstellations answers where an app's key may live. nil while
 	// signed policy is not configured, which leaves the request's own values.
+	//
+	// It has its own mutex: it is consulted from Load, which already holds
+	// l.mu, and sync.Mutex is not reentrant. Taking l.mu here deadlocked every
+	// vault-backed load (dev, 2026-09-21).
+	approvedMu             sync.Mutex
 	approvedConstellations ApprovedConstellations
 	containerdHash         []byte
 	combinedImgHash        [32]byte
@@ -3020,8 +3025,8 @@ func (l *Launcher) SetApprovedConstellations(src ApprovedConstellations) {
 	if l == nil {
 		return
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.approvedMu.Lock()
+	defer l.approvedMu.Unlock()
 	l.approvedConstellations = src
 }
 
@@ -3029,9 +3034,9 @@ func (l *Launcher) SetApprovedConstellations(src ApprovedConstellations) {
 // the one this app's owner approved. An app with no approved constellation is
 // unaffected: there is nothing to contradict.
 func (l *Launcher) checkApprovedConstellation(appIDRaw, mrenclave string, endpoints []string) error {
-	l.mu.Lock()
+	l.approvedMu.Lock()
 	src := l.approvedConstellations
-	l.mu.Unlock()
+	l.approvedMu.Unlock()
 	if src == nil {
 		return nil
 	}

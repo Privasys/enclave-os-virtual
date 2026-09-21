@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -165,5 +166,27 @@ func TestApprovedConstellationRefusesAnotherVault(t *testing.T) {
 	}
 	if err := l.checkApprovedConstellation("", "x", []string{"y"}); err != nil {
 		t.Errorf("a container with no app id was refused: %v", err)
+	}
+}
+
+// Load holds the launcher's lock, so the constellation check must not take it:
+// a second acquisition deadlocks the load, and a deadlocked load looks like a
+// container stuck pulling for ever (dev, 2026-09-21).
+func TestConstellationCheckDoesNotTakeTheLauncherLock(t *testing.T) {
+	l := New(Config{}, zap.NewNop())
+	l.SetApprovedConstellations(approvedFor{})
+
+	l.mu.Lock()
+	done := make(chan error, 1)
+	go func() { done <- l.checkApprovedConstellation("11112222333344445555666677778888", "m", []string{"e"}) }()
+	select {
+	case err := <-done:
+		l.mu.Unlock()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		l.mu.Unlock()
+		t.Fatal("the check blocked on the launcher lock: a load would deadlock")
 	}
 }
