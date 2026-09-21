@@ -61,6 +61,7 @@ import (
 
 	"github.com/Privasys/enclave-os-virtual/internal/apifees"
 	"github.com/Privasys/enclave-os-virtual/internal/attrbilling"
+	"github.com/Privasys/enclave-os-virtual/internal/enclaveauth"
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/network"
@@ -160,6 +161,10 @@ type Config struct {
 	// no attribute marketplace.
 	MgmtBaseURL  string
 	EnclaveToken string
+
+	// EnclaveSigner, when set, signs this manager's calls to the control
+	// plane with an attested identity instead of relying on the bearer above.
+	EnclaveSigner enclaveauth.RequestSigner
 	// EnclaveID identifies this enclave to the management service. Needed
 	// alongside the two above to relay the tool spec on a container's behalf,
 	// so the fleet bearer never has to be handed to the container itself.
@@ -285,7 +290,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		verifier:     v,
 		registry:     newRegistry(cfg.RegistryPath),
 		sessionRelay: sr,
-		settler:      attrbilling.New(attrbilling.Config{MgmtBaseURL: cfg.MgmtBaseURL, EnclaveToken: cfg.EnclaveToken}, log),
+		settler:      attrbilling.New(attrbilling.Config{MgmtBaseURL: cfg.MgmtBaseURL, EnclaveToken: cfg.EnclaveToken, Signer: cfg.EnclaveSigner}, log),
 		apiFees:      apifees.Open(feesPath, log),
 		walletCall:   auth.NewWalletCallVerifier(cfg.WalletProviderJWKS, log),
 	}

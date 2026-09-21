@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/Privasys/enclave-os-virtual/internal/enclaveauth"
 )
 
 // Config addresses the mgmt settlement endpoints and carries the enclave
@@ -26,12 +28,15 @@ import (
 type Config struct {
 	MgmtBaseURL  string
 	EnclaveToken string
+	// Signer, when set, attaches attested enclave auth to each call.
+	Signer enclaveauth.RequestSigner
 }
 
 // Settler POSTs settle/release for a voucher jti to the management-service.
 type Settler struct {
-	base  string
-	token string
+	base   string
+	token  string
+	signer enclaveauth.RequestSigner
 	http  *http.Client
 	log   *zap.Logger
 }
@@ -43,8 +48,9 @@ func New(cfg Config, log *zap.Logger) *Settler {
 		return nil
 	}
 	return &Settler{
-		base:  strings.TrimRight(cfg.MgmtBaseURL, "/"),
-		token: cfg.EnclaveToken,
+		base:   strings.TrimRight(cfg.MgmtBaseURL, "/"),
+		token:  cfg.EnclaveToken,
+		signer: cfg.Signer,
 		http:  &http.Client{Timeout: 5 * time.Second},
 		log:   log.Named("attrbilling"),
 	}
@@ -76,6 +82,7 @@ func (s *Settler) post(ctx context.Context, jti, action string) error {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+s.token)
+	s.sign(req, nil)
 	resp, err := s.http.Do(req)
 	if err != nil {
 		return err
@@ -126,6 +133,7 @@ func (s *Settler) Claim(ctx context.Context, jti string) ClaimResult {
 		return ClaimUnavailable
 	}
 	req.Header.Set("Authorization", "Bearer "+s.token)
+	s.sign(req, nil)
 	resp, err := s.http.Do(req)
 	if err != nil {
 		s.log.Warn("voucher claim: unreachable, refusing",
@@ -144,5 +152,18 @@ func (s *Settler) Claim(ctx context.Context, jti string) ClaimResult {
 		s.log.Warn("voucher claim: unexpected status, refusing",
 			zap.String("jti", jti), zap.Int("status", resp.StatusCode))
 		return ClaimUnavailable
+	}
+}
+
+// sign attaches attested enclave auth when a signer is configured. A failure
+// is logged and the call proceeds on the bearer: during migration the control
+// plane still accepts it, and after migration it answers 401, which is the
+// signal we want rather than a silent stop.
+func (s *Settler) sign(req *http.Request, body []byte) {
+	if s == nil || s.signer == nil {
+		return
+	}
+	if err := s.signer.Sign(req, body); err != nil {
+		s.log.Warn("attested auth unavailable, sending credential only", zap.Error(err))
 	}
 }

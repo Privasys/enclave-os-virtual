@@ -29,6 +29,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/Privasys/enclave-os-virtual/internal/enclaveauth"
 )
 
 // Config configures the runtime-status sender.
@@ -36,6 +38,11 @@ type Config struct {
 	// MgmtBaseURL is the management-service base URL, without trailing
 	// slash (e.g. "https://api.developer.privasys.org").
 	MgmtBaseURL string
+
+	// Signer, when set, attaches attested enclave auth (a leaf issued by this
+	// enclave's CA, a quote binding it, and a signature over the request). The
+	// bearer below is sent alongside it until the fleet has migrated.
+	Signer enclaveauth.RequestSigner
 
 	// EnclaveToken is the static bearer credential expected by
 	// /api/v1/enclave/runtime-status.
@@ -131,6 +138,11 @@ func (s *Sender) pushOnce(ctx context.Context) {
 	}
 	req.Header.Set("Authorization", "Bearer "+s.cfg.EnclaveToken)
 	req.Header.Set("Content-Type", "application/json")
+	if s.cfg.Signer != nil {
+		if err := s.cfg.Signer.Sign(req, body); err != nil {
+			s.log.Warn("runtime-status: attested auth unavailable, sending credential only", zap.Error(err))
+		}
+	}
 
 	resp, err := s.client.Do(req)
 	if err != nil {

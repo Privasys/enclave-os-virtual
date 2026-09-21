@@ -68,6 +68,11 @@ func (s *Server) handleToolSpec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+s.cfg.EnclaveToken)
+	if s.cfg.EnclaveSigner != nil {
+		if err := s.cfg.EnclaveSigner.Sign(req, nil); err != nil {
+			s.log.Warn("tool-spec: attested auth unavailable, sending credential only", zap.Error(err))
+		}
+	}
 
 	resp, err := (&http.Client{Timeout: toolSpecTimeout}).Do(req)
 	if err != nil {

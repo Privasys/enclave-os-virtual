@@ -29,6 +29,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
+	"github.com/Privasys/enclave-os-virtual/internal/enclaveauth"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/manager"
 	"github.com/Privasys/enclave-os-virtual/internal/network"
@@ -270,6 +271,19 @@ func runServe(args []string) error {
 	// one listener serves both the host (Caddy/probes at localhost:9443) and
 	// containers (at the bridge gateway); network.Setup's iptables guard drops
 	// :9443 on the external interface (#45).
+	// Attested identity for our own calls to the control plane: a leaf issued
+	// by this enclave's CA, quoted, and a signature per request. Without it
+	// (no CA yet, or no enclave id) the calls fall back to the bearer, which
+	// the control plane still accepts while the fleet migrates.
+	var enclaveSigner *enclaveauth.Signer
+	if signer, err := enclaveauth.New(*caCert, *caKeyPath, *rsEnclaveID); err != nil {
+		log.Warn("attested control-plane auth unavailable, using the enclave credential",
+			zap.Error(err))
+	} else {
+		enclaveSigner = signer
+		log.Info("attested control-plane auth enabled", zap.String("enclave_id", *rsEnclaveID))
+	}
+
 	mgrCfg := manager.Config{
 		Addr:             ":9443",
 		PlatformHostname: platformHostname,
@@ -289,9 +303,10 @@ func runServe(args []string) error {
 		// fleet mgmt URL + enclave bearer (same credential as check-in).
 		// The same three also let the manager relay the tool spec on a
 		// container's behalf, so that bearer stays inside the manager.
-		MgmtBaseURL:  *rsMgmtURL,
-		EnclaveToken: *rsEnclaveToken,
-		EnclaveID:    *rsEnclaveID,
+		MgmtBaseURL:   *rsMgmtURL,
+		EnclaveToken:  *rsEnclaveToken,
+		EnclaveID:     *rsEnclaveID,
+		EnclaveSigner: enclaveSigner,
 		// Resource-capability state (P2) lives beside the registry on /data.
 		CapabilityStateDir: "/data/manager-capabilities",
 		ResourceApps:       resourceApps(),
@@ -340,6 +355,7 @@ func runServe(args []string) error {
 		MgmtBaseURL:  *rsMgmtURL,
 		EnclaveToken: *rsEnclaveToken,
 		EnclaveID:    *rsEnclaveID,
+		Signer:       signerOrNil(enclaveSigner),
 		ProxyBaseURL: *rsProxyURL,
 		// Per-container netns (#45): the AI container's fixed :8080 proxy
 		// lives at its private bridge IP, resolved fresh per sample so the
@@ -455,4 +471,13 @@ func resourceApps() map[string]string {
 		}
 	}
 	return apps
+}
+
+// signerOrNil keeps a nil *Signer out of the interface field: a typed nil
+// would satisfy the interface and then fail on every call.
+func signerOrNil(s *enclaveauth.Signer) enclaveauth.RequestSigner {
+	if s == nil {
+		return nil
+	}
+	return s
 }
