@@ -27,6 +27,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -47,6 +48,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Privasys/enclave-os-virtual/internal/apifees"
+	"github.com/Privasys/enclave-os-virtual/internal/apppolicy"
 	"github.com/Privasys/enclave-os-virtual/internal/caddy"
 	"github.com/Privasys/enclave-os-virtual/internal/container"
 	"github.com/Privasys/enclave-os-virtual/internal/extensions"
@@ -484,12 +486,16 @@ type Launcher struct {
 	volMgr *volume.Manager
 
 	// Computed attestation data - recomputed on every load/unload.
-	platformTree    *merkle.Tree
-	containerTrees  map[string]*merkle.Tree
-	imageDigests    map[string][]byte
-	appIDs          map[string][]byte // container name → raw 16-byte app id (OID 3.6)
-	containerdHash  []byte
-	combinedImgHash [32]byte
+	platformTree   *merkle.Tree
+	containerTrees map[string]*merkle.Tree
+	imageDigests   map[string][]byte
+	appIDs         map[string][]byte // container name → raw 16-byte app id (OID 3.6)
+	appPolicy      map[string][]byte // container name → OID 7.3 value (seq || sha256(document))
+	// approvedConstellations answers where an app's key may live. nil while
+	// signed policy is not configured, which leaves the request's own values.
+	approvedConstellations ApprovedConstellations
+	containerdHash         []byte
+	combinedImgHash        [32]byte
 
 	// attestationServersHash is the SHA-256 of the canonical attestation
 	// server URL list (sorted, newline-joined).  Nil-like (zero) when no
@@ -676,6 +682,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		containerTrees:    make(map[string]*merkle.Tree),
 		imageDigests:      make(map[string][]byte),
 		appIDs:            make(map[string][]byte),
+		appPolicy:         make(map[string][]byte),
 		pulledImages:      make(map[string]client.Image),
 		specs:             make(map[string]manifest.Container),
 		volumeEncryption:  make(map[string]string),
@@ -999,6 +1006,13 @@ type TokenSource interface {
 // mappings reach the same in-process router that owns the session-relay
 // middleware. Caddy points every RA-TLS host (platform + container) at the
 // manager port; the manager then dispatches by Host. See docs/ra-tls.md.
+// ApprovedConstellations reports where an app's owner approved its data key to
+// live. The launcher refuses to resolve a key anywhere else, so a load request
+// cannot steer a key onto a constellation the owner never approved.
+type ApprovedConstellations interface {
+	ConstellationFor(appIDHex string) *apppolicy.Constellation
+}
+
 type AppHostRouter interface {
 	RegisterAppHost(hostname, upstream string)
 	UnregisterAppHost(hostname string)
@@ -1562,6 +1576,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		volOrigin := ""
 		volReconstructed := false
 		if req.KeyHandle != "" {
+			// The owner's approved constellation wins over the request's: a
+			// key must not be created or reconstructed anywhere else.
+			if err := l.checkApprovedConstellation(req.AppId, req.VaultMrenclave, req.VaultEndpoints); err != nil {
+				return nil, fmt.Errorf("vault constellation: %w", err)
+			}
 			keyHex, origin, reconstructed, err := vaultkey.ResolveOrProvision(ctx, l.log, vaultkey.Config{
 				Endpoints:            req.VaultEndpoints,
 				MrenclaveHex:         req.VaultMrenclave,
@@ -2467,6 +2486,13 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string, port
 			ratls.EncodeDependencySet(*spec.Dependencies)))
 	}
 
+	// Attested app policy (OID 7.2): which owner-signed document this
+	// container is enforcing. A verifier compares it with the document the
+	// owner signed; an older one on the wire is a rolled-back policy.
+	if p, ok := l.appPolicy[containerName]; ok {
+		exts = append(exts, oids.Extension(oids.AttestedAppPolicy, p))
+	}
+
 	// Per-app SDK-set X.509 attestation extensions (OIDs under
 	// 1.3.6.1.4.1.65230.3.5.*). Sourced from the in-process oidExts
 	// map (replayed at Load time and updated via the SDK
@@ -2899,4 +2925,128 @@ func detectTEEBackend() string {
 	}
 	// Default to tdx — the most common deployment target.
 	return "tdx"
+}
+
+// AppIDOf returns the platform app id (32-char hex) of a loaded container, or
+// "" when the container is unknown or carries none. Signed app policy is
+// addressed by app id, so this is how a container name resolves to one.
+func (l *Launcher) AppIDOf(containerName string) string {
+	if l == nil {
+		return ""
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	raw, ok := l.appIDs[containerName]
+	if !ok || len(raw) == 0 {
+		return ""
+	}
+	return hex.EncodeToString(raw)
+}
+
+// SetIngressAllowedCallers replaces a loaded container's allowed callers and
+// installs the policy on its host, so an owner's signed policy takes effect
+// without a redeploy. A nil set disables ingress verification for the host.
+func (l *Launcher) SetIngressAllowedCallers(containerName string, set *ratls.DependencySet, platforms []string) error {
+	if l == nil {
+		return fmt.Errorf("launcher is not configured")
+	}
+	l.mu.Lock()
+	spec, ok := l.specs[containerName]
+	if !ok {
+		l.mu.Unlock()
+		return fmt.Errorf("container %q not loaded", containerName)
+	}
+	if set != nil && len(set.Entries) == 0 {
+		set = nil
+	}
+	spec.IngressAllowedCallers = set
+	spec.IngressAllowedPlatforms = platforms
+	l.specs[containerName] = spec
+	hostname, router := spec.Hostname, l.appHostRouter
+	l.mu.Unlock()
+
+	if hostname != "" && router != nil {
+		router.RegisterIngressPolicy(hostname, set, platforms)
+	}
+	return nil
+}
+
+// SetConfigOwners replaces the owners team the configure gate admits for a
+// container, so an owner's signed policy decides who owns the app rather than
+// whoever issued its load request.
+func (l *Launcher) SetConfigOwners(containerName string, owners []string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.configOwners[containerName] = owners
+}
+
+// SetAppPolicyStamp records which owner-signed policy a container enforces and
+// re-mints its certificate extensions, so OID 7.2 advertises it. seq and the
+// document digest travel together: the digest identifies the document, the
+// sequence orders it.
+func (l *Launcher) SetAppPolicyStamp(containerName string, seq uint64, documentSHA256 [32]byte) error {
+	if l == nil {
+		return fmt.Errorf("launcher is not configured")
+	}
+	value := make([]byte, 8, 8+32)
+	binary.BigEndian.PutUint64(value, seq)
+	value = append(value, documentSHA256[:]...)
+
+	l.mu.Lock()
+	spec, ok := l.specs[containerName]
+	if !ok {
+		l.mu.Unlock()
+		return fmt.Errorf("container %q not loaded", containerName)
+	}
+	l.appPolicy[containerName] = value
+	hostname, port, internal := spec.Hostname, spec.Port, spec.Internal
+	l.mu.Unlock()
+
+	if hostname != "" && !internal && l.caddyClient != nil {
+		if err := l.writeContainerExtensions(containerName, hostname, port); err != nil {
+			return fmt.Errorf("re-mint extensions for %s: %w", containerName, err)
+		}
+	}
+	return nil
+}
+
+// SetApprovedConstellations installs the source of owner-approved
+// constellations. The manager owns the policy store and hands it over at
+// start-up; until it does, a load uses the values in its request.
+func (l *Launcher) SetApprovedConstellations(src ApprovedConstellations) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.approvedConstellations = src
+}
+
+// checkApprovedConstellation refuses a load whose vault constellation is not
+// the one this app's owner approved. An app with no approved constellation is
+// unaffected: there is nothing to contradict.
+func (l *Launcher) checkApprovedConstellation(appIDRaw, mrenclave string, endpoints []string) error {
+	l.mu.Lock()
+	src := l.approvedConstellations
+	l.mu.Unlock()
+	if src == nil {
+		return nil
+	}
+	appID := AppIDHex(appIDRaw)
+	if appID == "" {
+		return nil
+	}
+	approved := src.ConstellationFor(appID)
+	if !approved.Valid() {
+		return nil
+	}
+	if !approved.Matches(mrenclave, endpoints) {
+		return fmt.Errorf("this app's owner approved its data key on constellation %s (%s); the load request names %s (%s)",
+			approved.Mrenclave, strings.Join(approved.Endpoints, ", "),
+			mrenclave, strings.Join(endpoints, ", "))
+	}
+	return nil
 }

@@ -60,9 +60,10 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Privasys/enclave-os-virtual/internal/apifees"
+	"github.com/Privasys/enclave-os-virtual/internal/apppolicy"
 	"github.com/Privasys/enclave-os-virtual/internal/attrbilling"
-	"github.com/Privasys/enclave-os-virtual/internal/enclaveauth"
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
+	"github.com/Privasys/enclave-os-virtual/internal/enclaveauth"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/network"
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
@@ -165,6 +166,10 @@ type Config struct {
 	// EnclaveSigner, when set, signs this manager's calls to the control
 	// plane with an attested identity instead of relying on the bearer above.
 	EnclaveSigner enclaveauth.RequestSigner
+
+	// AppPolicyPath stores which policy key each app has pinned, beside the
+	// registry on /data. Empty keeps the pins in memory (dev and tests).
+	AppPolicyPath string
 	// EnclaveID identifies this enclave to the management service. Needed
 	// alongside the two above to relay the tool spec on a container's behalf,
 	// so the fleet bearer never has to be handed to the container itself.
@@ -232,6 +237,10 @@ type Server struct {
 	// without the container app having to implement the protocol itself.
 	appProxy *httputil.ReverseProxy
 
+	// policy holds each app's pinned policy key and last accepted sequence.
+	// nil when signed app policy is not configured.
+	policy *apppolicy.Store
+
 	// settler reports disclosure-voucher settlement to mgmt. nil when the
 	// runtime is not configured to settle (the reservation then expires on
 	// its own).
@@ -291,6 +300,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		registry:     newRegistry(cfg.RegistryPath),
 		sessionRelay: sr,
 		settler:      attrbilling.New(attrbilling.Config{MgmtBaseURL: cfg.MgmtBaseURL, EnclaveToken: cfg.EnclaveToken, Signer: cfg.EnclaveSigner}, log),
+		policy:       newPolicyStore(cfg.AppPolicyPath, v, log),
 		apiFees:      apifees.Open(feesPath, log),
 		walletCall:   auth.NewWalletCallVerifier(cfg.WalletProviderJWKS, log),
 	}
@@ -300,6 +310,12 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 	s.ingress = newIngressVerifier(s.log, l.PrimaryAttestationServer, isDevImageProfile())
 	// Spend-token gate: verifies against the same IdP the sealed relay
 	// trusts, asks mgmt (enclave bearer) whether the payer may spend.
+	// The launcher refuses to resolve a key on a constellation the app's
+	// owner never approved, so it needs to see the pins.
+	if s.policy != nil {
+		l.SetApprovedConstellations(s.policy)
+	}
+
 	s.spend = newSpendGate(s.log, cfg.IdpIssuer, cfg.MgmtBaseURL, cfg.EnclaveToken)
 	s.caps = newCapabilityBroker(cfg.CapabilityStateDir, s.log)
 	s.holdersOpen = newHolderState()
@@ -573,6 +589,12 @@ func (s *Server) Start(ctx context.Context) error {
 	// only READ its set (below) — declared and enforced stay one object.
 	mux.HandleFunc("PUT /api/v1/containers/{name}/dependencies",
 		s.requireAuth(s.handleSetDependencies))
+
+	// Owner-signed app policy: owners, dependencies and allowed callers in
+	// one document the owner signed. No platform role gates this route; the
+	// signature is the authority, and once an app has accepted a document the
+	// manager-role routes above stop applying to it.
+	mux.HandleFunc("PUT /api/v1/containers/{name}/policy", s.handleSetAppPolicy)
 
 	// The read side for the app: a container fetches the dependency set the
 	// runtime declared for it, to source its egress pins from. Container
@@ -1599,6 +1621,11 @@ func (s *Server) handleSetDependencies(w http.ResponseWriter, r *http.Request) {
 	if len(req.Dependencies) == 0 || string(req.Dependencies) == "null" {
 		s.jsonError(w, http.StatusBadRequest,
 			`the "dependencies" key is required (send {"dependencies":{"entries":[]}} to clear the set explicitly)`)
+		return
+	}
+	if s.policyPinned(name) {
+		s.jsonError(w, http.StatusForbidden,
+			"this app's policy is owner-signed: send a signed document to /policy")
 		return
 	}
 	var set ratls.DependencySet

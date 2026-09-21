@@ -307,6 +307,8 @@ func runServe(args []string) error {
 		EnclaveToken:  *rsEnclaveToken,
 		EnclaveID:     *rsEnclaveID,
 		EnclaveSigner: enclaveSigner,
+		// Owner-signed policy pins live beside the registry on /data.
+		AppPolicyPath: "/data/manager-app-policy.json",
 		// Resource-capability state (P2) lives beside the registry on /data.
 		CapabilityStateDir: "/data/manager-capabilities",
 		ResourceApps:       resourceApps(),

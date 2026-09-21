@@ -139,6 +139,18 @@ var WorkloadStorage = oid(6, 2)
 // encoding of the RA-TLS SDKs. Manager-owned; a container cannot write it.
 var AttestedDependencySet = oid(7, 1)
 
+// AttestedAppPolicy carries which owner-approved policy the container is
+// enforcing: 8 bytes of big-endian sequence number, then the SHA-256 of the
+// approved document. Manager-owned. 7.2 is reserved for allowed callers in the
+// OID scheme, so this is 7.3.
+//
+// Without it, the dependency set (7.1) is the only part of an owner's policy a
+// verifier can see, so a runtime given an older document would enforce older
+// allowed callers and owners with nothing on the wire to show it. With it, any
+// client can compare what the app enforces against the document the owner last
+// signed, which is what makes a rolled-back policy visible rather than silent.
+var AttestedAppPolicy = oid(7, 3)
+
 // ParseEnvVarOID parses an OID for an app-defined attestation extension. It
 // accepts the full dot-notation OID under AppExtensionArcPrefix
 // ("1.3.6.1.4.1.65230.5.4.1.2") or just the sub-arc tail ("1.2", "1").

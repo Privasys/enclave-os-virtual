@@ -738,3 +738,14 @@ func jwkVerifyEC(alg string, key *jwkKey, signingInput, sig []byte) error {
 	}
 	return nil
 }
+
+// VerifyApprovalToken verifies an identity-provider token and returns its
+// claims, for callers that check an operation binding rather than a role: a
+// step-up approval carries the operation it approves in `vault_op`, and the
+// verifier of that operation recomputes the binding itself.
+//
+// Signature, issuer, audience and expiry are checked here exactly as for any
+// other token, expiry against trusted time.
+func (v *Verifier) VerifyApprovalToken(tokenStr string) (map[string]interface{}, error) {
+	return v.verifyClaims(tokenStr)
+}
