@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -35,6 +36,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/network"
 	"github.com/Privasys/enclave-os-virtual/internal/runtimestatus"
 	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
+	"github.com/Privasys/enclave-os-virtual/internal/tunnel"
 )
 
 const version = "0.2.0"
@@ -158,6 +160,11 @@ func runServe(args []string) error {
 		"Local confidential-ai proxy URL for /v1/models/status feed; empty disables the proxy feed")
 	rsInterval := fs.Duration("push-interval", 30*time.Second,
 		"Interval between runtime-status pushes")
+	tunnelGateways := fs.String("tunnel-gateways", os.Getenv("TUNNEL_GATEWAYS"),
+		"Comma-separated gateway instances (host:port) to hold an outbound tunnel to, for hosts that allow no inbound "+
+			"connections (env: TUNNEL_GATEWAYS). Empty disables tunnels: the enclave is reached directly.")
+	tunnelServerName := fs.String("tunnel-server-name", os.Getenv("TUNNEL_SERVER_NAME"),
+		"TLS server name presented to the gateways (env: TUNNEL_SERVER_NAME). Default: tunnel.<hostname>")
 	isolationUserns := fs.Bool("isolation-userns", os.Getenv("PRIVASYS_ISOLATION_USERNS") == "true",
 		"Run each container in a user namespace (container-root -> unprivileged host uid). SHARED multi-tenant VMs only; leave off on dedicated/GPU VMs. EXPERIMENTAL/UNVALIDATED — validate on m2-dev before prod (env: PRIVASYS_ISOLATION_USERNS)")
 
@@ -352,6 +359,30 @@ func runServe(args []string) error {
 		return nil
 	})
 
+	// Optional outbound tunnels to the platform gateways, for hosts that allow
+	// no inbound connections. Streams land on the local Caddy listener.
+	if *tunnelGateways != "" {
+		serverName := *tunnelServerName
+		if serverName == "" && *hostname != "" {
+			serverName = "tunnel." + strings.TrimPrefix(*hostname, ".")
+		}
+		tc, err := tunnel.New(tunnel.Config{
+			Gateways:   strings.Split(*tunnelGateways, ","),
+			ServerName: serverName,
+			Target:     loopbackTarget(*caddyListen),
+			EnclaveID:  *rsEnclaveID,
+			Signer:     signerOrNil(enclaveSigner),
+		}, log)
+		if err != nil {
+			// Without its tunnel an egress-only enclave is unreachable: fail
+			// loudly so the unit restarts and the cause is in the journal.
+			return fmt.Errorf("egress tunnel: %w", err)
+		}
+		g.Go(func() error {
+			return tc.Run(gctx)
+		})
+	}
+
 	// Optional runtime-status push sender.
 	if sender := runtimestatus.New(runtimestatus.Config{
 		MgmtBaseURL:  *rsMgmtURL,
@@ -477,6 +508,19 @@ func resourceApps() map[string]string {
 
 // signerOrNil keeps a nil *Signer out of the interface field: a typed nil
 // would satisfy the interface and then fail on every call.
+// loopbackTarget turns Caddy's listen address (":443", "0.0.0.0:443") into
+// the loopback address tunnel streams are delivered to.
+func loopbackTarget(listen string) string {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil || port == "" {
+		return "127.0.0.1:443"
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
+}
+
 func signerOrNil(s *enclaveauth.Signer) enclaveauth.RequestSigner {
 	if s == nil {
 		return nil

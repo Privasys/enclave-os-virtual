@@ -36,4 +36,6 @@ exec /usr/bin/manager serve \
     --mgmt-url "${MGMT_URL:-}" \
     --enclave-id "${ENCLAVE_ID:-}" \
     --enclave-token "${ENCLAVE_TOKEN:-}" \
+    --tunnel-gateways "${TUNNEL_GATEWAYS:-}" \
+    --tunnel-server-name "${TUNNEL_SERVER_NAME:-}" \
     --log-level info

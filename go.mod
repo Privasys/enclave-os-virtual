@@ -18,6 +18,7 @@ require (
 	github.com/containerd/platforms v1.0.0-rc.1
 	github.com/ebitengine/purego v0.10.1
 	github.com/fxamacker/cbor/v2 v2.9.2
+	github.com/hashicorp/yamux v0.1.2
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/opencontainers/runtime-spec v1.2.0
@@ -25,6 +26,7 @@ require (
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.54.0
 	golang.org/x/sync v0.22.0
+	golang.org/x/sys v0.47.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -89,7 +91,6 @@ require (
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20241021214115-324edc3d5d38 // indirect
 	google.golang.org/grpc v1.68.1 // indirect
