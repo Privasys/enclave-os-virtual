@@ -20,7 +20,12 @@
 # safe), exactly as the old hardcoded path did when the device was absent.
 set -eu
 
-log() { echo "workspace-containerd: $*"; }
+# stderr, never stdout: resolve_workspace is read through a command
+# substitution, and a log line on stdout would ride along with the device
+# path (seen on a QEMU host, where only the last-resort branch logs: the
+# variable held two lines, [ -b ] failed, and containerd fell back to the
+# small /data PD with no reason in the journal).
+log() { echo "workspace-containerd: $*" >&2; }
 
 # Minimum plausible local-SSD size (sectors of 512 B). GCE local SSDs are
 # 375 GiB; the /data PD is ~10 GB and boot ~20 GB. A 50 GiB floor is a second
