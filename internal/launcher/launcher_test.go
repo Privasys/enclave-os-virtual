@@ -11,6 +11,7 @@ import (
 
 	"github.com/Privasys/enclave-os-virtual/internal/manifest"
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
+	"github.com/Privasys/enclave-os-virtual/internal/surfaces"
 	"go.uber.org/zap"
 )
 
@@ -22,11 +23,11 @@ type fakeAppHostRouter struct {
 	gotDigestSet bool
 }
 
-func (*fakeAppHostRouter) RegisterAppHost(string, string)                      {}
-func (*fakeAppHostRouter) UnregisterAppHost(string)                            {}
+func (*fakeAppHostRouter) RegisterAppHost(string, string)                               {}
+func (*fakeAppHostRouter) UnregisterAppHost(string)                                     {}
 func (*fakeAppHostRouter) RegisterIngressPolicy(string, *ratls.DependencySet, []string) {}
-func (*fakeAppHostRouter) SetSessionRelayIdentityKeySeed(string, []byte) error { return nil }
-func (*fakeAppHostRouter) SetStaticUnsealedPrefixes(string, []string)          {}
+func (*fakeAppHostRouter) SetSessionRelayIdentityKeySeed(string, []byte) error          { return nil }
+func (*fakeAppHostRouter) SetSurfaces(string, *surfaces.Surfaces)                       {}
 func (f *fakeAppHostRouter) SetExpectedWorkloadDigest(_ string, d [32]byte) {
 	f.gotDigest = d
 	f.gotDigestSet = true

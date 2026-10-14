@@ -222,14 +222,14 @@ type Server struct {
 	holdersOpen *holderState
 	events      *eventHub
 
-	// staticUnsealed maps lowercased Hostname → []string path prefixes that
-	// the session-relay may serve in the CLEAR on the gateway-terminated leg
-	// (GET/HEAD only). Opt-in per app via the measured image label
-	// org.privasys.static-unsealed-prefixes, armed by the launcher. Lets an
-	// app serve its own public browser-UI shell (HTML/JS/CSS — measured code,
-	// no user data) so the page loads before a sealed session exists; the data
-	// plane (/api, and any non-declared path) stays sealed.
-	staticUnsealed sync.Map // map[string][]string
+	// surfaces maps lowercased Hostname → *surfaces.Surfaces: what the app
+	// declared it serves in the CLEAR on the gateway-terminated leg (its
+	// static browser shell and its public routes), armed by the launcher from
+	// the measured manifest. Everything else on that leg stays sealed
+	// (surfaces.go).
+	surfaces sync.Map // map[string]*surfaces.Surfaces
+	// publicLimiter bounds the clear leg per client address.
+	publicLimiter *publicLimiter
 
 	// appProxy reverse-proxies non-platform Host requests to the upstream
 	// looked up in appHosts. Wrapped by sessionRelay.Middleware so that
@@ -308,6 +308,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 	// the launcher (updated at runtime via PUT /api/v1/attestation-servers) and
 	// permits dev-image callers only when this VM itself runs a dev image.
 	s.ingress = newIngressVerifier(s.log, l.PrimaryAttestationServer, isDevImageProfile())
+	s.publicLimiter = newPublicLimiter()
 	// Spend-token gate: verifies against the same IdP the sealed relay
 	// trusts, asks mgmt (enclave bearer) whether the payer may spend.
 	// The launcher refuses to resolve a key on a constellation the app's
@@ -370,13 +371,12 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		if strings.HasPrefix(r.URL.Path, holderFilesPath) {
 			return false // the holder's window onto their folder: bearer, no session
 		}
-		// Opt-in public static UI: an app that serves its own browser shell
-		// from the enclave declares its HTML/JS/CSS prefixes (measured image
-		// label). Those GET/HEAD loads are public code with no user data, so
-		// serve them in the clear — otherwise the page cannot load before a
-		// sealed session exists (chicken-and-egg). The data plane stays sealed.
-		if (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
-			s.isStaticUnsealedPath(hostOnly(r.Host), r.URL.Path) {
+		// Declared surfaces (surfaces.go): the app's static browser shell
+		// (GET/HEAD, measured code, so the page can load before a sealed
+		// session exists) and its explicit public routes, from the measured
+		// manifest. Served anonymous by construction further down
+		// (servePublic). Everything undeclared stays sealed.
+		if s.clearAllowed(r) {
 			return false
 		}
 		return !strings.HasPrefix(r.URL.Path, "/.well-known/")
@@ -460,56 +460,10 @@ func (s *Server) RegisterAppHost(hostname, upstream string) {
 func (s *Server) UnregisterAppHost(hostname string) {
 	hostname = strings.ToLower(hostname)
 	s.appHosts.Delete(hostname)
-	s.staticUnsealed.Delete(hostname)
+	s.SetSurfaces(hostname, nil)
 	s.sessionRelay.ClearExpectedWorkloadDigest(hostname)
 	s.ingress.setPolicy(hostname, nil, nil)
 	s.log.Info("app host unregistered", zap.String("hostname", hostname))
-}
-
-// SetStaticUnsealedPrefixes records the path prefixes this Host may serve in
-// the clear on the gateway-terminated leg (GET/HEAD only) — the app's public
-// browser-UI shell. Opt-in via the measured image label, armed by the
-// launcher. Passing an empty slice clears the exemption.
-func (s *Server) SetStaticUnsealedPrefixes(hostname string, prefixes []string) {
-	hostname = strings.ToLower(hostname)
-	if len(prefixes) == 0 {
-		s.staticUnsealed.Delete(hostname)
-		return
-	}
-	cp := make([]string, len(prefixes))
-	copy(cp, prefixes)
-	s.staticUnsealed.Store(hostname, cp)
-}
-
-// isStaticUnsealedPath reports whether path is one of host's declared public
-// static-UI prefixes and may therefore be served unsealed. The data plane is
-// never exempt: /api* is hard-excluded regardless of what a Host declares, and
-// a lone "/" entry matches only the root document (not every path).
-func (s *Server) isStaticUnsealedPath(hostname, path string) bool {
-	// Hard exclusion: the data plane is never served in the clear, even if an
-	// app mistakenly declares an over-broad prefix.
-	if path == "/api" || strings.HasPrefix(path, "/api/") {
-		return false
-	}
-	v, ok := s.staticUnsealed.Load(strings.ToLower(hostname))
-	if !ok {
-		return false
-	}
-	for _, p := range v.([]string) {
-		if p == "" {
-			continue
-		}
-		if p == "/" {
-			if path == "/" {
-				return true
-			}
-			continue
-		}
-		if path == p || strings.HasPrefix(path, p) {
-			return true
-		}
-	}
-	return false
 }
 
 // SetExpectedWorkloadDigest arms the session-relay per-app workload-digest
@@ -748,6 +702,22 @@ func (s *Server) Start(ctx context.Context) error {
 			r.Header.Del(voucherProviderHeader)
 			r.Header.Del(voucherClaimsHeader)
 			r.Header.Del(voucherRPIDHeader)
+			// Which leg (surfaces.go). The session relay marked a request it
+			// unsealed; anything else is either RA-TLS direct (TLS ended
+			// here) or plaintext on the gateway-terminated leg, which the
+			// require-sealed predicate only let through for a declared
+			// surface and which is now served anonymous by construction.
+			if r.Header.Get(TransportHeader) == "" {
+				if isEdgeTerminated(r) {
+					pw, ok := s.servePublic(w, r)
+					if !ok {
+						return
+					}
+					w = pw
+				} else {
+					r.Header.Set(TransportHeader, TransportAttested)
+				}
+			}
 			// Freeze gate: if the container declared a config_api at
 			// load time and has not yet been configured, serve only
 			// requests matching that endpoint and return 503 for

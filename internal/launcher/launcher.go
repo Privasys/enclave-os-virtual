@@ -57,6 +57,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/network"
 	"github.com/Privasys/enclave-os-virtual/internal/oids"
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
+	"github.com/Privasys/enclave-os-virtual/internal/surfaces"
 	"github.com/Privasys/enclave-os-virtual/internal/tpm"
 	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 	"github.com/Privasys/enclave-os-virtual/internal/vaultkey"
@@ -613,6 +614,10 @@ type Launcher struct {
 	// is not an attester, which is all but one of them. Guarded by
 	// freezeMu, alongside prices, and read on the same request path.
 	attributeProviders map[string]string
+	// surfaces is what each container declared it serves in the clear
+	// (manifest "surfaces" plus the legacy static label), for the status
+	// report the control plane reads. Guarded by freezeMu.
+	surfaces map[string]*surfaces.Surfaces
 
 	// freezeMu guards configAPI + configured. Always acquired AFTER l.mu
 	// when both are held (writers inside Load/Unload); Statuses takes it
@@ -688,32 +693,33 @@ func (l *Launcher) SetDesiredImages(fn func() []string) {
 // New creates a new Launcher with the given config.
 func New(cfg Config, log *zap.Logger) *Launcher {
 	l := &Launcher{
-		cfg:               cfg,
-		log:               log.Named("launcher"),
-		containerTrees:    make(map[string]*merkle.Tree),
-		imageDigests:      make(map[string][]byte),
-		appIDs:            make(map[string][]byte),
-		appPolicy:         make(map[string][]byte),
-		pulledImages:      make(map[string]client.Image),
-		specs:             make(map[string]manifest.Container),
-		volumeEncryption:  make(map[string]string),
-		persistentVolume:  make(map[string]bool),
-		oidExts:           make(map[string]map[string][]byte),
-		configAPI:         make(map[string]*ConfigAPISpec),
-		configured:        make(map[string]bool),
-		configOwners:      make(map[string][]string),
-		prices:            make(map[string]apifees.Table),
+		cfg:                cfg,
+		log:                log.Named("launcher"),
+		containerTrees:     make(map[string]*merkle.Tree),
+		imageDigests:       make(map[string][]byte),
+		appIDs:             make(map[string][]byte),
+		appPolicy:          make(map[string][]byte),
+		pulledImages:       make(map[string]client.Image),
+		specs:              make(map[string]manifest.Container),
+		volumeEncryption:   make(map[string]string),
+		persistentVolume:   make(map[string]bool),
+		oidExts:            make(map[string]map[string][]byte),
+		configAPI:          make(map[string]*ConfigAPISpec),
+		configured:         make(map[string]bool),
+		configOwners:       make(map[string][]string),
+		prices:             make(map[string]apifees.Table),
 		attributeProviders: make(map[string]string),
-		failures:          make(map[string]string),
-		billingFrozen:     make(map[string]string),
-		containerTokens:   make(map[string]string),
-		resourceDecls:     make(map[string][]ResourceDecl),
-		mintedIdentities:  make(map[string]map[[32]byte]time.Time),
-		attestationTokens: make(map[string]string),
-		sovereignBranches: make(map[string][]byte),
-		holderBranches:    make(map[string][]byte),
-		storageFacts:      make(map[string]string),
-		readyCh:           make(chan struct{}),
+		surfaces:           make(map[string]*surfaces.Surfaces),
+		failures:           make(map[string]string),
+		billingFrozen:      make(map[string]string),
+		containerTokens:    make(map[string]string),
+		resourceDecls:      make(map[string][]ResourceDecl),
+		mintedIdentities:   make(map[string]map[[32]byte]time.Time),
+		attestationTokens:  make(map[string]string),
+		sovereignBranches:  make(map[string][]byte),
+		holderBranches:     make(map[string][]byte),
+		storageFacts:       make(map[string]string),
+		readyCh:            make(chan struct{}),
 	}
 
 	// Compute attestation servers hash (sorted, newline-joined, SHA-256)
@@ -1053,16 +1059,17 @@ type AppHostRouter interface {
 	// from the container's stamped OID values on Load.
 	SetExpectedWorkloadDigest(host string, digest [32]byte)
 
-	// SetStaticUnsealedPrefixes declares path prefixes for a Host that the
-	// session-relay may serve in the CLEAR on the gateway-terminated leg
-	// (GET/HEAD only), overriding the require-sealed default. Intended for an
-	// app that serves its own public browser UI from inside the enclave: the
-	// HTML/JS/CSS shell is public measured code and carries no user data, but
-	// the sealed default 403s it, leaving the page unloadable. The app opts in
-	// via the measured image label org.privasys.static-unsealed-prefixes; the
-	// data plane (/api and any non-declared path) stays sealed. Never exempts
-	// /api* (the manager hard-excludes it).
-	SetStaticUnsealedPrefixes(host string, prefixes []string)
+	// SetSurfaces declares what a Host serves in the CLEAR on the
+	// gateway-terminated leg, overriding the require-sealed default for
+	// exactly those routes: the app's static browser shell (GET/HEAD prefixes
+	// of measured code, so the page can load before a sealed session exists)
+	// and its explicit public routes (data it publishes, inbound webhooks).
+	// Read from the measured manifest (privasys.json "surfaces") with the
+	// older org.privasys.static-unsealed-prefixes label as an alias, so a
+	// verifier sees exactly what the app serves in the clear. The manager
+	// serves those routes anonymous by construction and keeps everything
+	// else sealed. nil clears the declaration.
+	SetSurfaces(host string, s *surfaces.Surfaces)
 }
 
 // SetAppHostRouter wires the manager API server's host router. When set,
@@ -1174,45 +1181,21 @@ func (l *Launcher) armSessionRelayWorkloadDigest(containerName, host string) {
 		zap.String("host", host), zap.String("workload_digest", hex.EncodeToString(digest[:])))
 }
 
-// staticUnsealedPrefixesLabel is the measured image label by which an app
-// opts its public browser-UI shell paths out of require-sealed on the
-// gateway-terminated leg. Comma-separated path prefixes (an entry of exactly
-// "/" matches the root document only). Measured: it rides the image config,
-// so changing it changes the attested image digest — a verifier sees exactly
-// which paths this app serves in the clear.
-const staticUnsealedPrefixesLabel = "org.privasys.static-unsealed-prefixes"
-
-// armStaticUnsealedPrefixes reads the opt-in image label and hands the parsed
-// prefixes to the manager, which serves matching GET/HEAD requests in the
-// clear (public UI code) while keeping the data plane sealed. Best-effort:
-// an unreadable label leaves the app fully sealed (safe default), which only
-// costs an enclave-served UI its browser reachability, never confidentiality.
-func (l *Launcher) armStaticUnsealedPrefixes(ctx context.Context, img client.Image, host string) {
-	if l.appHostRouter == nil || host == "" || img == nil {
+// armSurfaces hands the app's declared surfaces (parsed and checked at Load
+// from the measured labels) to the manager, which serves exactly those
+// routes in the clear on the gateway-terminated leg, anonymous by
+// construction, and keeps everything else sealed. Nothing declared leaves
+// the app fully sealed, which only costs an enclave-served UI its browser
+// reachability, never confidentiality.
+func (l *Launcher) armSurfaces(host string, surf *surfaces.Surfaces) {
+	if l.appHostRouter == nil || host == "" {
 		return
 	}
-	labels, err := l.mgr.ImageLabels(ctx, img)
-	if err != nil {
-		l.log.Warn("image labels unreadable; static-unsealed prefixes not armed",
-			zap.String("host", host), zap.Error(err))
-		return
+	l.appHostRouter.SetSurfaces(host, surf)
+	if !surf.Empty() {
+		l.log.Info("surfaces armed: served in the clear on the gateway-terminated leg",
+			zap.String("host", host), zap.String("surfaces", surf.Summary()))
 	}
-	raw := labels[staticUnsealedPrefixesLabel]
-	if raw == "" {
-		return
-	}
-	var prefixes []string
-	for _, p := range strings.Split(raw, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			prefixes = append(prefixes, p)
-		}
-	}
-	if len(prefixes) == 0 {
-		return
-	}
-	l.appHostRouter.SetStaticUnsealedPrefixes(host, prefixes)
-	l.log.Info("static-unsealed UI prefixes armed",
-		zap.String("host", host), zap.Strings("prefixes", prefixes))
 }
 
 // SetTokenSource sets a dynamic token source that takes precedence over
@@ -1555,10 +1538,23 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// label. Only an app that declares one may consume a disclosure voucher,
 	// so that an ordinary app cannot spend an attester's.
 	var attributeProvider string
-	if labels, lerr := l.mgr.ImageLabels(ctx, img); lerr != nil {
-		l.log.Warn("image labels unreadable; app runs unpriced",
+	// What the app serves in the clear (surfaces): from the same measured
+	// label, plus the older static-prefixes label as an alias. A malformed
+	// declaration refuses the load (the developer must see it), and so does
+	// one that would put a priced or the configure route in the clear.
+	var surf *surfaces.Surfaces
+	labels, lerr := l.mgr.ImageLabels(ctx, img)
+	if lerr != nil {
+		l.log.Warn("image labels unreadable; app runs unpriced and fully sealed",
 			zap.String("name", req.Name), zap.Error(lerr))
-	} else if raw := labels[apifees.ManifestLabel]; raw != "" {
+	} else {
+		parsed, serr := surfaces.Parse(labels[apifees.ManifestLabel])
+		if serr != nil {
+			return nil, fmt.Errorf("launcher: %s: %w", req.Name, serr)
+		}
+		surf = surfaces.AddLegacyStatic(parsed, labels[surfaces.StaticLabel])
+	}
+	if raw := labels[apifees.ManifestLabel]; lerr == nil && raw != "" {
 		if ns := apifees.ParseAttributeProvider(raw); ns != "" {
 			attributeProvider = ns
 			l.log.Info("attribute provider declared",
@@ -1576,6 +1572,20 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 					zap.String("path", path),
 					zap.String("tool", pt.Tool),
 					zap.Uint64("credits", pt.Rule.Credits))
+			}
+		}
+	}
+	if !surf.Empty() {
+		priced := make([]string, 0, len(priceTable))
+		for path := range priceTable {
+			priced = append(priced, path)
+		}
+		if err := surf.CheckPriced(priced); err != nil {
+			return nil, fmt.Errorf("launcher: %s: %w", req.Name, err)
+		}
+		if req.ConfigAPI != nil {
+			if err := surf.CheckConfigAPI(req.ConfigAPI.Method, req.ConfigAPI.Path); err != nil {
+				return nil, fmt.Errorf("launcher: %s: %w", req.Name, err)
 			}
 		}
 	}
@@ -1845,6 +1855,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	} else {
 		delete(l.attributeProviders, req.Name)
 	}
+	if !surf.Empty() {
+		l.surfaces[req.Name] = surf
+	} else {
+		delete(l.surfaces, req.Name)
+	}
 	l.freezeMu.Unlock()
 	l.clearFailure(req.Name)
 	l.containerTokens[req.Name] = containerToken
@@ -1892,11 +1907,9 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				// field-4 digest no longer matches this app's measurement is
 				// rejected, so an app code/config change re-prompts the user.
 				l.armSessionRelayWorkloadDigest(req.Name, spec.Hostname)
-				// Arm public static-UI prefixes (opt-in, measured image label):
-				// an app that serves its own browser UI from the enclave marks
-				// the HTML/JS/CSS shell paths served in the clear so the page
-				// can load before a sealed session exists. Data stays sealed.
-				l.armStaticUnsealedPrefixes(ctx, img, spec.Hostname)
+				// Arm the declared surfaces (static shell + public routes) the
+				// manager serves in the clear on the gateway-terminated leg.
+				l.armSurfaces(spec.Hostname, surf)
 			}
 			// Ingress mutual RA-TLS is enabled for this app when it declares an
 			// allowed-caller set (manager-owned, never self-declared by the app).
@@ -2357,6 +2370,7 @@ func (l *Launcher) StatusReport() []ContainerStatus {
 			Status:         string(mc.GetStatus()),
 			Error:          mc.GetFailure(),
 			AwaitingConfig: l.configAPI[mc.Name] != nil && !l.configured[mc.Name],
+			Surfaces:       l.surfaces[mc.Name],
 		}
 		progress := mc.GetPullProgress()
 		if progress.TotalBytes > 0 {
@@ -2397,6 +2411,10 @@ type ContainerStatus struct {
 	// has not yet been configured (the freeze gate returns 503 for all
 	// non-configure traffic). Lets the control plane surface a "Frozen" state.
 	AwaitingConfig bool `json:"awaiting_config,omitempty"`
+	// Surfaces is what the container declared it serves in the CLEAR on the
+	// gateway-terminated leg (static shell prefixes and public routes), so the
+	// control plane can show a user exactly which routes the gateway reads.
+	Surfaces *surfaces.Surfaces `json:"surfaces,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -2668,6 +2686,14 @@ func (l *Launcher) ContainerAttributeProvider(name string) string {
 	l.freezeMu.RLock()
 	defer l.freezeMu.RUnlock()
 	return l.attributeProviders[name]
+}
+
+// ContainerSurfaces reports what a container declared it serves in the
+// clear, or nil.
+func (l *Launcher) ContainerSurfaces(name string) *surfaces.Surfaces {
+	l.freezeMu.RLock()
+	defer l.freezeMu.RUnlock()
+	return l.surfaces[name]
 }
 
 // ContainerFreezeState reports the current freeze state for the given

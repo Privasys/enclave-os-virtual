@@ -53,14 +53,20 @@ const (
 	// inbound request so neither gateway-leg nor RA-TLS-direct clients can
 	// assert an identity.
 	relaySubHeader = "X-Privasys-Sub"
+	// TransportHeader tells the app which leg a request arrived on; only the
+	// runtime sets it, and every inbound value is stripped. This middleware
+	// stamps "sealed" on the inner request it unsealed; the manager stamps
+	// the other legs (manager/surfaces.go).
+	TransportHeader = "X-Privasys-Transport"
+	TransportSealed = "sealed"
 	// sealedEnvelopeHeader carries the sealed request envelope
 	// (base64url, no padding) for methods that cannot have a request body
 	// in browser fetch (GET/HEAD). The AAD is unchanged (outer
 	// method:URI:session), so the envelope stays bound to the real method.
 	sealedEnvelopeHeader = "X-Privasys-Sealed"
-	hkdfInfo                = "privasys-session/v1"
-	dirInfoC2S              = "privasys-dir/c2s"
-	dirInfoS2C              = "privasys-dir/s2c"
+	hkdfInfo             = "privasys-session/v1"
+	dirInfoC2S           = "privasys-dir/c2s"
+	dirInfoS2C           = "privasys-dir/s2c"
 	// Sealed WebSocket streams share the session AEAD key but derive
 	// PER-STREAM per-direction nonce prefixes: the stream's hex id is
 	// folded into these labels ("privasys-dir/ws-c2s/<streamHex>", see
@@ -195,8 +201,8 @@ type Session struct {
 	// demand (wsStreamPrefixes): a session runs many concurrent streams and
 	// each needs an independent keystream, so the prefixes cannot be
 	// derived up front.
-	IKM  []byte
-	Salt []byte
+	IKM       []byte
+	Salt      []byte
 	S2CCtr    uint64
 	C2SNext   uint64 // smallest acceptable c2s ctr; rejects replay incl. the last frame
 	ExpiresAt time.Time
@@ -371,6 +377,7 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 		// inbound value on EVERY path — passthrough (RA-TLS direct clients
 		// could otherwise spoof it) and sealed alike.
 		r.Header.Del(relaySubHeader)
+		r.Header.Del(TransportHeader)
 		if r.URL.Path == initPath && r.Method == http.MethodPost {
 			m.handleInit(w, r)
 			return
@@ -683,6 +690,7 @@ func (m *Manager) handleSealed(w http.ResponseWriter, r *http.Request, next http
 	if sess.Sub != "" {
 		r2.Header.Set(relaySubHeader, sess.Sub)
 	}
+	r2.Header.Set(TransportHeader, TransportSealed)
 
 	sw := newSealedRespWriter(w, sess, ad, m)
 	next.ServeHTTP(sw, r2)

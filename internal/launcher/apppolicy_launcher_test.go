@@ -12,6 +12,7 @@ import (
 	"enclave-os-mini/clients/go/ratls"
 	"github.com/Privasys/enclave-os-virtual/internal/apppolicy"
 	"github.com/Privasys/enclave-os-virtual/internal/manifest"
+	"github.com/Privasys/enclave-os-virtual/internal/surfaces"
 )
 
 // recordingRouter captures what the launcher installs for a host.
@@ -29,7 +30,7 @@ func (r *recordingRouter) RegisterIngressPolicy(hostname string, policy *ratls.D
 }
 func (r *recordingRouter) SetSessionRelayIdentityKeySeed(string, []byte) error { return nil }
 func (r *recordingRouter) SetExpectedWorkloadDigest(string, [32]byte)          {}
-func (r *recordingRouter) SetStaticUnsealedPrefixes(string, []string)          {}
+func (r *recordingRouter) SetSurfaces(string, *surfaces.Surfaces)              {}
 
 func TestAppIDOfResolvesALoadedContainer(t *testing.T) {
 	l := New(Config{}, zap.NewNop())
