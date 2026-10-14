@@ -147,6 +147,9 @@ func (g *spendGate) enforce(r *http.Request, host, calleeAppID string) (int, err
 	if payer.SID != "" {
 		r.Header.Set(spend.HeaderPayerSID, payer.SID)
 	}
+	if payer.Ledger != "" {
+		r.Header.Set(spend.HeaderPayerLedger, payer.Ledger)
+	}
 	_ = calleeAppID // the callee's own id is not part of the decision; logged by callers
 	return 0, nil
 }
@@ -175,7 +178,7 @@ func (g *spendGate) billable(ctx context.Context, p *spend.Payer) (bool, string)
 	if g.mgmtURL == "" || g.token == "" {
 		return true, ""
 	}
-	key := p.Sub + "|" + p.AppID
+	key := p.Sub + "|" + p.Ledger + "|" + p.AppID
 	now := g.now()
 	g.mu.Lock()
 	v, cached := g.verdicts[key]
@@ -206,6 +209,11 @@ func (g *spendGate) askBillable(ctx context.Context, p *spend.Payer) (bool, stri
 	defer cancel()
 	q := url.Values{}
 	q.Set("sub", p.Sub)
+	// The ledger handle names the payer to the platform without a subject;
+	// a control plane that knows handles bills by it and ignores sub.
+	if p.Ledger != "" {
+		q.Set("ledger", p.Ledger)
+	}
 	q.Set("app", p.AppID)
 	if p.Cap > 0 {
 		q.Set("cap", strconv.FormatInt(p.Cap, 10))

@@ -192,6 +192,9 @@ type Event struct {
 	Function  string `json:"function"`
 	CallID    string `json:"call_id"`
 	CallerSub string `json:"caller_sub,omitempty"`
+	// PayerLedger is the spend token's ledger handle: how the platform bills
+	// the payer without a subject. Named as the management-service reads it.
+	PayerLedger string `json:"payer_ledger,omitempty"`
 	// PayerApp is the app the caller authorised to spend for them (the
 	// spend token's azp), when the call carried one.
 	PayerApp string `json:"payer_app,omitempty"`
@@ -256,17 +259,24 @@ func (s *Store) Record(app, function, callerSub string, credits uint64) Event {
 // RecordFor is Record with the spender app (the spend token's azp, undashed
 // hex) the fee counts against for the payer's per-app monthly cap.
 func (s *Store) RecordFor(app, function, callerSub, payerApp string, credits uint64) Event {
+	return s.RecordLedger(app, function, callerSub, "", payerApp, credits)
+}
+
+// RecordLedger is RecordFor with the payer's ledger handle (the spend
+// token's), which the platform debits by.
+func (s *Store) RecordLedger(app, function, callerSub, payerLedger, payerApp string, credits uint64) Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.seq++
 	ev := Event{
-		Seq:       s.seq,
-		App:       app,
-		Function:  function,
-		CallID:    newCallID(),
-		CallerSub: callerSub,
-		PayerApp:  payerApp,
-		Credits:   credits,
+		Seq:         s.seq,
+		App:         app,
+		Function:    function,
+		CallID:      newCallID(),
+		CallerSub:   callerSub,
+		PayerLedger: payerLedger,
+		PayerApp:    payerApp,
+		Credits:     credits,
 	}
 	s.events = append(s.events, ev)
 	if n := len(s.events) - maxEvents; n > 0 {

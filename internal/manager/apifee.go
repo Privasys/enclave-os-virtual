@@ -152,7 +152,8 @@ func (s *Server) serveAppBilled(w http.ResponseWriter, r *http.Request, containe
 	// Charge only on delivery: a failed call costs nothing. status 0 means
 	// the handler wrote a body with no explicit status — an implicit 200.
 	if bw.status == 0 || (bw.status >= 200 && bw.status < 300) {
-		ev := s.apiFees.RecordFor(containerName, pt.Tool, sub,
+		ev := s.apiFees.RecordLedger(containerName, pt.Tool, sub,
+			strings.TrimSpace(r.Header.Get(spend.HeaderPayerLedger)),
 			strings.TrimSpace(r.Header.Get(spend.HeaderPayerApp)), rule.Credits)
 		s.log.Info("api fee recorded",
 			zap.String("container", containerName),
