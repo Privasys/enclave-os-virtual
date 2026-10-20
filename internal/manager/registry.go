@@ -71,6 +71,48 @@ func (r *registry) Save(req launcher.LoadRequest) error {
 	return r.writeLocked(entries)
 }
 
+// RebindKey points the entry for name at a volume key's new generation, once a
+// rotation's add phase has put that key in a LUKS slot. Without it the replay
+// keeps asking for the old handle, and after the retire phase removes the old
+// slot the app no longer comes back on a restart.
+//
+// It moves the handle, and the vault addressing too when the rotation crosses
+// constellations. The persisted creation grant is dropped: the key now exists,
+// so a replay reconstructs it and never needs to create one.
+//
+// Only an entry still on the rotation's old handle is moved (or one already on
+// its new handle, for a retried add). Anything else means the app was reloaded
+// in between, and that newer request is left alone. Reports whether it moved.
+func (r *registry) RebindKey(name string, rot launcher.RotateRequest) (bool, error) {
+	if r == nil || rot.NewHandle == "" {
+		return false, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entries, err := r.loadLocked()
+	if err != nil {
+		return false, err
+	}
+	for i, e := range entries {
+		if e.Name != name {
+			continue
+		}
+		if e.KeyHandle != rot.OldHandle && e.KeyHandle != rot.NewHandle {
+			return false, nil
+		}
+		e.KeyHandle = rot.NewHandle
+		e.KeyCreationGrant = ""
+		if len(rot.NewVaultEndpoints) > 0 {
+			e.VaultEndpoints = rot.NewVaultEndpoints
+			e.VaultMrenclave = rot.NewVaultMrenclave
+			e.VaultAttestationServer = rot.NewVaultAttestationServer
+		}
+		entries[i] = e
+		return true, r.writeLocked(entries)
+	}
+	return false, nil
+}
+
 // Remove deletes the entry whose Name matches name. Missing entries are
 // silently ignored.
 func (r *registry) Remove(name string) error {

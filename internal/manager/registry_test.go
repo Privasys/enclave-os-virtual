@@ -2,6 +2,7 @@ package manager
 
 import (
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
@@ -118,5 +119,108 @@ func TestRegistryPurgedForOrphan(t *testing.T) {
 	// after the entry is already gone still reports success.
 	if err := r.Remove("release-probe-d"); err != nil {
 		t.Fatalf("second remove should be a no-op, got %v", err)
+	}
+}
+
+func registryWith(t *testing.T, entries ...launcher.LoadRequest) *registry {
+	t.Helper()
+	r := newRegistry(filepath.Join(t.TempDir(), "manager-apps.json"))
+	for _, e := range entries {
+		if err := r.Save(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return r
+}
+
+func entry(t *testing.T, r *registry, name string) launcher.LoadRequest {
+	t.Helper()
+	list, err := r.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range list {
+		if e.Name == name {
+			return e
+		}
+	}
+	t.Fatalf("no registry entry %q", name)
+	return launcher.LoadRequest{}
+}
+
+// A migration onto another constellation moves the replay to the new key and
+// the new vaults, and drops the creation grant the key no longer needs.
+func TestRebindKeyAcrossConstellations(t *testing.T) {
+	r := registryWith(t, launcher.LoadRequest{
+		Name:                   "app",
+		KeyHandle:              "apps.privasys.org/x/storage-kek/v1",
+		KeyCreationGrant:       "grant-for-v1",
+		VaultEndpoints:         []string{"old-a:1", "old-b:2"},
+		VaultMrenclave:         "old",
+		VaultAttestationServer: "https://as.example/verify",
+	})
+
+	moved, err := r.RebindKey("app", launcher.RotateRequest{
+		Phase:                     launcher.RotatePhaseAdd,
+		OldHandle:                 "apps.privasys.org/x/storage-kek/v1",
+		NewHandle:                 "apps.privasys.org/x/storage-kek/v2",
+		NewVaultEndpoints:         []string{"new-a:3", "new-b:4"},
+		NewVaultMrenclave:         "new",
+		NewVaultAttestationServer: "https://as.example/verify",
+	})
+	if err != nil || !moved {
+		t.Fatalf("moved=%v err=%v, want a move", moved, err)
+	}
+	got := entry(t, r, "app")
+	if got.KeyHandle != "apps.privasys.org/x/storage-kek/v2" {
+		t.Errorf("handle = %q, want v2", got.KeyHandle)
+	}
+	if !reflect.DeepEqual(got.VaultEndpoints, []string{"new-a:3", "new-b:4"}) || got.VaultMrenclave != "new" {
+		t.Errorf("vaults = %v / %q, want the new constellation", got.VaultEndpoints, got.VaultMrenclave)
+	}
+	if got.KeyCreationGrant != "" {
+		t.Errorf("creation grant kept (%q), want it dropped", got.KeyCreationGrant)
+	}
+}
+
+// A rotation within one constellation moves the handle and keeps the vaults.
+func TestRebindKeySameConstellation(t *testing.T) {
+	r := registryWith(t, launcher.LoadRequest{
+		Name:           "app",
+		KeyHandle:      "h/v1",
+		VaultEndpoints: []string{"a:1"},
+		VaultMrenclave: "m",
+	})
+	if moved, err := r.RebindKey("app", launcher.RotateRequest{OldHandle: "h/v1", NewHandle: "h/v2"}); err != nil || !moved {
+		t.Fatalf("moved=%v err=%v", moved, err)
+	}
+	got := entry(t, r, "app")
+	if got.KeyHandle != "h/v2" || !reflect.DeepEqual(got.VaultEndpoints, []string{"a:1"}) || got.VaultMrenclave != "m" {
+		t.Errorf("got %q %v %q, want h/v2 on the same vaults", got.KeyHandle, got.VaultEndpoints, got.VaultMrenclave)
+	}
+}
+
+// An app reloaded between the add and this update is on neither handle: its
+// newer request wins and is left alone. A retried add (already on the new
+// handle) is accepted, and other entries are never touched.
+func TestRebindKeyLeavesOthersAlone(t *testing.T) {
+	r := registryWith(t,
+		launcher.LoadRequest{Name: "app", KeyHandle: "h/v5"},
+		launcher.LoadRequest{Name: "other", KeyHandle: "h/v1"},
+	)
+	if moved, _ := r.RebindKey("app", launcher.RotateRequest{OldHandle: "h/v1", NewHandle: "h/v2"}); moved {
+		t.Error("moved an entry that is on neither the old nor the new handle")
+	}
+	if got := entry(t, r, "app").KeyHandle; got != "h/v5" {
+		t.Errorf("reloaded entry changed to %q", got)
+	}
+	if got := entry(t, r, "other").KeyHandle; got != "h/v1" {
+		t.Errorf("unrelated entry changed to %q", got)
+	}
+	if moved, err := r.RebindKey("app", launcher.RotateRequest{OldHandle: "h/v4", NewHandle: "h/v5"}); err != nil || !moved {
+		t.Errorf("retried add: moved=%v err=%v, want accepted", moved, err)
+	}
+	if moved, _ := r.RebindKey("missing", launcher.RotateRequest{OldHandle: "a", NewHandle: "b"}); moved {
+		t.Error("moved an entry that does not exist")
 	}
 }

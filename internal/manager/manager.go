@@ -1421,6 +1421,21 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	// After add, both keys open the volume, so the replay can safely move to the
+	// new one now. If it cannot be recorded, fail the phase: the caller then
+	// never retires the old slot, and the replay's old handle still opens it.
+	if req.Phase == launcher.RotatePhaseAdd {
+		moved, err := s.registry.RebindKey(name, req)
+		if err != nil {
+			s.log.Error("volume key rotation: replay registry not updated",
+				zap.String("name", name), zap.Error(err))
+			s.jsonError(w, http.StatusInternalServerError,
+				"new key added, but the replay registry could not be updated; do not retire the old key: "+err.Error())
+			return
+		}
+		s.log.Info("volume key rotation: replay registry",
+			zap.String("name", name), zap.String("new_handle", req.NewHandle), zap.Bool("moved", moved))
+	}
 	s.log.Info("volume key rotation phase complete",
 		zap.String("name", name), zap.String("phase", string(req.Phase)))
 	w.Header().Set("Content-Type", "application/json")
