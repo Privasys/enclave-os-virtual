@@ -1,0 +1,16 @@
+# Hold the NVIDIA 595-server userspace at the version of the CC kernel
+# modules that actually load (the signed bundle from the cvm-images kernel-v*
+# release, nvidia-cc-bundle-signed-595.71.05-6.17.0-35-generic). libcuda,
+# nvidia-smi and the firmware must match the loaded module exactly, or the
+# GPU never comes up.
+#
+# Why a pin, when Mirror= is a dated snapshot: mkosi still adds
+# security.ubuntu.com noble-security unsnapshotted, and 595.91.07 landed there
+# after tdx-gpu-v0.6.59. apt then wanted 595.91.07 userspace beside the
+# snapshot's linux-modules-nvidia-595-server-open-6.17.0-35-generic, which
+# requires <= 595.71.05, and the image build failed.
+#
+# When cvm-images ships a bundle for a newer driver, bump this with it.
+Package: *nvidia*-595-server*
+Pin: version 595.71.05*
+Pin-Priority: 1001
