@@ -46,6 +46,7 @@ package apppolicy
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -137,13 +138,14 @@ func DocumentDigest(rawDoc []byte) string {
 
 // Binding recomputes the operation binding the approver's assertion signed:
 // SHA-256 over the domain, handle, measurement, policy version, nonce and
-// expiry, newline-joined. The identity provider and the vault compute it the
-// same way.
+// expiry, newline-joined, as unpadded base64url: the form the identity provider
+// puts in the token's `vault_op`. The identity provider and the vault compute
+// it the same way.
 func Binding(handle, measurementHex string, policyVersion uint64, nonce string, exp int64) string {
 	input := fmt.Sprintf("%s\n%s\n%s\n%d\n%s\n%d",
 		BindingDomain, handle, measurementHex, policyVersion, nonce, exp)
 	sum := sha256.Sum256([]byte(input))
-	return hex.EncodeToString(sum[:])
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 // CheckApproval verifies that the claims of an already-verified approval token
@@ -171,7 +173,7 @@ func CheckApproval(doc *Document, rawDoc []byte, claims map[string]interface{}) 
 		return "", fmt.Errorf("apppolicy: approval carries no expiry")
 	}
 	want := Binding(HandleFor(doc.AppID), DocumentDigest(rawDoc), doc.Seq, nonce, int64(expF))
-	if !strings.EqualFold(want, vaultOp) {
+	if want != vaultOp {
 		return "", fmt.Errorf("apppolicy: the approval does not bind this document")
 	}
 	return sub, nil

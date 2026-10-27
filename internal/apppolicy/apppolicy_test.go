@@ -280,3 +280,15 @@ func TestConstellationIsPinnedAndKept(t *testing.T) {
 		t.Error("an app with no approved constellation was constrained")
 	}
 }
+
+// The identity provider puts the binding in `vault_op` as unpadded base64url.
+// The fake above mints its tokens with Binding itself, so it cannot catch a
+// change of encoding: this vector comes from the identity provider's own
+// computation.
+func TestBindingMatchesTheIdentityProvider(t *testing.T) {
+	got := Binding("app:f36925ff3553469987f9908a2d530ff7:policy",
+		"d14a59e695616fe837847654828bcbd8e8e56bdc8512077f39d213814bd53a45", 1, "bm9uY2U", 1793116800)
+	if want := "4MoJ5Gksw4iT95c430SJJiI9MVWR9u64HPnp4yL9p24"; got != want {
+		t.Fatalf("Binding = %s, want the identity provider's %s", got, want)
+	}
+}
