@@ -1,4 +1,4 @@
-# Pin the patched cvm-images kernel ABI (6.17.0-35-generic) and block any
+# Pin the patched cvm-images kernel ABI (7.0.0-38-generic) and block any
 # newer Ubuntu HWE kernel from being installed alongside it.
 #
 # Why: nvidia-driver-595-server-open and various other Recommends pull in
@@ -19,7 +19,7 @@
 #      build/image-gpu/mkosi.conf.
 
 # Block the floating meta-packages that always resolve to the latest ABI.
-Package: linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 linux-modules-nvidia-595-server-open-generic-6.17 linux-modules-nvidia-595-server-open-generic-hwe-24.04 linux-modules-nvidia-595-server-generic-6.17 linux-modules-nvidia-595-server-generic-hwe-24.04
+Package: linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 linux-modules-nvidia-595-server-open-generic-6.17 linux-modules-nvidia-595-server-open-generic-7.0 linux-modules-nvidia-595-server-open-generic-hwe-24.04 linux-modules-nvidia-595-server-generic-6.17 linux-modules-nvidia-595-server-generic-7.0 linux-modules-nvidia-595-server-generic-hwe-24.04
 Pin: release *
 Pin-Priority: -1
 

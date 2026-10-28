@@ -47,7 +47,7 @@ env:
   # and an update is a deliberate, reviewable change. Bump these on purpose.
   # Go modules and the Go toolchain download are verified against the Go
   # checksum database (no GONOSUMDB): the toolchain itself is pinned in go.mod.
-  CVM_KERNEL_TAG: kernel-v0.4.0
+  CVM_KERNEL_TAG: kernel-v0.5.0
   CVM_IMAGES_TAG: tdx-base-v0.4.1
   RA_TLS_CLIENTS_REF: 9847bb912706a7c040998c1f4fa0cd3043782c1c
   VAULTS_CLIENT_REF: 00ff196378e7058f5f5e63fa2572b69e13285164

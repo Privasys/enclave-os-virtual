@@ -51,7 +51,7 @@ env:
   # and an update is a deliberate, reviewable change. Bump these on purpose.
   # Go modules and the Go toolchain download are verified against the Go
   # checksum database (no GONOSUMDB): the toolchain itself is pinned in go.mod.
-  CVM_KERNEL_TAG: kernel-v0.4.0
+  CVM_KERNEL_TAG: kernel-v0.5.0
   CVM_IMAGES_TAG: tdx-gpu-v0.6.2
   RA_TLS_CLIENTS_REF: 9847bb912706a7c040998c1f4fa0cd3043782c1c
   VAULTS_CLIENT_REF: 00ff196378e7058f5f5e63fa2572b69e13285164
@@ -186,9 +186,8 @@ jobs:
           echo "Downloaded kernel .debs:"
           ls -lh build/kernel/debs/*.deb
 
-      # The 595.58.03 launchpad stash is gone: kernel ABI 6.17.0-35's
-      # Ubuntu-signed open modules pair with the 595.71.05 userspace that
-      # noble-updates carries today, so apt resolves everything natively.
+      # Kernel ABI 7.0.0-38's Ubuntu-signed open modules pair with the
+      # 595.91.07 userspace in the snapshot, so apt resolves natively.
 
       - name: Bake signed NVIDIA CC bundle
         env:
