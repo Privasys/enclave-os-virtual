@@ -1189,7 +1189,10 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 			s.launcher.MarkFailed(req.Name, err.Error())
 			return
 		}
-		// Persist for replay-on-restart only after a successful Load.
+		// Persist for replay-on-restart only after a successful Load. A
+		// restore is one-shot: replaying it would refuse (the volume now
+		// exists), so the persisted request never carries it.
+		req.Restore = nil
 		if err := s.registry.Save(req); err != nil {
 			s.log.Warn("registry save failed (container is running but won't auto-restart)",
 				zap.String("name", req.Name),

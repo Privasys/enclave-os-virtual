@@ -253,6 +253,12 @@ type LoadRequest struct {
 	// the key exists.
 	KeyCreationGrant string `json:"key_creation_grant,omitempty"`
 
+	// Restore fills the app's volume from one of its backups before the
+	// container starts (backup.go). Only onto an ABSENT volume, which is then
+	// created with the app's key: it never overwrites data. One-shot: the
+	// manager drops it from the request it persists for replay.
+	Restore *RestoreSpec `json:"restore,omitempty"`
+
 	// VaultEndpoints, VaultMrenclave and VaultAttestationServer address
 	// and pin the vault constellation for KeyHandle resolution. Supplied
 	// by the platform; untrusted (each vault is verified by attestation
@@ -1617,6 +1623,14 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		volumeKey := ""
 		volOrigin := ""
 		volReconstructed := false
+		if req.Restore != nil {
+			if req.KeyHandle == "" {
+				return nil, fmt.Errorf("launcher: restore needs a vault-backed volume (no key handle)")
+			}
+			if l.volMgr.Exists(req.Name) {
+				return nil, fmt.Errorf("launcher: restore of %q refused: the app already has a volume on this host, and a restore never overwrites data. Delete the volume first, then deploy with the restore", req.Name)
+			}
+		}
 		if req.KeyHandle != "" {
 			// The owner's approved constellation wins over the request's: a
 			// key must not be created or reconstructed anywhere else.
@@ -1661,9 +1675,22 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 			sovereignBranch = deriveSovereignBranch(keyHex)
 			holderBranch = deriveHolderBranch(keyHex)
 		}
-		vi, err := l.volMgr.Create(req.Name, req.Storage, volumeKey, volReconstructed)
+		// A restore creates the volume afresh with the app's existing key: the
+		// data the key implies is about to come from the backup, not the disk.
+		vi, err := l.volMgr.Create(req.Name, req.Storage, volumeKey, volReconstructed && req.Restore == nil)
 		if err != nil {
 			return nil, fmt.Errorf("launcher: failed to create encrypted volume: %w", err)
+		}
+		if req.Restore != nil {
+			if err := l.restoreVolume(ctx, req, digest, vi.MountPath); err != nil {
+				// The volume was created for this restore and holds nothing
+				// else: remove it, so a retry starts from an absent volume.
+				if rerr := l.volMgr.Remove(req.Name); rerr != nil {
+					l.log.Error("restore failed and its fresh volume could not be removed",
+						zap.String("container", req.Name), zap.Error(rerr))
+				}
+				return nil, err
+			}
 		}
 		volEncryption = vi.KeyOrigin
 		if volOrigin != "" {

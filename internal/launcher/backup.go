@@ -48,6 +48,50 @@ type BackupRequest struct {
 	Description string `json:"description,omitempty"`
 }
 
+// RestoreSpec names the backup a load fills the app's volume from. The
+// repository is the app's own (same identity, same repository key), so only
+// this app's approved measurements can read it.
+type RestoreSpec struct {
+	// SnapshotID is the snapshot to restore, or "latest".
+	SnapshotID    string        `json:"snapshot_id"`
+	RepoKeyHandle string        `json:"repo_key_handle"`
+	Target        backup.Target `json:"target"`
+}
+
+// restoreVolume fills the freshly created, mounted volume from the backup the
+// request names. Runs inside Load, before the container starts, so the app
+// never sees a half-restored volume.
+func (l *Launcher) restoreVolume(ctx context.Context, req LoadRequest, digest []byte, mountPath string) error {
+	rs := req.Restore
+	if rs.SnapshotID == "" || rs.RepoKeyHandle == "" {
+		return fmt.Errorf("launcher: restore: snapshot_id and repo_key_handle are required")
+	}
+	cfg := vaultkey.Config{
+		Endpoints:            req.VaultEndpoints,
+		MrenclaveHex:         req.VaultMrenclave,
+		AttestationServerURL: req.VaultAttestationServer,
+		MgmtURL:              l.cfg.ToolSpecMgmtURL,
+		EnclaveID:            l.cfg.ToolSpecEnclaveID,
+		EnclaveToken:         l.cfg.ToolSpecEnclaveToken,
+	}
+	password, _, _, err := vaultkey.ResolveOrProvision(ctx, l.log, cfg, rs.RepoKeyHandle, "", digest, parseAppID(req.AppId))
+	if err != nil {
+		return fmt.Errorf("launcher: restore: repository key: %w", err)
+	}
+	// Not serialised with backups (backupRun): Load holds the launcher lock,
+	// so waiting here for another app's long backup would stall every load on
+	// the host. A restore and a backup never touch the same volume (a restore
+	// needs it absent, a backup needs the app loaded).
+	snap, err := l.backupRunner.Restore(ctx, req.Name, password, rs.Target, rs.SnapshotID, mountPath)
+	if err != nil {
+		return fmt.Errorf("launcher: restore: %w", err)
+	}
+	l.log.Info("volume restored from backup", zap.String("container", req.Name),
+		zap.String("snapshot", snap.ID), zap.Time("taken_at", snap.StartTime),
+		zap.Int64("size_bytes", snap.SizeBytes), zap.Int64("files", snap.Files))
+	return nil
+}
+
 // BackupJob is the state of a container's latest backup job.
 type BackupJob struct {
 	ID         string           `json:"id"`

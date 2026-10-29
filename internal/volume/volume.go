@@ -155,6 +155,12 @@ func (m *Manager) Reserve(name, size string) error {
 	return nil
 }
 
+// Exists reports whether the container has a volume (LV) on this host.
+func (m *Manager) Exists(name string) bool {
+	_, err := os.Stat("/dev/" + VGName + "/vol-" + name)
+	return err == nil
+}
+
 // isLuks reports whether the LV already carries a LUKS header. It reads the RAW
 // LV, where there is no dm-integrity mapping yet, so unlike a probe of the
 // decrypted mapper it cannot trip an INTEGRITY AEAD ERROR on never-written

@@ -314,6 +314,53 @@ func (r *Runner) Backup(ctx context.Context, app, password string, t Target, kee
 	return &snap, nil
 }
 
+// Restore writes snapshot snapshotID (or the most recent one, for "latest") of
+// the app's repository into dest, which must be the app's freshly created,
+// empty volume. Owners, permissions and timestamps are restored as recorded.
+// Returns the snapshot it restored.
+func (r *Runner) Restore(ctx context.Context, app, password string, t Target, snapshotID, dest string) (*Snapshot, error) {
+	s, err := r.open(ctx, app, password, t, false)
+	if err != nil {
+		return nil, err
+	}
+	defer s.close()
+	out, err := s.run(ctx, "snapshot", "list", "--all", "--json")
+	if err != nil {
+		return nil, err
+	}
+	var ms []kopiaManifest
+	if err := json.Unmarshal(out, &ms); err != nil {
+		return nil, fmt.Errorf("backup: unreadable snapshot list: %w", err)
+	}
+	pick := pickSnapshot(ms, snapshotID)
+	if pick == nil {
+		return nil, fmt.Errorf("backup: snapshot %q not found in the app's repository", snapshotID)
+	}
+	if _, err := s.run(ctx, "snapshot", "restore", pick.ID, dest, "--no-progress"); err != nil {
+		return nil, err
+	}
+	snap := pick.snapshot()
+	r.log.Info("backup restored", zap.String("app", app), zap.String("id", snap.ID),
+		zap.Time("taken_at", snap.StartTime), zap.Int64("size_bytes", snap.SizeBytes))
+	return &snap, nil
+}
+
+// pickSnapshot finds snapshotID among ms, or the most recent for "latest".
+func pickSnapshot(ms []kopiaManifest, snapshotID string) *kopiaManifest {
+	var pick *kopiaManifest
+	for i := range ms {
+		m := &ms[i]
+		if snapshotID == "latest" {
+			if pick == nil || m.StartTime.After(pick.StartTime) {
+				pick = m
+			}
+		} else if m.ID == snapshotID {
+			return m
+		}
+	}
+	return pick
+}
+
 // List returns the app's snapshots, oldest first. A repository that does not
 // exist yet has no snapshots.
 func (r *Runner) List(ctx context.Context, app, password string, t Target) ([]Snapshot, error) {

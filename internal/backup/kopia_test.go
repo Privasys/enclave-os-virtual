@@ -187,6 +187,42 @@ func TestListParsesSnapshots(t *testing.T) {
 	}
 }
 
+func TestRestorePicksSnapshotAndNeverCreates(t *testing.T) {
+	bin, logPath := fakeKopia(t, false)
+	r := &Runner{log: zap.NewNop(), Binary: bin, StateBase: t.TempDir()}
+	snap, err := r.Restore(context.Background(), "myapp", "pw", testTarget(), "latest", "/run/containers/myapp")
+	if err != nil || snap.ID != "k1" {
+		t.Fatalf("Restore = %+v, %v", snap, err)
+	}
+	var restored bool
+	for _, c := range calls(t, logPath) {
+		if strings.HasPrefix(c, "repository create") {
+			t.Errorf("Restore created a repository: %q", c)
+		}
+		if strings.HasPrefix(c, "snapshot restore k1 /run/containers/myapp") {
+			restored = true
+		}
+	}
+	if !restored {
+		t.Error("snapshot restore not called with the picked snapshot and destination")
+	}
+	if _, err := r.Restore(context.Background(), "myapp", "pw", testTarget(), "nope", "/x"); err == nil {
+		t.Error("unknown snapshot id accepted")
+	}
+}
+
+func TestPickSnapshotLatest(t *testing.T) {
+	var a, b kopiaManifest
+	a.ID, b.ID = "old", "new"
+	a.StartTime = b.StartTime.AddDate(0, 0, -1)
+	if got := pickSnapshot([]kopiaManifest{b, a}, "latest"); got == nil || got.ID != "new" {
+		t.Fatalf("latest = %+v", got)
+	}
+	if got := pickSnapshot([]kopiaManifest{a, b}, "old"); got == nil || got.ID != "old" {
+		t.Fatalf("by id = %+v", got)
+	}
+}
+
 func TestInvalidAppName(t *testing.T) {
 	r := &Runner{log: zap.NewNop(), Binary: "/bin/false", StateBase: t.TempDir()}
 	if _, err := r.List(context.Background(), "a/b", "pw", testTarget()); err == nil {
