@@ -276,6 +276,12 @@ type LoadRequest struct {
 	// lost data and be refused. Ignored when the volume exists (it attaches).
 	NewVolume bool `json:"new_volume,omitempty"`
 
+	// Backup is the owner's backup schedule for this app's volume (backup.go):
+	// the manager runs it itself, so it keeps going through reboots and
+	// control-plane outages. Persisted with the request; changed live with
+	// SetBackupPolicy.
+	Backup *BackupPolicy `json:"backup,omitempty"`
+
 	// VaultEndpoints, VaultMrenclave and VaultAttestationServer address
 	// and pin the vault constellation for KeyHandle resolution. Supplied
 	// by the platform; untrusted (each vault is verified by attestation
@@ -518,6 +524,10 @@ type Launcher struct {
 	backupMu       sync.Mutex
 	backupJobs     map[string]*BackupJob
 	backupReporter BackupReporter // under backupMu
+	// Scheduled backups (backup.go), under backupMu: each loaded vault-backed
+	// app's identity, and the schedule of those with a policy.
+	backupBases     map[string]LoadRequest
+	backupSchedules map[string]*scheduledBackup
 
 	// Computed attestation data - recomputed on every load/unload.
 	platformTree   *merkle.Tree
@@ -766,6 +776,8 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		storageFacts:       make(map[string]string),
 		backupRunner:       backup.NewRunner(log),
 		backupJobs:         make(map[string]*BackupJob),
+		backupBases:        make(map[string]LoadRequest),
+		backupSchedules:    make(map[string]*scheduledBackup),
 		readyCh:            make(chan struct{}),
 	}
 
@@ -1910,6 +1922,8 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// A vault-keyed volume persists across unload/upgrade (see Unload).
 	if req.KeyHandle != "" {
 		l.persistentVolume[req.Name] = true
+		// Its backup schedule, if the owner set one (backup.go).
+		l.armBackupSchedule(req, req.Backup)
 	}
 	if sovereignBranch != nil {
 		l.sovereignBranches[req.Name] = sovereignBranch
@@ -2087,6 +2101,7 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	delete(l.containerTrees, name)
 	delete(l.volumeEncryption, name)
 	delete(l.persistentVolume, name)
+	l.disarmBackupSchedule(name)
 	delete(l.oidExts, name)
 	delete(l.sovereignBranches, name)
 	delete(l.holderBranches, name)

@@ -587,6 +587,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("POST /api/v1/volumes/{name}/backups", s.requireAuth(s.handleStartBackup))
 	mux.HandleFunc("GET /api/v1/volumes/{name}/backups/status", s.requireAuth(s.handleBackupStatus))
 	mux.HandleFunc("POST /api/v1/volumes/{name}/backups/list", s.requireAuth(s.handleListBackups))
+	mux.HandleFunc("PUT /api/v1/volumes/{name}/backups/policy", s.requireAuth(s.handleSetBackupPolicy))
 
 	// SDK setAttestationExtension: container apps call this to install
 	// (or update) a per-app X.509 extension under
@@ -1468,6 +1469,33 @@ func (s *Server) handleListBackups(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]any{"snapshots": snaps})
+}
+
+// handleSetBackupPolicy changes a loaded app's backup schedule live and
+// persists it with the app's replayed request. Body: {"policy": BackupPolicy}
+// or {"policy": null} to stop scheduled backups.
+func (s *Server) handleSetBackupPolicy(w http.ResponseWriter, r *http.Request) {
+	result := r.Context().Value(authResultKey).(*auth.AuthResult)
+	if !result.HasManagerAccess() {
+		s.jsonError(w, http.StatusForbidden, "manager role required for backup operations")
+		return
+	}
+	name := volumeNameParam(r)
+	var body struct {
+		Policy *launcher.BackupPolicy `json:"policy"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid backup policy: "+err.Error())
+		return
+	}
+	if err := s.launcher.SetBackupPolicy(name, body.Policy); err != nil {
+		s.jsonError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if _, err := s.registry.SetBackupPolicy(name, body.Policy); err != nil {
+		s.log.Warn("backup policy not persisted (applies until the next restart)", zap.String("name", name), zap.Error(err))
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"status": "set", "enabled": body.Policy != nil && body.Policy.IntervalMinutes > 0})
 }
 
 // handleDeleteVolume removes a container volume's LV on the owner's explicit

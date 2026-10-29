@@ -113,6 +113,29 @@ func (r *registry) RebindKey(name string, rot launcher.RotateRequest) (bool, err
 	return false, nil
 }
 
+// SetBackupPolicy replaces the backup schedule persisted with name's entry, so
+// a live policy change survives a manager restart. Reports whether an entry
+// was found.
+func (r *registry) SetBackupPolicy(name string, p *launcher.BackupPolicy) (bool, error) {
+	if r == nil {
+		return false, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entries, err := r.loadLocked()
+	if err != nil {
+		return false, err
+	}
+	for i, e := range entries {
+		if e.Name == name {
+			e.Backup = p
+			entries[i] = e
+			return true, r.writeLocked(entries)
+		}
+	}
+	return false, nil
+}
+
 // Remove deletes the entry whose Name matches name. Missing entries are
 // silently ignored.
 func (r *registry) Remove(name string) error {

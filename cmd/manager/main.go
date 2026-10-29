@@ -394,6 +394,11 @@ func runServe(args []string) error {
 		})
 	}
 
+	// Scheduled backups: the manager runs each app's schedule itself.
+	g.Go(func() error {
+		return l.RunBackupScheduler(gctx)
+	})
+
 	// Optional runtime-status push sender.
 	if sender := runtimestatus.New(runtimestatus.Config{
 		MgmtBaseURL:  *rsMgmtURL,

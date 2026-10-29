@@ -80,6 +80,125 @@ func (l *Launcher) restoreVolume(ctx context.Context, req LoadRequest, volumeKey
 	return nil
 }
 
+// BackupPolicy is an app's backup schedule.
+type BackupPolicy struct {
+	// IntervalMinutes between scheduled backups (e.g. 60 hourly, 1440 daily).
+	IntervalMinutes int              `json:"interval_minutes"`
+	Retention       backup.Retention `json:"retention,omitempty"`
+	Target          backup.Target    `json:"target"`
+}
+
+// minBackupInterval keeps a mistyped schedule from turning into a backup loop.
+const minBackupInterval = 15 * time.Minute
+
+// scheduledBackup is one app's schedule, with what a job needs from its load.
+type scheduledBackup struct {
+	policy  BackupPolicy
+	req     BackupRequest
+	nextRun time.Time
+}
+
+// backupRequestFor builds the job request a schedule runs, from the app's load.
+func backupRequestFor(req LoadRequest, p BackupPolicy) BackupRequest {
+	return BackupRequest{
+		Name: req.Name, AppId: req.AppId, KeyHandle: req.KeyHandle,
+		VaultEndpoints: req.VaultEndpoints, VaultMrenclave: req.VaultMrenclave,
+		VaultAttestationServer: req.VaultAttestationServer,
+		Target: p.Target, Retention: p.Retention, Description: "scheduled",
+	}
+}
+
+// firstRunDelay spreads the first scheduled backup after a load over up to the
+// interval (at most 30 minutes), so a host that reboots does not start every
+// app's backup at once.
+func firstRunDelay(interval time.Duration) time.Duration {
+	window := min(interval, 30*time.Minute)
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	var n uint64
+	for _, x := range b {
+		n = n<<8 | uint64(x)
+	}
+	return time.Duration(n % uint64(window))
+}
+
+// armBackupSchedule records a loaded, vault-backed app's identity for later
+// policy changes and installs (or, with a nil or zero policy, removes) its
+// schedule. Called from Load with the request's policy.
+func (l *Launcher) armBackupSchedule(req LoadRequest, p *BackupPolicy) {
+	l.backupMu.Lock()
+	defer l.backupMu.Unlock()
+	base := req
+	base.Backup, base.Restore, base.KeyCreationGrant = nil, nil, ""
+	l.backupBases[req.Name] = base
+	l.armBackupScheduleLocked(req, p)
+}
+
+func (l *Launcher) armBackupScheduleLocked(req LoadRequest, p *BackupPolicy) {
+	if p == nil || p.IntervalMinutes <= 0 || req.KeyHandle == "" {
+		delete(l.backupSchedules, req.Name)
+		return
+	}
+	interval := max(time.Duration(p.IntervalMinutes)*time.Minute, minBackupInterval)
+	next := time.Now().Add(firstRunDelay(interval))
+	if prev := l.backupSchedules[req.Name]; prev != nil && prev.nextRun.Before(next) {
+		next = prev.nextRun // a policy change keeps the current cadence
+	}
+	l.backupSchedules[req.Name] = &scheduledBackup{policy: *p, req: backupRequestFor(req, *p), nextRun: next}
+	l.log.Info("backup schedule armed", zap.String("container", req.Name),
+		zap.Duration("interval", interval), zap.Time("first_run", next))
+}
+
+// disarmBackupSchedule drops an app's schedule (on unload).
+func (l *Launcher) disarmBackupSchedule(name string) {
+	l.backupMu.Lock()
+	defer l.backupMu.Unlock()
+	delete(l.backupSchedules, name)
+	delete(l.backupBases, name)
+}
+
+// SetBackupPolicy changes a loaded app's schedule live (nil disables it).
+func (l *Launcher) SetBackupPolicy(name string, p *BackupPolicy) error {
+	l.backupMu.Lock()
+	defer l.backupMu.Unlock()
+	base, loaded := l.backupBases[name]
+	if !loaded {
+		return fmt.Errorf("launcher: backup policy: %q is not a loaded vault-backed app", name)
+	}
+	l.armBackupScheduleLocked(base, p)
+	return nil
+}
+
+// RunBackupScheduler starts each app's scheduled backups when they are due,
+// until ctx ends. A job already running (a manual one) just postpones the slot.
+func (l *Launcher) RunBackupScheduler(ctx context.Context) error {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case now := <-t.C:
+			var due []BackupRequest
+			l.backupMu.Lock()
+			for _, s := range l.backupSchedules {
+				if now.Before(s.nextRun) {
+					continue
+				}
+				due = append(due, s.req)
+				interval := max(time.Duration(s.policy.IntervalMinutes)*time.Minute, minBackupInterval)
+				s.nextRun = now.Add(interval)
+			}
+			l.backupMu.Unlock()
+			for _, req := range due {
+				if _, err := l.StartBackup(req); err != nil {
+					l.log.Warn("scheduled backup not started", zap.String("container", req.Name), zap.Error(err))
+				}
+			}
+		}
+	}
+}
+
 // BackupJob is the state of a container's latest backup job.
 type BackupJob struct {
 	ID         string           `json:"id"`
