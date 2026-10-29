@@ -1193,6 +1193,7 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 		// restore is one-shot: replaying it would refuse (the volume now
 		// exists), so the persisted request never carries it.
 		req.Restore = nil
+		req.NewVolume = false
 		if err := s.registry.Save(req); err != nil {
 			s.log.Warn("registry save failed (container is running but won't auto-restart)",
 				zap.String("name", req.Name),

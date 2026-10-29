@@ -259,6 +259,12 @@ type LoadRequest struct {
 	// manager drops it from the request it persists for replay.
 	Restore *RestoreSpec `json:"restore,omitempty"`
 
+	// NewVolume is the platform's assertion that this app has never had a
+	// volume. Needed when the owner created the app's key (BYOK): the key then
+	// exists before any data does, and an absent volume would otherwise read as
+	// lost data and be refused. Ignored when the volume exists (it attaches).
+	NewVolume bool `json:"new_volume,omitempty"`
+
 	// VaultEndpoints, VaultMrenclave and VaultAttestationServer address
 	// and pin the vault constellation for KeyHandle resolution. Supplied
 	// by the platform; untrusted (each vault is verified by attestation
@@ -1677,12 +1683,13 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		}
 		// A restore creates the volume afresh with the app's existing key: the
 		// data the key implies is about to come from the backup, not the disk.
-		vi, err := l.volMgr.Create(req.Name, req.Storage, volumeKey, volReconstructed && req.Restore == nil)
+		// So does a first deploy on an owner-created key (NewVolume).
+		vi, err := l.volMgr.Create(req.Name, req.Storage, volumeKey, volReconstructed && req.Restore == nil && !req.NewVolume)
 		if err != nil {
 			return nil, fmt.Errorf("launcher: failed to create encrypted volume: %w", err)
 		}
 		if req.Restore != nil {
-			if err := l.restoreVolume(ctx, req, digest, vi.MountPath); err != nil {
+			if err := l.restoreVolume(ctx, req, volumeKey, vi.MountPath); err != nil {
 				// The volume was created for this restore and holds nothing
 				// else: remove it, so a retry starts from an absent volume.
 				if rerr := l.volMgr.Remove(req.Name); rerr != nil {

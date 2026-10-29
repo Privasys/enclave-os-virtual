@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -29,14 +28,10 @@ type BackupRequest struct {
 	Name  string `json:"name"`
 	AppId string `json:"app_id,omitempty"`
 
-	// KeyHandle is the volume's current vault key handle (its LUKS passphrase).
+	// KeyHandle is the volume's current vault key handle: the owner's key, which
+	// opens the volume and from which the repository password is derived
+	// (backup.RepositoryPassword). One key per app for both.
 	KeyHandle string `json:"key_handle"`
-	// RepoKeyHandle names the vault secret that is the backup repository's
-	// password. It is created on the first backup, under RepoKeyCreationGrant,
-	// with the same policy as the volume key: only this app's approved
-	// measurements can ever read the repository.
-	RepoKeyHandle        string `json:"repo_key_handle"`
-	RepoKeyCreationGrant string `json:"repo_key_creation_grant,omitempty"`
 
 	VaultEndpoints         []string `json:"vault_endpoints,omitempty"`
 	VaultMrenclave         string   `json:"vault_mrenclave,omitempty"`
@@ -49,34 +44,27 @@ type BackupRequest struct {
 }
 
 // RestoreSpec names the backup a load fills the app's volume from. The
-// repository is the app's own (same identity, same repository key), so only
-// this app's approved measurements can read it.
+// repository is the app's own: its password derives from the app's key, so
+// only this app's approved measurements (or the owner, holding the key) can
+// read it.
 type RestoreSpec struct {
 	// SnapshotID is the snapshot to restore, or "latest".
-	SnapshotID    string        `json:"snapshot_id"`
-	RepoKeyHandle string        `json:"repo_key_handle"`
-	Target        backup.Target `json:"target"`
+	SnapshotID string        `json:"snapshot_id"`
+	Target     backup.Target `json:"target"`
 }
 
 // restoreVolume fills the freshly created, mounted volume from the backup the
 // request names. Runs inside Load, before the container starts, so the app
-// never sees a half-restored volume.
-func (l *Launcher) restoreVolume(ctx context.Context, req LoadRequest, digest []byte, mountPath string) error {
+// never sees a half-restored volume. volumeKey is the key Load just opened the
+// volume with.
+func (l *Launcher) restoreVolume(ctx context.Context, req LoadRequest, volumeKey, mountPath string) error {
 	rs := req.Restore
-	if rs.SnapshotID == "" || rs.RepoKeyHandle == "" {
-		return fmt.Errorf("launcher: restore: snapshot_id and repo_key_handle are required")
+	if rs.SnapshotID == "" {
+		return fmt.Errorf("launcher: restore: snapshot_id is required")
 	}
-	cfg := vaultkey.Config{
-		Endpoints:            req.VaultEndpoints,
-		MrenclaveHex:         req.VaultMrenclave,
-		AttestationServerURL: req.VaultAttestationServer,
-		MgmtURL:              l.cfg.ToolSpecMgmtURL,
-		EnclaveID:            l.cfg.ToolSpecEnclaveID,
-		EnclaveToken:         l.cfg.ToolSpecEnclaveToken,
-	}
-	password, _, _, err := vaultkey.ResolveOrProvision(ctx, l.log, cfg, rs.RepoKeyHandle, "", digest, parseAppID(req.AppId))
+	password, err := backup.RepositoryPassword(volumeKey)
 	if err != nil {
-		return fmt.Errorf("launcher: restore: repository key: %w", err)
+		return fmt.Errorf("launcher: restore: %w", err)
 	}
 	// Not serialised with backups (backupRun): Load holds the launcher lock,
 	// so waiting here for another app's long backup would stall every load on
@@ -115,8 +103,8 @@ func (l *Launcher) backupContextFor(req BackupRequest) (*backupContext, error) {
 	if l.volMgr == nil {
 		return nil, fmt.Errorf("launcher: backup: volumes are not available on this host")
 	}
-	if req.Name == "" || req.KeyHandle == "" || req.RepoKeyHandle == "" {
-		return nil, fmt.Errorf("launcher: backup: name, key_handle and repo_key_handle are required")
+	if req.Name == "" || req.KeyHandle == "" {
+		return nil, fmt.Errorf("launcher: backup: name and key_handle are required")
 	}
 	l.mu.RLock()
 	persistent := l.persistentVolume[req.Name]
@@ -191,15 +179,9 @@ func (l *Launcher) runBackup(ctx context.Context, req BackupRequest, bc *backupC
 	l.backupRun.Lock()
 	defer l.backupRun.Unlock()
 
-	password, err := l.repoPassword(ctx, req, bc, true)
+	dek, password, err := l.backupKeys(ctx, req, bc)
 	if err != nil {
 		return nil, err
-	}
-	// The volume key is fetched again for every backup (the manager drops it
-	// after opening the volume), under the same vault policy as at load.
-	dek, _, _, err := vaultkey.ResolveOrProvision(ctx, l.log, bc.cfg, req.KeyHandle, "", bc.digest, bc.appID)
-	if err != nil {
-		return nil, fmt.Errorf("launcher: backup: volume key: %w", err)
 	}
 	snap, err := l.volMgr.OpenSnapshot(req.Name, dek)
 	if err != nil {
@@ -214,18 +196,19 @@ func (l *Launcher) runBackup(ctx context.Context, req BackupRequest, bc *backupC
 	return l.backupRunner.Backup(ctx, req.Name, password, req.Target, req.Retention, snap.MountPath, req.Description)
 }
 
-// repoPassword resolves the backup repository's password from the vaults,
-// creating it on first use when allowed (a grant is then required).
-func (l *Launcher) repoPassword(ctx context.Context, req BackupRequest, bc *backupContext, create bool) (string, error) {
-	grant := ""
-	if create {
-		grant = req.RepoKeyCreationGrant
-	}
-	pw, _, _, err := vaultkey.ResolveOrProvision(ctx, l.log, bc.cfg, req.RepoKeyHandle, grant, bc.digest, bc.appID)
+// backupKeys fetches the app's key from the vaults again (the manager drops it
+// after opening the volume), under the same policy as at load, and derives the
+// repository password from it. Never creates a key: the owner did.
+func (l *Launcher) backupKeys(ctx context.Context, req BackupRequest, bc *backupContext) (dek, password string, err error) {
+	dek, _, _, err = vaultkey.ResolveOrProvision(ctx, l.log, bc.cfg, req.KeyHandle, "", bc.digest, bc.appID)
 	if err != nil {
-		return "", fmt.Errorf("launcher: backup: repository key: %w", err)
+		return "", "", fmt.Errorf("launcher: backup: app key: %w", err)
 	}
-	return pw, nil
+	password, err = backup.RepositoryPassword(dek)
+	if err != nil {
+		return "", "", fmt.Errorf("launcher: backup: %w", err)
+	}
+	return dek, password, nil
 }
 
 // ListBackups returns the snapshots in a container's backup repository.
@@ -234,12 +217,8 @@ func (l *Launcher) ListBackups(ctx context.Context, req BackupRequest) ([]backup
 	if err != nil {
 		return nil, err
 	}
-	password, err := l.repoPassword(ctx, req, bc, false)
+	_, password, err := l.backupKeys(ctx, req, bc)
 	if err != nil {
-		// No repository key yet means no backup was ever taken.
-		if strings.Contains(err.Error(), "no key-creation grant") {
-			return []backup.Snapshot{}, nil
-		}
 		return nil, err
 	}
 	return l.backupRunner.List(ctx, req.Name, password, req.Target)
