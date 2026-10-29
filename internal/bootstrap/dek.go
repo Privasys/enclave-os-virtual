@@ -232,11 +232,17 @@ func isLuks(ctx context.Context, device string) bool {
 	return exec.CommandContext(ctx, "cryptsetup", "isLuks", device).Run() == nil
 }
 
-// exportLocator reads the privasys-vault locator token from the LUKS2 header.
+// exportLocator reads the privasys-vault locator token from the LUKS2 header:
+// token 7, or the spare a renewal stages the new locator in, when a crash left
+// token 7 removed but not yet replaced (renew.go).
 func exportLocator(ctx context.Context, device string) (*vaultLocator, error) {
 	out, err := exec.CommandContext(ctx, "cryptsetup", "token", "export", "--token-id", luksTokenID, device).Output()
 	if err != nil {
-		return nil, fmt.Errorf("no locator token: %w", err)
+		spare, serr := exec.CommandContext(ctx, "cryptsetup", "token", "export", "--token-id", luksSpareTokenID, device).Output()
+		if serr != nil {
+			return nil, fmt.Errorf("no locator token: %w", err)
+		}
+		out = spare
 	}
 	var loc vaultLocator
 	if err := json.Unmarshal(out, &loc); err != nil {

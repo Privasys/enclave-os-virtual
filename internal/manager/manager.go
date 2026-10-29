@@ -541,6 +541,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// Move this enclave's own /data DEK to another constellation, so the one
 	// it was created on can be decommissioned (datakeyrotate.go).
 	mux.HandleFunc("POST /api/v1/data-key/rotate", s.requireAuth(s.handleRotateDataKey))
+	mux.HandleFunc("POST /api/v1/data-key/renew", s.requireAuth(s.handleRenewDataKey))
 
 	// Attested dependency set (OID 65230.6.1): the platform installs or
 	// replaces a running container's declared dependencies; the manager

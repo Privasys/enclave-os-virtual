@@ -80,3 +80,40 @@ func (s *Server) handleRotateDataKey(w http.ResponseWriter, r *http.Request) {
 		"rotated": before != after,
 	})
 }
+
+// handleRenewDataKey handles POST /api/v1/data-key/renew. Manager-role only.
+//
+// Body is a bundle like the rotation's, whose handle is the NEXT generation of
+// the one in the header: the manager re-creates the same /data DEK under it
+// (fresh vault TTL; on another constellation when the bundle names one) and
+// points the header at it. No keyslot changes. Idempotent: a header already on
+// that handle reports renewed=false. See bootstrap.RenewDataDEK.
+func (s *Server) handleRenewDataKey(w http.ResponseWriter, r *http.Request) {
+	result := r.Context().Value(authResultKey).(*auth.AuthResult)
+	if !result.HasManagerAccess() {
+		s.jsonError(w, http.StatusForbidden, "manager role required to renew the data key")
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		s.jsonError(w, http.StatusBadRequest, "could not read the request body")
+		return
+	}
+	var bundle bootstrap.RotateBundle
+	if err := json.Unmarshal(raw, &bundle); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "body is not a renew bundle: "+err.Error())
+		return
+	}
+	device, err := findDataDevice()
+	if err != nil {
+		s.jsonError(w, http.StatusConflict, err.Error())
+		return
+	}
+	from, to, err := bootstrap.RenewDataDEK(r.Context(), s.log, bootstrap.Config{}, device, &bundle)
+	if err != nil {
+		s.log.Error("data-key renewal failed", zap.Error(err))
+		s.jsonError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"device": device, "from": from, "to": to, "renewed": from != to})
+}
