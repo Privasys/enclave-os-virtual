@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -84,6 +85,11 @@ type Config struct {
 	// one of its names was obtained or renewed, so the launcher can stamp
 	// the new key on the app's attestation.
 	OnChange func(container string)
+	// CTSearch is the Certificate Transparency search base URL (empty:
+	// crt.sh), and LookupHost the resolver the ordering guard uses (nil:
+	// the system resolver). Both exist for tests.
+	CTSearch   string
+	LookupHost func(ctx context.Context, name string) ([]string, error)
 }
 
 // Status is what the control plane reads to decide whether a domain may go
@@ -92,6 +98,12 @@ type Status struct {
 	Supported  bool           `json:"supported"`
 	AccountURI string         `json:"account_uri"`
 	Domains    []DomainStatus `json:"domains"`
+	// Certificate Transparency watch (watch.go): when it last completed,
+	// what it could not check, and any certificate for a direct name whose
+	// key this enclave did not obtain.
+	CTCheckedAt         string               `json:"ct_checked_at,omitempty"`
+	CTError             string               `json:"ct_error,omitempty"`
+	ForeignCertificates []ForeignCertificate `json:"foreign_certificates"`
 }
 
 // DomainStatus describes one direct name.
@@ -109,6 +121,7 @@ type app struct {
 	accountURI string
 	cache      *certmagic.Cache
 	cancel     context.CancelFunc
+	ct         ctState
 }
 
 // Service manages the direct names of every container on this host.
@@ -120,6 +133,10 @@ type Service struct {
 
 	mu   sync.Mutex
 	apps map[string]*app // by container name
+
+	obtained *obtainedKeys
+	ctClient *http.Client
+	ctOurs   map[int64]bool // crt.sh ids already matched to a key of ours
 }
 
 // New builds the service. It does nothing until Apply names a domain.
@@ -132,6 +149,9 @@ func New(cfg Config, log *zap.Logger) *Service {
 		log:     log.Named("directtls"),
 		storage: &certmagic.FileStorage{Path: cfg.StorageRoot},
 		apps:    map[string]*app{},
+		obtained: &obtainedKeys{path: filepath.Join(cfg.StorageRoot, MarkerDir, obtainedFile)},
+		ctClient: &http.Client{Timeout: 30 * time.Second},
+		ctOurs:   map[int64]bool{},
 	}
 	s.issuerKey = IssuerKey(cfg.CA)
 	return s
@@ -202,8 +222,11 @@ func (s *Service) Apply(container, canonical string, domains []string, key *ecds
 		Storage: s.storage,
 		Logger:  s.log,
 		OnEvent: func(_ context.Context, event string, data map[string]any) error {
-			if event == "cert_obtained" && s.cfg.OnChange != nil {
-				go s.cfg.OnChange(container)
+			if event == "cert_obtained" {
+				s.recordCurrent(domains)
+				if s.cfg.OnChange != nil {
+					go s.cfg.OnChange(container)
+				}
 			}
 			return nil
 		},
@@ -227,11 +250,11 @@ func (s *Service) Apply(container, canonical string, domains []string, key *ecds
 	s.apps[container] = a
 	s.mu.Unlock()
 
+	s.recordCurrent(domains)
 	go s.resolveAccount(ctx, container, a)
-	if err := magic.ManageAsync(ctx, domains); err != nil {
-		return fmt.Errorf("directtls: manage %v: %w", domains, err)
-	}
-	s.log.Info("direct names managed",
+	go s.manageWhenResolvable(ctx, container, magic, domains)
+	go s.watchCT(ctx, container, a)
+	s.log.Info("direct names set",
 		zap.String("container", container), zap.String("canonical", canonical), zap.Strings("domains", domains))
 	return nil
 }
@@ -266,13 +289,18 @@ func (s *Service) resolveAccount(ctx context.Context, container string, a *app) 
 
 // Status reports a container's direct names.
 func (s *Service) Status(container string) Status {
-	st := Status{Supported: true, Domains: []DomainStatus{}}
+	st := Status{Supported: true, Domains: []DomainStatus{}, ForeignCertificates: []ForeignCertificate{}}
 	s.mu.Lock()
 	a := s.apps[container]
 	var domains []string
 	if a != nil {
 		st.AccountURI = a.accountURI
 		domains = append(domains, a.domains...)
+		if !a.ct.checkedAt.IsZero() {
+			st.CTCheckedAt = a.ct.checkedAt.Format(time.RFC3339)
+		}
+		st.CTError = a.ct.err
+		st.ForeignCertificates = append(st.ForeignCertificates, a.ct.foreign...)
 	}
 	s.mu.Unlock()
 	for _, d := range domains {
