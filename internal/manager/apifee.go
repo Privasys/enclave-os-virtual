@@ -69,6 +69,11 @@ func (s *Server) priceForRequest(containerName string, r *http.Request) (apifees
 // wallet app itself makes is exempt, and that is proved per request (see
 // walletCall).
 func (s *Server) callerIdentity(r *http.Request) string {
+	// A direct adopter name never bills an end user (direct.go): only the
+	// wallet makes an account a payer, through a spend token.
+	if r.Header.Get(TransportHeader) == TransportDirect {
+		return strings.TrimSpace(r.Header.Get(spend.HeaderPayer))
+	}
 	tok := ""
 	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
 		tok = strings.TrimPrefix(authz, "Bearer ")

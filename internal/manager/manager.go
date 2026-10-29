@@ -381,6 +381,11 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		if s.clearAllowed(r) {
 			return false
 		}
+		// A direct adopter name whose app opted in serves its private
+		// routes too (direct.go): nobody but the enclave reads that leg.
+		if isDirectLeg(r) && s.surfacesOf(hostOnly(r.Host)).DirectPrivate() {
+			return false
+		}
 		return !strings.HasPrefix(r.URL.Path, "/.well-known/")
 	})
 	// Sealed WebSocket relay: resolve a request Host to the app container's
@@ -717,13 +722,19 @@ func (s *Server) Start(ctx context.Context) error {
 			r.Header.Del(voucherProviderHeader)
 			r.Header.Del(voucherClaimsHeader)
 			r.Header.Del(voucherRPIDHeader)
+			// The sign-in assurance is runtime-asserted (direct.go).
+			r.Header.Del(AttestationLevelHeader)
 			// Which leg (surfaces.go). The session relay marked a request it
 			// unsealed; anything else is either RA-TLS direct (TLS ended
 			// here) or plaintext on the gateway-terminated leg, which the
 			// require-sealed predicate only let through for a declared
 			// surface and which is now served anonymous by construction.
 			if r.Header.Get(TransportHeader) == "" {
-				if isClearLeg(r) {
+				if isDirectLeg(r) && !s.clearAllowed(r) && s.surfacesOf(host).DirectPrivate() {
+					if !s.serveDirect(w, r) {
+						return
+					}
+				} else if isClearLeg(r) {
 					pw, ok := s.servePublic(w, r)
 					if !ok {
 						return

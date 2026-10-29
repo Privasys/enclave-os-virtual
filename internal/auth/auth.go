@@ -202,6 +202,18 @@ func (v *Verifier) Authenticate(tokenStr string) (*AuthResult, error) {
 // returns the parsed claims. Shared by verifyOIDCToken (which additionally
 // requires a platform tier role) and AuthenticateUser (which does not).
 func (v *Verifier) verifyClaims(tokenStr string) (map[string]interface{}, error) {
+	return v.verifyClaimsFor(tokenStr, func(claims map[string]interface{}) error {
+		if v.oidc.Audience != "" && !checkAudience(claims, v.oidc.Audience) {
+			return fmt.Errorf("auth: OIDC audience missing %q", v.oidc.Audience)
+		}
+		return nil
+	})
+}
+
+// verifyClaimsFor is verifyClaims with the audience rule supplied by the
+// caller: everything else (signature, issuer, expiry against trusted time)
+// is checked exactly the same way.
+func (v *Verifier) verifyClaimsFor(tokenStr string, audience func(map[string]interface{}) error) (map[string]interface{}, error) {
 	parts := strings.SplitN(tokenStr, ".", 3)
 	if len(parts) != 3 {
 		return nil, errors.New("auth: malformed OIDC token")
@@ -252,8 +264,8 @@ func (v *Verifier) verifyClaims(tokenStr string) (map[string]interface{}, error)
 	}
 
 	// Validate audience.
-	if v.oidc.Audience != "" && !checkAudience(claims, v.oidc.Audience) {
-		return nil, fmt.Errorf("auth: OIDC audience missing %q", v.oidc.Audience)
+	if err := audience(claims); err != nil {
+		return nil, err
 	}
 
 	// Validate expiry. exp is REQUIRED: guarding the comparison on the type
@@ -312,6 +324,40 @@ func (v *Verifier) AuthenticateCaller(tokenStr string) (sub string, wallet bool,
 		return "", false, err
 	}
 	sub, _ = claims["sub"].(string)
+	switch w := claims["wallet"].(type) {
+	case bool:
+		wallet = w
+	case string:
+		wallet = w == "true"
+	}
+	return sub, wallet, nil
+}
+
+// AuthenticateAppUser validates a bearer an end user presents to ONE app:
+// the same checks as AuthenticateUser, except that the audience must be one
+// of the app's own (audiences), never the platform audience. A token minted
+// for one app therefore cannot be replayed to another. It returns the
+// subject and whether the sign-in was the wallet (the IdP's `wallet`
+// marker, as for AuthenticateCaller).
+func (v *Verifier) AuthenticateAppUser(tokenStr string, audiences []string) (sub string, wallet bool, err error) {
+	if len(audiences) == 0 {
+		return "", false, errors.New("auth: no app audience to check the token against")
+	}
+	claims, err := v.verifyClaimsFor(tokenStr, func(claims map[string]interface{}) error {
+		for _, a := range audiences {
+			if a != "" && checkAudience(claims, a) {
+				return nil
+			}
+		}
+		return fmt.Errorf("auth: token audience is not this app (%v)", audiences)
+	})
+	if err != nil {
+		return "", false, err
+	}
+	sub, _ = claims["sub"].(string)
+	if sub == "" {
+		return "", false, errors.New("auth: token names no subject")
+	}
 	switch w := claims["wallet"].(type) {
 	case bool:
 		wallet = w

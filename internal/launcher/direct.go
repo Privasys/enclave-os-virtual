@@ -71,6 +71,18 @@ func (l *Launcher) DirectSupported() bool {
 	return l != nil && l.direct != nil && l.caddyClient != nil
 }
 
+// DirectDomainsOf returns the direct adopter names a container serves now.
+// Lock-free (a request path reads it, and a load holds l.mu for minutes).
+func (l *Launcher) DirectDomainsOf(containerName string) []string {
+	if l == nil {
+		return nil
+	}
+	if v, ok := l.directView.Load(containerName); ok {
+		return append([]string(nil), v.([]string)...)
+	}
+	return nil
+}
+
 // DirectStatus reports a container's direct domains for the control plane.
 func (l *Launcher) DirectStatus(containerName string) (directtls.Status, error) {
 	if !l.DirectSupported() {
@@ -139,6 +151,7 @@ func (l *Launcher) SetDirectDomains(containerName string, domains []string) erro
 		}
 	}
 	l.directDomains[containerName] = append([]string(nil), domains...)
+	l.directView.Store(containerName, append([]string(nil), domains...))
 	hostname := spec.Hostname
 	l.mu.Unlock()
 
@@ -199,6 +212,7 @@ func (l *Launcher) removeDirect(containerName, hostname string) {
 	domains := l.directDomains[containerName]
 	delete(l.directDomains, containerName)
 	delete(l.directBranches, containerName)
+	l.directView.Delete(containerName)
 	if len(domains) == 0 {
 		return
 	}

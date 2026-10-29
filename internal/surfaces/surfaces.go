@@ -96,11 +96,23 @@ type Surfaces struct {
 	// "same-origin" (the default: no cross-origin headers at all).
 	CORS   string `json:"cors,omitempty"`
 	Limits Limits `json:"limits,omitempty"`
+	// Direct is "private" when the app serves its private routes to clients
+	// on a direct adopter name too (TLS ended in the enclave with a publicly
+	// trusted certificate, so nobody but the enclave reads the traffic, but
+	// the client verified no attestation). Empty: a direct name gets the
+	// static and public surfaces only, like the gateway-terminated leg.
+	Direct string `json:"direct,omitempty"`
 }
+
+// DirectPrivate reports whether private routes are served on direct names.
+func (s *Surfaces) DirectPrivate() bool { return s != nil && s.Direct == DirectPrivateMode }
+
+// DirectPrivateMode is the one accepted value of Surfaces.Direct.
+const DirectPrivateMode = "private"
 
 // Empty reports whether nothing is declared.
 func (s *Surfaces) Empty() bool {
-	return s == nil || (len(s.Static) == 0 && len(s.Public) == 0)
+	return s == nil || (len(s.Static) == 0 && len(s.Public) == 0 && s.Direct == "")
 }
 
 // OpenCORS reports whether public routes answer any origin.
@@ -283,6 +295,11 @@ func (s *Surfaces) Validate() error {
 	default:
 		return fmt.Errorf("surfaces.cors: %q is not \"*\" or \"same-origin\"", s.CORS)
 	}
+	switch s.Direct {
+	case "", DirectPrivateMode:
+	default:
+		return fmt.Errorf("surfaces.direct: %q is not \"private\"", s.Direct)
+	}
 	if s.Limits.RPS < 0 || s.Limits.Burst < 0 {
 		return fmt.Errorf("surfaces.limits: negative values")
 	}
@@ -398,6 +415,9 @@ func (s *Surfaces) Summary() string {
 	}
 	for _, r := range s.Public {
 		parts = append(parts, r.Method+" "+r.Path)
+	}
+	if s.DirectPrivate() {
+		parts = append(parts, "private on direct names")
 	}
 	return strings.Join(parts, ", ")
 }

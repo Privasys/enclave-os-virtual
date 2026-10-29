@@ -289,3 +289,48 @@ func TestDirectLegFollowsTheClearRules(t *testing.T) {
 		t.Fatal("no marker is the RA-TLS leg")
 	}
 }
+
+// TestDirectPrivateOptIn pins phase 3: a direct private request is prepared
+// by serveDirect (identity headers runtime-asserted, transport "direct"), a
+// bearer that cannot be checked is refused, and the fee gate never takes the
+// direct leg's subject as a payer.
+func TestDirectPrivateOptIn(t *testing.T) {
+	s := surfServer(t, strings.Replace(webManifest, `"cors":"*"`, `"cors":"*","direct":"private"`, 1))
+	if !s.surfacesOf(surfHost).DirectPrivate() {
+		t.Fatal("the manifest opted in")
+	}
+	if surfServer(t, webManifest).surfacesOf(surfHost).DirectPrivate() {
+		t.Fatal("no opt-in by default")
+	}
+
+	// Anonymous: spoofed identity is stripped, the leg is stamped.
+	r := clearReq("GET", "/api/v1/me", map[string]string{
+		"X-Privasys-Sub": "spoofed", AttestationLevelHeader: "verified",
+	})
+	r.Header.Set(edgeHeader, "direct")
+	rec := httptest.NewRecorder()
+	if !s.serveDirect(rec, r) {
+		t.Fatalf("anonymous direct request refused: %d", rec.Code)
+	}
+	if r.Header.Get("X-Privasys-Sub") != "" || r.Header.Get(AttestationLevelHeader) != "" {
+		t.Fatal("client-asserted identity reached the app")
+	}
+	if r.Header.Get(TransportHeader) != TransportDirect {
+		t.Fatal("the leg must be stamped direct")
+	}
+
+	// A bearer this runtime cannot check is refused, never passed through.
+	r = clearReq("GET", "/api/v1/me", map[string]string{"Authorization": "Bearer x.y.z"})
+	r.Header.Set(edgeHeader, "direct")
+	rec = httptest.NewRecorder()
+	if s.serveDirect(rec, r) || rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unverifiable bearer: ok, code %d; want refused with 401", rec.Code)
+	}
+
+	// The fee gate: on the direct leg a subject is never a payer.
+	r = clearReq("GET", "/api/v1/me", map[string]string{"X-Privasys-Sub": "pairwise-1"})
+	r.Header.Set(TransportHeader, TransportDirect)
+	if got := s.callerIdentity(r); got != "" {
+		t.Fatalf("payer on the direct leg = %q, want none (no wallet, no account: 402)", got)
+	}
+}

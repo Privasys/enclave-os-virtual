@@ -537,6 +537,7 @@ type Launcher struct {
 	direct         *directtls.Service
 	directBranches map[string][]byte
 	directDomains  map[string][]string
+	directView     sync.Map // container -> []string, readable without l.mu
 	containerdHash         []byte
 	combinedImgHash        [32]byte
 

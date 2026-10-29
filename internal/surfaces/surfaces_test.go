@@ -170,3 +170,16 @@ func TestSummary(t *testing.T) {
 		t.Error(nilS.Summary())
 	}
 }
+
+func TestDirectDeclaration(t *testing.T) {
+	s, err := Parse(`{"surfaces":{"direct":"private"}}`)
+	if err != nil || !s.DirectPrivate() || s.Empty() {
+		t.Fatalf("direct private alone: %+v, %v", s, err)
+	}
+	if !strings.Contains(s.Summary(), "direct") {
+		t.Fatalf("summary %q does not say it", s.Summary())
+	}
+	if _, err := Parse(`{"surfaces":{"direct":"public"}}`); err == nil {
+		t.Fatal("an unknown direct mode must be refused")
+	}
+}
