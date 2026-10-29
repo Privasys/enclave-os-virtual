@@ -261,3 +261,29 @@ func TestChangePasswordIsIdempotent(t *testing.T) {
 		t.Fatalf("no repository: %v", err)
 	}
 }
+
+func TestMoveCopiesChecksAndLocks(t *testing.T) {
+	bin, logPath := fakeKopia(t, false)
+	r := &Runner{log: zap.NewNop(), Binary: bin, StateBase: t.TempDir()}
+	to := testTarget()
+	to.Endpoint, to.Bucket, to.Region = "s3.eu-west-par.io.cloud.ovh.net", "zones", "eu-west-par"
+	if err := r.Move(context.Background(), "myapp", "pw", testTarget(), to); err != nil {
+		t.Fatalf("Move: %v", err)
+	}
+	var sync, maint bool
+	for _, c := range calls(t, logPath) {
+		if strings.HasPrefix(c, "repository sync-to s3 ") {
+			sync = strings.Contains(c, "--bucket=zones") && strings.Contains(c, "--region=eu-west-par") &&
+				strings.Contains(c, "--prefix=apps/x/") && !strings.Contains(c, "SECRET")
+		}
+		if c == "maintenance run --full" {
+			maint = sync // after the copy
+		}
+	}
+	if !sync || !maint {
+		t.Fatalf("calls = %v", calls(t, logPath))
+	}
+	if err := r.Move(context.Background(), "myapp", "pw", testTarget(), testTarget()); err == nil {
+		t.Error("a move onto itself was accepted")
+	}
+}

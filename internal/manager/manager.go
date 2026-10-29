@@ -588,6 +588,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /api/v1/volumes/{name}/backups/status", s.requireAuth(s.handleBackupStatus))
 	mux.HandleFunc("POST /api/v1/volumes/{name}/backups/list", s.requireAuth(s.handleListBackups))
 	mux.HandleFunc("PUT /api/v1/volumes/{name}/backups/policy", s.requireAuth(s.handleSetBackupPolicy))
+	mux.HandleFunc("POST /api/v1/volumes/{name}/backups/move", s.requireAuth(s.handleStartBackupMove))
 
 	// SDK setAttestationExtension: container apps call this to install
 	// (or update) a per-app X.509 extension under
@@ -1431,6 +1432,37 @@ func (s *Server) handleStartBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	job, err := s.launcher.StartBackup(req)
+	if err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "already running") {
+			code = http.StatusConflict
+		}
+		s.jsonError(w, code, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
+}
+
+// handleStartBackupMove starts copying a container's backup repository to
+// another bucket. Body: launcher.BackupMoveRequest. 202 with the job (kind
+// "move"); 409 if a job runs on the container.
+func (s *Server) handleStartBackupMove(w http.ResponseWriter, r *http.Request) {
+	result := r.Context().Value(authResultKey).(*auth.AuthResult)
+	if !result.HasManagerAccess() {
+		s.jsonError(w, http.StatusForbidden, "manager role required for backup operations")
+		return
+	}
+	var req launcher.BackupMoveRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid backup move request: "+err.Error())
+		return
+	}
+	req.Name = volumeNameParam(r)
+	if req.Name == "" {
+		s.jsonError(w, http.StatusBadRequest, "volume name is required")
+		return
+	}
+	job, err := s.launcher.StartBackupMove(req)
 	if err != nil {
 		code := http.StatusBadRequest
 		if strings.Contains(err.Error(), "already running") {

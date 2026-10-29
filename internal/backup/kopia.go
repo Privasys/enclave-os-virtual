@@ -405,6 +405,61 @@ func (r *Runner) ChangePassword(ctx context.Context, app, oldPassword, newPasswo
 	return nil
 }
 
+// Move copies the app's repository from one bucket to another (the owner
+// changing its redundancy), keeping every snapshot: kopia copies the
+// repository's blobs as they are, so the copy opens with the same password.
+// It then opens the copy, checks it lists the same snapshots, and runs a full
+// maintenance there, which applies the Object Lock retention to every object
+// still in use (the copied blobs carry none of their own). The source is left
+// as it is: the platform deletes it once it has switched to the copy.
+func (r *Runner) Move(ctx context.Context, app, password string, from, to Target) error {
+	if err := to.validate(); err != nil {
+		return err
+	}
+	if from.Bucket == to.Bucket && from.Prefix == to.Prefix && from.Endpoint == to.Endpoint {
+		return errors.New("backup: move: source and destination are the same")
+	}
+	src, err := r.open(ctx, app, password, from, false)
+	if err != nil {
+		return err
+	}
+	defer src.close()
+	want, err := src.snapshots(ctx)
+	if err != nil {
+		return err
+	}
+	sync := []string{"repository", "sync-to", "s3", "--bucket=" + to.Bucket, "--endpoint=" + to.Endpoint,
+		"--prefix=" + to.Prefix, "--parallel=8", "--no-delete"}
+	if to.Region != "" {
+		sync = append(sync, "--region="+to.Region)
+	}
+	if to.AccessKeyID != from.AccessKeyID || to.SecretAccessKey != from.SecretAccessKey {
+		sync = append(sync, "--access-key="+to.AccessKeyID, "--secret-access-key="+to.SecretAccessKey)
+	}
+	if _, err := src.run(ctx, sync...); err != nil {
+		return fmt.Errorf("backup: move: copy: %w", err)
+	}
+
+	dst, err := r.open(ctx, app, password, to, false)
+	if err != nil {
+		return fmt.Errorf("backup: move: open the copy: %w", err)
+	}
+	defer dst.close()
+	got, err := dst.snapshots(ctx)
+	if err != nil {
+		return fmt.Errorf("backup: move: read the copy: %w", err)
+	}
+	if len(got) != len(want) {
+		return fmt.Errorf("backup: move: the copy lists %d snapshots, the source %d", len(got), len(want))
+	}
+	if _, err := dst.run(ctx, "maintenance", "run", "--full"); err != nil {
+		return fmt.Errorf("backup: move: lock the copy: %w", err)
+	}
+	r.log.Info("backup repository moved", zap.String("app", app),
+		zap.String("from", from.Bucket), zap.String("to", to.Bucket), zap.Int("snapshots", len(got)))
+	return nil
+}
+
 // Restore writes snapshot snapshotID (or the most recent one, for "latest") of
 // the app's repository into dest, which must be the app's freshly created,
 // empty volume. Owners, permissions and timestamps are restored as recorded.

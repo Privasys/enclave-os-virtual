@@ -201,8 +201,10 @@ func (l *Launcher) RunBackupScheduler(ctx context.Context) error {
 
 // BackupJob is the state of a container's latest backup job.
 type BackupJob struct {
-	ID         string           `json:"id"`
-	Container  string           `json:"container"`
+	ID        string `json:"id"`
+	Container string `json:"container"`
+	// Kind is "" for a backup and "move" for a repository move.
+	Kind       string           `json:"kind,omitempty"`
 	State      string           `json:"state"` // running | succeeded | failed
 	StartedAt  time.Time        `json:"started_at"`
 	FinishedAt *time.Time       `json:"finished_at,omitempty"`
@@ -394,6 +396,79 @@ func (l *Launcher) ListBackups(ctx context.Context, req BackupRequest) ([]backup
 		return nil, err
 	}
 	return l.backupRunner.List(ctx, req.Name, password, req.Target)
+}
+
+// BackupMoveRequest asks for the container's backup repository to be copied to
+// another bucket (the owner changing its redundancy). Like BackupRequest, the
+// vault addressing is untrusted plumbing and the targets' credentials secret.
+type BackupMoveRequest struct {
+	Name                   string        `json:"name"`
+	AppId                  string        `json:"app_id,omitempty"`
+	KeyHandle              string        `json:"key_handle"`
+	VaultEndpoints         []string      `json:"vault_endpoints,omitempty"`
+	VaultMrenclave         string        `json:"vault_mrenclave,omitempty"`
+	VaultAttestationServer string        `json:"vault_attestation_server,omitempty"`
+	From                   backup.Target `json:"from"`
+	To                     backup.Target `json:"to"`
+}
+
+// StartBackupMove starts copying a container's repository to another bucket
+// and returns the job (kind "move"). It shares the container's job slot, so a
+// backup and a move never run at once. On success the container's schedule
+// writes to the copy from then on; the platform deletes the source once it has
+// switched over too.
+func (l *Launcher) StartBackupMove(req BackupMoveRequest) (*BackupJob, error) {
+	breq := BackupRequest{Name: req.Name, AppId: req.AppId, KeyHandle: req.KeyHandle,
+		VaultEndpoints: req.VaultEndpoints, VaultMrenclave: req.VaultMrenclave,
+		VaultAttestationServer: req.VaultAttestationServer, Target: req.From}
+	bc, err := l.backupContextFor(breq)
+	if err != nil {
+		return nil, err
+	}
+	id := make([]byte, 8)
+	_, _ = rand.Read(id)
+	job := &BackupJob{ID: hex.EncodeToString(id), Container: req.Name, Kind: "move", State: "running", StartedAt: time.Now().UTC()}
+
+	l.backupMu.Lock()
+	if prev := l.backupJobs[req.Name]; prev != nil && prev.State == "running" {
+		l.backupMu.Unlock()
+		return nil, fmt.Errorf("launcher: backup move: a job on %q is already running (job %s)", req.Name, prev.ID)
+	}
+	l.backupJobs[req.Name] = job
+	started := job.copy()
+	l.backupMu.Unlock()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), backupTimeout)
+		defer cancel()
+		err := func() error {
+			l.backupRun.Lock()
+			defer l.backupRun.Unlock()
+			_, password, err := l.backupKeys(ctx, breq, bc)
+			if err != nil {
+				return err
+			}
+			return l.backupRunner.Move(ctx, req.Name, password, req.From, req.To)
+		}()
+
+		l.backupMu.Lock()
+		now := time.Now().UTC()
+		job.FinishedAt = &now
+		if err != nil {
+			job.State, job.Error = "failed", err.Error()
+			l.log.Error("backup move failed", zap.String("container", req.Name), zap.String("job", job.ID), zap.Error(err))
+		} else {
+			job.State = "succeeded"
+			if s := l.backupSchedules[req.Name]; s != nil {
+				s.policy.Target, s.req.Target = req.To, req.To
+			}
+		}
+		report := BackupReport{AppID: req.AppId, Container: req.Name, Job: job.copy(), StoredBytes: -1}
+		reporter := l.backupReporter
+		l.backupMu.Unlock()
+		l.sendBackupReport(reporter, report)
+	}()
+	return started, nil
 }
 
 // BackupStatus returns the container's latest backup job, if any.
