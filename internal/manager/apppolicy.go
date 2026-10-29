@@ -63,61 +63,93 @@ func (s *Server) handleSetAppPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	applied := make([]string, 0, 3)
+	// Parse everything first, so a malformed field is refused before any of
+	// it is applied.
+	var deps *ratls.DependencySet
 	if len(doc.Dependencies) > 0 {
-		var set ratls.DependencySet
-		if err := json.Unmarshal(doc.Dependencies, &set); err != nil {
+		deps = &ratls.DependencySet{}
+		if err := json.Unmarshal(doc.Dependencies, deps); err != nil {
 			s.jsonError(w, http.StatusBadRequest, "invalid dependency set: "+err.Error())
 			return
 		}
-		if _, err := s.launcher.SetDependencies(name, &set); err != nil {
-			s.jsonError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		applied = append(applied, "dependencies")
+	}
+	var callers *struct {
+		Entries   []ratls.DependencyEntry `json:"entries"`
+		Platforms []string                `json:"platforms"`
 	}
 	if len(doc.AllowedCallers) > 0 {
-		var callers struct {
+		callers = &struct {
 			Entries   []ratls.DependencyEntry `json:"entries"`
 			Platforms []string                `json:"platforms"`
-		}
-		if err := json.Unmarshal(doc.AllowedCallers, &callers); err != nil {
+		}{}
+		if err := json.Unmarshal(doc.AllowedCallers, callers); err != nil {
 			s.jsonError(w, http.StatusBadRequest, "invalid allowed callers: "+err.Error())
 			return
 		}
-		set := &ratls.DependencySet{Entries: callers.Entries}
-		if err := s.launcher.SetIngressAllowedCallers(name, set, callers.Platforms); err != nil {
-			s.jsonError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
+	}
+	var domains []string
+	if doc.Domains != nil {
+		domains = s.policy.DomainsFor(appID)
+	}
+
+	applied := make([]string, 0, 4)
+	if deps != nil {
+		applied = append(applied, "dependencies")
+	}
+	if callers != nil {
 		applied = append(applied, "allowed_callers")
 	}
 	if len(doc.Owners) > 0 {
-		s.launcher.SetConfigOwners(name, doc.Owners)
 		applied = append(applied, "owners")
 	}
-	// Direct domains: the store keeps the approved list (a document without
-	// the field keeps it), so apply what it now holds. In the background: it
-	// needs the launcher lock, which a container load holds through image
-	// pulls and volume work, and the approval is already accepted and pinned,
-	// so making the caller wait would only time it out. The direct status
-	// endpoint reports the outcome.
 	if doc.Domains != nil {
-		domains := s.policy.DomainsFor(appID)
-		go func() {
-			if err := s.launcher.SetDirectDomains(name, domains); err != nil {
-				s.log.Warn("app policy accepted but its direct domains were not applied",
-					zap.String("container", name), zap.Strings("domains", domains), zap.Error(err))
-			}
-		}()
 		applied = append(applied, "domains")
 	}
 
-	// Advertise which document this container enforces (OID 7.2), so a
-	// verifier can tell a current policy from an older one a host restored.
-	if err := s.launcher.SetAppPolicyStamp(name, doc.Seq, sha256.Sum256(rawDoc)); err != nil {
-		s.log.Warn("app policy stamp not advertised", zap.String("container", name), zap.Error(err))
-	}
+	// Apply in the background. Every step takes the launcher lock, which a
+	// container load holds through image pulls and volume work, and the
+	// document is already accepted and pinned: making the caller wait only
+	// timed the control plane out (and told the owner it was not delivered)
+	// while the policy went on to apply. The certificate stamp (OID 7.3) is
+	// last, so a verifier never sees a document advertised before it is
+	// enforced.
+	seq, digest := doc.Seq, sha256.Sum256(rawDoc)
+	owners := doc.Owners
+	hasDomains := doc.Domains != nil
+	go func() {
+		fail := func(what string, err error) {
+			s.log.Error("app policy accepted but not fully applied",
+				zap.String("container", name), zap.String("step", what), zap.Error(err))
+		}
+		if deps != nil {
+			if _, err := s.launcher.SetDependencies(name, deps); err != nil {
+				fail("dependencies", err)
+				return
+			}
+		}
+		if callers != nil {
+			set := &ratls.DependencySet{Entries: callers.Entries}
+			if err := s.launcher.SetIngressAllowedCallers(name, set, callers.Platforms); err != nil {
+				fail("allowed_callers", err)
+				return
+			}
+		}
+		if len(owners) > 0 {
+			s.launcher.SetConfigOwners(name, owners)
+		}
+		if hasDomains {
+			if err := s.launcher.SetDirectDomains(name, domains); err != nil {
+				// Domains report through the direct status; keep going so the
+				// rest of the policy is advertised.
+				fail("domains", err)
+			}
+		}
+		if err := s.launcher.SetAppPolicyStamp(name, seq, digest); err != nil {
+			fail("stamp", err)
+			return
+		}
+		s.log.Info("app policy applied", zap.String("container", name), zap.Uint64("seq", seq))
+	}()
 
 	s.log.Info("app policy accepted",
 		zap.String("container", name), zap.String("app_id", appID),
