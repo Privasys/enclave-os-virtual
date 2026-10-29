@@ -206,6 +206,8 @@ Present in **per-container certificates** (container hostname via SNI).
 | `1.3.6.1.4.1.65230.3.3` | Container Image Ref | Full image reference string | variable |
 | `1.3.6.1.4.1.65230.3.4` | Container Volume Encryption | `"byok:<fingerprint>"` or `"generated"` — omitted when no volume | variable |
 | `1.3.6.1.4.1.65230.3.6` | Container App Id | Platform-assigned app identity (`apps.id`, raw UUID); pins WHICH app for MR_APP vault sealing — omitted when no app-id supplied | 16 bytes |
+| `1.3.6.1.4.1.65230.7.3` | Attested App Policy | Sequence number (8 bytes) and SHA-256 of the owner-signed policy enforced | 40 bytes |
+| `1.3.6.1.4.1.65230.7.4` | Direct Domain Keys | `<host> sha256:<spki hex>` lines, one per direct domain ([direct-domains.md](direct-domains.md)) | variable |
 
 ---
 
@@ -491,6 +493,8 @@ on every container load/unload.
 |------|---------|-------------|
 | `--caddy-listen` | `:443` | External HTTPS listen address |
 | `--extensions-dir` | `/run/manager/extensions` | OID extension files directory |
+| `--direct-storage` | `/data/caddy/caddy` | Storage root for direct-domain certificates ([direct-domains.md](direct-domains.md)) |
+| `--proxy-protocol-from` | empty | Gateway addresses whose PROXY v2 header is honoured |
 | `--machine-name` | — | Machine name — determines all RA-TLS hostnames |
 | `--hostname` | — | **Required.** Hostname suffix appended to the machine name |
 | `--ca-cert` | — | **Required.** Intermediary CA certificate for RA-TLS |

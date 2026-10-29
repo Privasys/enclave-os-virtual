@@ -136,6 +136,14 @@ All Privasys OIDs live under the arc `1.3.6.1.4.1.65230`:
 | `1.3.6.1.4.1.65230.3.3` | Container Image Ref | Full OCI image reference string |
 | `1.3.6.1.4.1.65230.3.4` | Container Volume Encryption | `"byok:<fingerprint>"` or `"generated"` — present only when encrypted volume is attached |
 | `1.3.6.1.4.1.65230.3.6` | Container App Id | Platform-assigned app identity (`apps.id`, raw 16-byte UUID); pins the app for MR_APP vault sealing — present only when an app-id is supplied |
+| `1.3.6.1.4.1.65230.7.3` | Attested App Policy | Sequence number and SHA-256 of the owner-signed app policy the container enforces |
+| `1.3.6.1.4.1.65230.7.4` | Direct Domain Keys | Each direct domain with the SHA-256 of its public certificate's key, see [docs/direct-domains.md](docs/direct-domains.md) |
+
+## Direct Domains
+
+An adopter hostname can end its TLS in the enclave, with a publicly trusted
+certificate obtained and renewed inside it, so the gateway only splices it.
+See [docs/direct-domains.md](docs/direct-domains.md).
 
 ## Workload Manifest
 
