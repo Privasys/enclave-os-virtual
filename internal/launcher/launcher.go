@@ -2342,6 +2342,13 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 		return nil
 
 	case RotatePhaseRenew:
+		// Moving the key to another constellation must not leave the owner's
+		// signed policy pointing at the old one: the next load would refuse it.
+		if len(req.NewVaultEndpoints) > 0 {
+			if err := l.checkApprovedConstellation(req.AppId, newMre, newEndpoints); err != nil {
+				return fmt.Errorf("launcher: renew: %w", err)
+			}
+		}
 		oldHex, _, _, err := vaultkey.ResolveOrProvision(ctx, l.log, oldCfg, req.OldHandle, "", digest, appID)
 		if err != nil {
 			return fmt.Errorf("launcher: renew: reconstruct current key: %w", err)
