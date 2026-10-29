@@ -40,9 +40,13 @@ func TestTargetValidate(t *testing.T) {
 
 func TestRetentionArgs(t *testing.T) {
 	got := Retention{Hourly: 48, Daily: 35, Monthly: 13}.args()
-	want := []string{"--keep-hourly=48", "--keep-daily=35", "--keep-monthly=13"}
+	want := []string{"--keep-latest=0", "--keep-hourly=48", "--keep-daily=35",
+		"--keep-weekly=0", "--keep-monthly=13", "--keep-annual=0"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("args = %v, want %v", got, want)
+	}
+	if got := (Retention{}).args(); got != nil {
+		t.Fatalf("empty retention args = %v, want none", got)
 	}
 }
 
@@ -118,7 +122,7 @@ func TestBackupCreatesRepositoryOnFirstUse(t *testing.T) {
 		"repository connect s3",
 		"repository create s3",
 		"maintenance set --owner=me --full-interval=24h --extend-object-locks=true",
-		"policy set --global --compression=zstd --keep-daily=35",
+		"policy set --global --compression=zstd --keep-latest=0 --keep-hourly=0 --keep-daily=35 --keep-weekly=0 --keep-monthly=0 --keep-annual=0",
 		"snapshot create /run/backups/myapp --json --no-progress --description=manual",
 		"maintenance run",
 		"snapshot list --all --json",

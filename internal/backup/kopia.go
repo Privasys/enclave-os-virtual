@@ -83,7 +83,10 @@ func (t Target) validate() error {
 }
 
 // Retention is how many snapshots the repository keeps, per kopia's
-// keep-* buckets. Zero leaves kopia's default for that bucket.
+// keep-* buckets. A set retention is applied in full: a zero bucket keeps
+// none, never kopia's default (which would keep 24 monthly and 3 annual
+// snapshots nobody asked for). An empty retention leaves the repository's
+// policy as it is.
 type Retention struct {
 	Latest  int `json:"latest,omitempty"`
 	Hourly  int `json:"hourly,omitempty"`
@@ -94,6 +97,9 @@ type Retention struct {
 }
 
 func (r Retention) args() []string {
+	if r == (Retention{}) {
+		return nil
+	}
 	var a []string
 	for _, kv := range []struct {
 		flag string
@@ -102,9 +108,7 @@ func (r Retention) args() []string {
 		{"--keep-latest", r.Latest}, {"--keep-hourly", r.Hourly}, {"--keep-daily", r.Daily},
 		{"--keep-weekly", r.Weekly}, {"--keep-monthly", r.Monthly}, {"--keep-annual", r.Annual},
 	} {
-		if kv.n > 0 {
-			a = append(a, kv.flag+"="+strconv.Itoa(kv.n))
-		}
+		a = append(a, kv.flag+"="+strconv.Itoa(kv.n))
 	}
 	return a
 }
