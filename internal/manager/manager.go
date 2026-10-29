@@ -317,6 +317,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 	if s.policy != nil {
 		l.SetApprovedConstellations(s.policy)
 		l.SetApprovedDomains(s.policy)
+		l.SetSignedPolicy(s.policy)
 	}
 
 	s.spend = newSpendGate(s.log, cfg.IdpIssuer, cfg.MgmtBaseURL, cfg.EnclaveToken)

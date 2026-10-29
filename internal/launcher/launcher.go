@@ -547,6 +547,7 @@ type Launcher struct {
 	approvedMu             sync.Mutex
 	approvedConstellations ApprovedConstellations
 	approvedDomains        ApprovedDomains
+	signedPolicy           SignedPolicy
 
 	// direct obtains the certificates of adopter hostnames whose TLS ends
 	// here (direct.go); nil when direct domains are not configured.
@@ -1487,6 +1488,9 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	if err := container.RequireDiskPresent(req.Image); err != nil {
 		return nil, fmt.Errorf("launcher: %w", err)
 	}
+
+	// The owner's signed policy wins over the control plane's copy of it.
+	l.applySignedPolicy(&req)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()

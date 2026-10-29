@@ -17,12 +17,15 @@ package launcher
 
 import (
 	"crypto/ecdsa"
+	"encoding/json"
 	"crypto/hkdf"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 
 	"go.uber.org/zap"
+
+	"enclave-os-mini/clients/go/ratls"
 
 	"github.com/Privasys/enclave-os-virtual/internal/directtls"
 	"github.com/Privasys/enclave-os-virtual/internal/extensions"
@@ -37,6 +40,74 @@ const directBranchInfo = "privasys-direct-tls/v1"
 // approved (the policy store).
 type ApprovedDomains interface {
 	DomainsFor(appIDHex string) []string
+}
+
+// SignedPolicy reports the members of an app's accepted owner-signed policy
+// (the policy store): a load applies them over the control plane's copy.
+type SignedPolicy interface {
+	SignedFor(appIDHex string) (callers, deps json.RawMessage, owners []string)
+}
+
+// SetSignedPolicy installs the source of accepted owner-signed policies.
+func (l *Launcher) SetSignedPolicy(src SignedPolicy) {
+	if l == nil {
+		return
+	}
+	l.approvedMu.Lock()
+	defer l.approvedMu.Unlock()
+	l.signedPolicy = src
+}
+
+// applySignedPolicy overwrites a load request's allowed callers, dependency
+// set and owners with those of the app's accepted signed policy, when the
+// owner signed them. The request's values are the control plane's unsigned
+// copy, which goes stale for a pinned app (its owner changes them by
+// signing, applied live), so without this every redeploy, boot replay or
+// reconciler load would bring the old ones back.
+func (l *Launcher) applySignedPolicy(req *LoadRequest) {
+	l.approvedMu.Lock()
+	src := l.signedPolicy
+	l.approvedMu.Unlock()
+	raw := parseAppID(req.AppId)
+	if src == nil || len(raw) == 0 {
+		return
+	}
+	callers, deps, owners := src.SignedFor(hex.EncodeToString(raw))
+	if len(callers) > 0 {
+		var c struct {
+			Entries   []ratls.DependencyEntry `json:"entries"`
+			Platforms []string                `json:"platforms"`
+		}
+		if err := json.Unmarshal(callers, &c); err == nil {
+			if len(c.Entries) > 0 {
+				req.IngressAllowedCallers = &ratls.DependencySet{Entries: c.Entries}
+			} else {
+				req.IngressAllowedCallers = nil
+			}
+			req.IngressAllowedPlatforms = c.Platforms
+		} else {
+			l.log.Warn("signed allowed callers unreadable; keeping the load request's", zap.String("container", req.Name), zap.Error(err))
+		}
+	}
+	if len(deps) > 0 {
+		var set ratls.DependencySet
+		if err := json.Unmarshal(deps, &set); err == nil {
+			if len(set.Entries) > 0 {
+				req.Dependencies = &set
+			} else {
+				req.Dependencies = nil
+			}
+		} else {
+			l.log.Warn("signed dependencies unreadable; keeping the load request's", zap.String("container", req.Name), zap.Error(err))
+		}
+	}
+	if len(owners) > 0 {
+		req.Owners = owners
+	}
+	if len(callers) > 0 || len(deps) > 0 || len(owners) > 0 {
+		l.log.Info("load uses the owner-signed policy over the request's copy", zap.String("container", req.Name),
+			zap.Bool("callers", len(callers) > 0), zap.Bool("dependencies", len(deps) > 0), zap.Bool("owners", len(owners) > 0))
+	}
 }
 
 // SetApprovedDomains installs the source of owner-approved direct domains.

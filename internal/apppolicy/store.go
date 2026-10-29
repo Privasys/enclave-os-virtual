@@ -31,6 +31,15 @@ type pin struct {
 	// stored document, which is refused as not newer, so the next load must
 	// find them here.
 	Domains []string `json:"domains,omitempty"`
+	// AllowedCallers, Dependencies and Owners are the accepted document's
+	// members, kept for the same reason: a signed policy applies them live,
+	// but every later load (a deploy, the boot replay, the reconciler) carries
+	// the control plane's unsigned copy, which goes stale for a pinned app
+	// because its owner now changes them by signing. The load applies these
+	// instead. Absent in a document keeps the previous value.
+	AllowedCallers json.RawMessage `json:"allowed_callers,omitempty"`
+	Dependencies   json.RawMessage `json:"dependencies,omitempty"`
+	Owners         []string        `json:"owners,omitempty"`
 }
 
 // Store keeps each app's pin. It lives on the manager's /data volume, which is
@@ -141,7 +150,18 @@ func (s *Store) Accept(raw []byte) (*Document, []byte, error) {
 	if doc.Domains != nil {
 		domains = doc.Domains
 	}
-	s.pins[doc.AppID] = pin{Approver: next, Seq: doc.Seq, Constellation: constellation, Domains: domains}
+	callers, deps, owners := current.AllowedCallers, current.Dependencies, current.Owners
+	if len(doc.AllowedCallers) > 0 {
+		callers = append(json.RawMessage(nil), doc.AllowedCallers...)
+	}
+	if len(doc.Dependencies) > 0 {
+		deps = append(json.RawMessage(nil), doc.Dependencies...)
+	}
+	if len(doc.Owners) > 0 {
+		owners = append([]string(nil), doc.Owners...)
+	}
+	s.pins[doc.AppID] = pin{Approver: next, Seq: doc.Seq, Constellation: constellation, Domains: domains,
+		AllowedCallers: callers, Dependencies: deps, Owners: owners}
 	if err := s.saveLocked(); err != nil {
 		delete(s.pins, doc.AppID)
 		if pinned {
@@ -205,6 +225,16 @@ func (s *Store) ConstellationFor(appID string) *Constellation {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.pins[appID].Constellation
+}
+
+// SignedFor returns the allowed callers, dependency set and owners of the
+// app's accepted policy (each nil when the owner never signed it), which a
+// load applies over the control plane's unsigned copy.
+func (s *Store) SignedFor(appID string) (callers, deps json.RawMessage, owners []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.pins[appID]
+	return append(json.RawMessage(nil), p.AllowedCallers...), append(json.RawMessage(nil), p.Dependencies...), append([]string(nil), p.Owners...)
 }
 
 // DomainsFor returns the direct adopter hostnames the app's owner approved,
