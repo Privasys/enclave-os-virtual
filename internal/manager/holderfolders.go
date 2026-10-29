@@ -211,11 +211,12 @@ func (s *Server) handleResourceEvents(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		s.jsonError(w, http.StatusInternalServerError, "streaming unsupported")
-		return
-	}
+	// The metrics middleware wraps the writer (responseWriter in manager.go)
+	// and exposes Unwrap, not Flush: a type assertion on http.Flusher fails
+	// on it, so every listener was answered "streaming unsupported" (HTTP
+	// 500) and no container ever received an event. The response controller
+	// follows Unwrap down to the connection's flusher.
+	rc := http.NewResponseController(w)
 	ch, cancel := s.events.subscribe(name)
 	defer cancel()
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -223,7 +224,10 @@ func (s *Server) handleResourceEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, ": connected\n\n")
-	flusher.Flush()
+	if err := rc.Flush(); err != nil {
+		s.log.Error("resource events: streaming unsupported", zap.String("container", name), zap.Error(err))
+		return
+	}
 	keepalive := time.NewTicker(25 * time.Second)
 	defer keepalive.Stop()
 	for {
@@ -232,11 +236,15 @@ func (s *Server) handleResourceEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-keepalive.C:
 			fmt.Fprint(w, ": keepalive\n\n")
-			flusher.Flush()
+			if err := rc.Flush(); err != nil {
+				return
+			}
 		case ev := <-ch:
 			data, _ := json.Marshal(ev)
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, data)
-			flusher.Flush()
+			if err := rc.Flush(); err != nil {
+				return
+			}
 		}
 	}
 }
