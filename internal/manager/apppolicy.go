@@ -97,14 +97,19 @@ func (s *Server) handleSetAppPolicy(w http.ResponseWriter, r *http.Request) {
 		applied = append(applied, "owners")
 	}
 	// Direct domains: the store keeps the approved list (a document without
-	// the field keeps it), so apply what it now holds.
+	// the field keeps it), so apply what it now holds. In the background: it
+	// needs the launcher lock, which a container load holds through image
+	// pulls and volume work, and the approval is already accepted and pinned,
+	// so making the caller wait would only time it out. The direct status
+	// endpoint reports the outcome.
 	if doc.Domains != nil {
-		if err := s.launcher.SetDirectDomains(name, s.policy.DomainsFor(appID)); err != nil {
-			s.log.Warn("app policy accepted but its direct domains were not applied",
-				zap.String("container", name), zap.Error(err))
-			s.jsonError(w, http.StatusConflict, "policy accepted, but its domains could not be applied: "+err.Error())
-			return
-		}
+		domains := s.policy.DomainsFor(appID)
+		go func() {
+			if err := s.launcher.SetDirectDomains(name, domains); err != nil {
+				s.log.Warn("app policy accepted but its direct domains were not applied",
+					zap.String("container", name), zap.Strings("domains", domains), zap.Error(err))
+			}
+		}()
 		applied = append(applied, "domains")
 	}
 

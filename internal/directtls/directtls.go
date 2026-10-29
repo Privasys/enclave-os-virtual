@@ -209,7 +209,12 @@ func (s *Service) Apply(container, canonical string, domains []string, key *ecds
 		},
 	})
 	magic.Issuers = []certmagic.Issuer{certmagic.NewACMEIssuer(magic, certmagic.ACMEIssuer{
-		CA:                   s.cfg.CA,
+		CA: s.cfg.CA,
+		// After a failure certmagic retries against a "test" CA (Let's
+		// Encrypt staging by default) with the SAME account, which staging
+		// rejects ("KeyID header contained an invalid account URL"), so a
+		// name whose first attempt failed could never be issued. One CA.
+		TestCA:               s.cfg.CA,
 		Agreed:               true,
 		AccountKeyPEM:        keyPEM,
 		DisableHTTPChallenge: true,
