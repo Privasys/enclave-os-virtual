@@ -664,7 +664,8 @@ func (m *Manager) List() ([]Usage, error) {
 	var vols []Usage
 	for _, line := range strings.Split(string(out), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 2 {
+		if len(fields) < 2 || isSnapshotLV(fields[0]) {
+			// Backup snapshots are transient and not volumes of their own.
 			continue
 		}
 		sizeMB, _ := strconv.ParseFloat(fields[1], 64)

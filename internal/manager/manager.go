@@ -45,6 +45,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -567,6 +568,14 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /api/v1/volumes", s.requireAuth(s.handleListVolumes))
 	mux.HandleFunc("POST /api/v1/volumes/{name}/resize", s.requireAuth(s.handleResizeVolume))
 	mux.HandleFunc("DELETE /api/v1/volumes/{name}", s.requireAuth(s.handleDeleteVolume))
+
+	// Content backups of a running vault-backed container's volume: start a
+	// job (asynchronous), read the latest job, and list the repository's
+	// snapshots. The platform supplies the bucket and vault addressing per
+	// request; the keys come from the vaults to this enclave only.
+	mux.HandleFunc("POST /api/v1/volumes/{name}/backups", s.requireAuth(s.handleStartBackup))
+	mux.HandleFunc("GET /api/v1/volumes/{name}/backups/status", s.requireAuth(s.handleBackupStatus))
+	mux.HandleFunc("POST /api/v1/volumes/{name}/backups/list", s.requireAuth(s.handleListBackups))
 
 	// SDK setAttestationExtension: container apps call this to install
 	// (or update) a per-app X.509 extension under
@@ -1369,6 +1378,75 @@ func (s *Server) handleResizeVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "resized", "size": req.Size})
+}
+
+// decodeBackupRequest reads a BackupRequest body for the {name} volume.
+func (s *Server) decodeBackupRequest(w http.ResponseWriter, r *http.Request) (launcher.BackupRequest, bool) {
+	var req launcher.BackupRequest
+	result := r.Context().Value(authResultKey).(*auth.AuthResult)
+	if !result.HasManagerAccess() {
+		s.jsonError(w, http.StatusForbidden, "manager role required for backup operations")
+		return req, false
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid backup request: "+err.Error())
+		return req, false
+	}
+	req.Name = volumeNameParam(r)
+	if req.Name == "" {
+		s.jsonError(w, http.StatusBadRequest, "volume name is required")
+		return req, false
+	}
+	return req, true
+}
+
+// handleStartBackup starts a content backup job of a running container's
+// volume. Body: launcher.BackupRequest. 202 with the job; 409 if one runs.
+func (s *Server) handleStartBackup(w http.ResponseWriter, r *http.Request) {
+	req, ok := s.decodeBackupRequest(w, r)
+	if !ok {
+		return
+	}
+	job, err := s.launcher.StartBackup(req)
+	if err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "already running") {
+			code = http.StatusConflict
+		}
+		s.jsonError(w, code, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
+}
+
+// handleBackupStatus reports the container's latest backup job.
+func (s *Server) handleBackupStatus(w http.ResponseWriter, r *http.Request) {
+	result := r.Context().Value(authResultKey).(*auth.AuthResult)
+	if !result.HasManagerAccess() {
+		s.jsonError(w, http.StatusForbidden, "manager role required for backup operations")
+		return
+	}
+	job := s.launcher.BackupStatus(volumeNameParam(r))
+	if job == nil {
+		s.jsonError(w, http.StatusNotFound, "no backup job for this volume since the manager started")
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"job": job})
+}
+
+// handleListBackups lists the snapshots in the container's backup repository.
+// Body: launcher.BackupRequest (vault addressing + target; retention ignored).
+func (s *Server) handleListBackups(w http.ResponseWriter, r *http.Request) {
+	req, ok := s.decodeBackupRequest(w, r)
+	if !ok {
+		return
+	}
+	snaps, err := s.launcher.ListBackups(r.Context(), req)
+	if err != nil {
+		s.jsonError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]any{"snapshots": snaps})
 }
 
 // handleDeleteVolume removes a container volume's LV on the owner's explicit

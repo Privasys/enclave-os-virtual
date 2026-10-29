@@ -235,6 +235,11 @@ GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build \
     "$REPO_ROOT/cmd/container-logger/"
 echo "Binary built: $EXTRA_DIR/usr/bin/privasys-container-logger"
 
+# Step 1e: Fetch kopia (pinned version + checksum; see the script).
+echo ""
+echo "=== Step 1e: Fetching kopia ==="
+"$SCRIPT_DIR/fetch-kopia.sh" "$EXTRA_DIR"
+
 # Step 2: Build the Caddy binary with RA-TLS module.
 echo ""
 echo "=== Step 2: Building Caddy with RA-TLS module ==="

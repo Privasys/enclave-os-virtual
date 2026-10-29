@@ -53,6 +53,9 @@ env:
   VAULTS_CLIENT_REF: 00ff196378e7058f5f5e63fa2572b69e13285164
   XCADDY_VERSION: v0.4.7
   CADDY_VERSION: v2.11.7
+  # kopia baked into the image: bump version and release checksum together.
+  KOPIA_VERSION: 0.23.1
+  KOPIA_SHA256: 416d0f84a3dbb321a8b2d8f0997b1a0a6e915babe79ee76fa6e4d2bd1e1c5178
 
 jobs:
   build:
@@ -130,6 +133,9 @@ jobs:
             -o build/image/mkosi.extra/usr/bin/privasys-container-logger \
             ./cmd/container-logger/
           ls -lh build/image/mkosi.extra/usr/bin/privasys-container-logger
+
+      - name: Fetch kopia (volume content backup; pinned version + checksum)
+        run: build/fetch-kopia.sh build/image/mkosi.extra
 
       - name: Build Caddy with RA-TLS module
         run: |

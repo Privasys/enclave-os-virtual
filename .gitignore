@@ -26,6 +26,7 @@ build/image-gpu/*.raw
 build/image-gpu/*.tar.gz
 build/cvm-images
 build/kernel/debs/*.deb
+build/image/mkosi.extra/usr/bin/kopia
 tmp/
 
 # Temporary debug/inspect scripts

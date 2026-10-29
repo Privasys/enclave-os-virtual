@@ -49,6 +49,7 @@ import (
 
 	"github.com/Privasys/enclave-os-virtual/internal/apifees"
 	"github.com/Privasys/enclave-os-virtual/internal/apppolicy"
+	"github.com/Privasys/enclave-os-virtual/internal/backup"
 	"github.com/Privasys/enclave-os-virtual/internal/caddy"
 	"github.com/Privasys/enclave-os-virtual/internal/container"
 	"github.com/Privasys/enclave-os-virtual/internal/extensions"
@@ -486,6 +487,14 @@ type Launcher struct {
 	// Nil when the "containers" VG is not available.
 	volMgr *volume.Manager
 
+	// Content backups of vault-backed volumes (backup.go): the kopia runner,
+	// one backup at a time per host (backupRun), and the latest job per
+	// container (backupJobs, under backupMu).
+	backupRunner *backup.Runner
+	backupRun    sync.Mutex
+	backupMu     sync.Mutex
+	backupJobs   map[string]*BackupJob
+
 	// Computed attestation data - recomputed on every load/unload.
 	platformTree   *merkle.Tree
 	containerTrees map[string]*merkle.Tree
@@ -719,6 +728,8 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		sovereignBranches:  make(map[string][]byte),
 		holderBranches:     make(map[string][]byte),
 		storageFacts:       make(map[string]string),
+		backupRunner:       backup.NewRunner(log),
+		backupJobs:         make(map[string]*BackupJob),
 		readyCh:            make(chan struct{}),
 	}
 
@@ -2338,6 +2349,9 @@ func (l *Launcher) VolumeDelete(name string) error {
 	l.mu.RUnlock()
 	if loaded {
 		return fmt.Errorf("launcher: container %q is loaded — unload it before deleting its volume", name)
+	}
+	if l.backupRunning(name) {
+		return fmt.Errorf("launcher: a backup of %q is running — retry once it finishes", name)
 	}
 	l.log.Warn("deleting container volume on owner request (encrypted data is destroyed)",
 		zap.String("container", name))
