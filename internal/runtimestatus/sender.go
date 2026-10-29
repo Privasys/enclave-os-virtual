@@ -122,6 +122,40 @@ func (s *Sender) Run(ctx context.Context) error {
 	}
 }
 
+// EnclaveID is the enclave id the sender reports as.
+func (s *Sender) EnclaveID() string { return s.cfg.EnclaveID }
+
+// Post sends payload as JSON to a management-service enclave route (path,
+// e.g. "/api/v1/enclave/backups"), authenticated exactly like the status push:
+// the per-enclave credential, plus attested request signing when configured.
+func (s *Sender) Post(ctx context.Context, path string, payload any) error {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	url := strings.TrimRight(s.cfg.MgmtBaseURL, "/") + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.cfg.EnclaveToken)
+	req.Header.Set("Content-Type", "application/json")
+	if s.cfg.Signer != nil {
+		if err := s.cfg.Signer.Sign(req, body); err != nil {
+			s.log.Warn("post: attested auth unavailable, sending credential only", zap.String("path", path), zap.Error(err))
+		}
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("%s: HTTP %d", path, resp.StatusCode)
+	}
+	return nil
+}
+
 // pushOnce gathers a snapshot and POSTs it. Any error is logged.
 func (s *Sender) pushOnce(ctx context.Context) {
 	payload := s.snapshot(ctx)

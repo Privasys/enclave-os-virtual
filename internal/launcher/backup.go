@@ -159,23 +159,76 @@ func (l *Launcher) StartBackup(req BackupRequest) (*BackupJob, error) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), backupTimeout)
 		defer cancel()
-		snap, err := l.runBackup(ctx, req, bc)
+		res, err := l.runBackup(ctx, req, bc)
 
 		l.backupMu.Lock()
-		defer l.backupMu.Unlock()
 		now := time.Now().UTC()
 		job.FinishedAt = &now
 		if err != nil {
 			job.State, job.Error = "failed", err.Error()
 			l.log.Error("backup failed", zap.String("container", req.Name), zap.String("job", job.ID), zap.Error(err))
-			return
+		} else {
+			job.State, job.Snapshot = "succeeded", &res.Snapshot
 		}
-		job.State, job.Snapshot = "succeeded", snap
+		report := BackupReport{AppID: req.AppId, Container: req.Name, Job: job.copy(), StoredBytes: -1}
+		if res != nil {
+			report.Snapshots, report.StoredBytes = res.Snapshots, res.StoredBytes
+		}
+		reporter := l.backupReporter
+		l.backupMu.Unlock()
+		l.sendBackupReport(reporter, report)
 	}()
 	return started, nil
 }
 
-func (l *Launcher) runBackup(ctx context.Context, req BackupRequest, bc *backupContext) (*backup.Snapshot, error) {
+// BackupReport tells the platform how a backup job ended and what the app's
+// repository holds afterwards: its catalogue (so owners can list and restore
+// while the app is down) and its stored size (for metering). Ids, times and
+// sizes only; nothing secret.
+type BackupReport struct {
+	EnclaveID string     `json:"enclave_id"`
+	AppID     string     `json:"app_id"`
+	Container string     `json:"container"`
+	Job       *BackupJob `json:"job"`
+	// Snapshots is the repository's full list after the job; nil when it
+	// could not be read (the platform then keeps its previous catalogue).
+	Snapshots []backup.Snapshot `json:"snapshots,omitempty"`
+	// StoredBytes is the repository's size in the bucket; -1 when unknown.
+	StoredBytes int64 `json:"stored_bytes"`
+}
+
+// BackupReporter delivers a BackupReport to the platform.
+type BackupReporter func(context.Context, BackupReport) error
+
+// SetBackupReporter installs the platform delivery for backup reports (none:
+// reports are only logged).
+func (l *Launcher) SetBackupReporter(r BackupReporter) {
+	l.backupMu.Lock()
+	defer l.backupMu.Unlock()
+	l.backupReporter = r
+}
+
+// sendBackupReport delivers a report, retrying briefly: the job's outcome is
+// already recorded locally, and the next job's report carries the full
+// catalogue again, so a lost report only delays the platform's view.
+func (l *Launcher) sendBackupReport(reporter BackupReporter, report BackupReport) {
+	if reporter == nil {
+		return
+	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		err := reporter(ctx, report)
+		cancel()
+		if err == nil {
+			return
+		}
+		l.log.Warn("backup report not delivered", zap.String("container", report.Container),
+			zap.Int("attempt", attempt), zap.Error(err))
+		time.Sleep(time.Duration(attempt) * 10 * time.Second)
+	}
+}
+
+func (l *Launcher) runBackup(ctx context.Context, req BackupRequest, bc *backupContext) (*backup.Result, error) {
 	l.backupRun.Lock()
 	defer l.backupRun.Unlock()
 

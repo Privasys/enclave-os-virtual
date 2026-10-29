@@ -279,7 +279,7 @@ func tail(s string, n int) string {
 // Backup snapshots source into the app's repository (creating the repository
 // on first use), applies the retention policy, and runs any maintenance that is
 // due (garbage collection, Object Lock extension).
-func (r *Runner) Backup(ctx context.Context, app, password string, t Target, keep Retention, source, description string) (*Snapshot, error) {
+func (r *Runner) Backup(ctx context.Context, app, password string, t Target, keep Retention, source, description string) (*Result, error) {
 	s, err := r.open(ctx, app, password, t, true)
 	if err != nil {
 		return nil, err
@@ -311,7 +311,68 @@ func (r *Runner) Backup(ctx context.Context, app, password string, t Target, kee
 	if _, err := s.run(ctx, "maintenance", "run"); err != nil {
 		r.log.Warn("backup maintenance failed (retried next backup)", zap.String("app", app), zap.Error(err))
 	}
-	return &snap, nil
+	res := &Result{Snapshot: snap, StoredBytes: -1}
+	// The repository's state after maintenance, for the platform's catalogue
+	// and storage metering. Best-effort too: nil / -1 mean "not read this time".
+	if snaps, err := s.snapshots(ctx); err == nil {
+		res.Snapshots = snaps
+	} else {
+		r.log.Warn("backup: snapshot list after the backup failed", zap.String("app", app), zap.Error(err))
+	}
+	if n, err := s.storedBytes(ctx); err == nil {
+		res.StoredBytes = n
+	} else {
+		r.log.Warn("backup: stored size after the backup failed", zap.String("app", app), zap.Error(err))
+	}
+	return res, nil
+}
+
+// Result is what one backup produced, and the repository's state after it.
+type Result struct {
+	Snapshot Snapshot `json:"snapshot"`
+	// Snapshots is every snapshot the repository keeps after maintenance
+	// (retention may have dropped old ones); nil when it could not be read.
+	Snapshots []Snapshot `json:"snapshots,omitempty"`
+	// StoredBytes is the size of the repository's objects in the bucket
+	// (deduplicated, compressed, encrypted); -1 when it could not be read.
+	// Object versions kept only by an Object Lock are not included.
+	StoredBytes int64 `json:"stored_bytes"`
+}
+
+// snapshots lists the repository's snapshots.
+func (s *session) snapshots(ctx context.Context) ([]Snapshot, error) {
+	out, err := s.run(ctx, "snapshot", "list", "--all", "--json")
+	if err != nil {
+		return nil, err
+	}
+	var ms []kopiaManifest
+	if err := json.Unmarshal(out, &ms); err != nil {
+		return nil, fmt.Errorf("backup: unreadable snapshot list: %w", err)
+	}
+	snaps := make([]Snapshot, 0, len(ms))
+	for _, m := range ms {
+		snaps = append(snaps, m.snapshot())
+	}
+	return snaps, nil
+}
+
+// storedBytes reads the total size of the repository's blobs.
+func (s *session) storedBytes(ctx context.Context) (int64, error) {
+	out, err := s.run(ctx, "blob", "stats", "--raw")
+	if err != nil {
+		return 0, err
+	}
+	return parseBlobTotal(string(out))
+}
+
+// parseBlobTotal reads "Total: <bytes>" from `kopia blob stats --raw`.
+func parseBlobTotal(out string) (int64, error) {
+	for _, l := range strings.Split(out, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(l), "Total:"); ok {
+			return strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		}
+	}
+	return 0, errors.New("backup: no total in blob stats")
 }
 
 // Restore writes snapshot snapshotID (or the most recent one, for "latest") of
@@ -372,17 +433,9 @@ func (r *Runner) List(ctx context.Context, app, password string, t Target) ([]Sn
 		return nil, err
 	}
 	defer s.close()
-	out, err := s.run(ctx, "snapshot", "list", "--all", "--json")
+	snaps, err := s.snapshots(ctx)
 	if err != nil {
 		return nil, err
-	}
-	var ms []kopiaManifest
-	if err := json.Unmarshal(out, &ms); err != nil {
-		return nil, fmt.Errorf("backup: unreadable snapshot list: %w", err)
-	}
-	snaps := make([]Snapshot, 0, len(ms))
-	for _, m := range ms {
-		snaps = append(snaps, m.snapshot())
 	}
 	return snaps, nil
 }

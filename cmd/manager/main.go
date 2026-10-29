@@ -408,6 +408,12 @@ func runServe(args []string) error {
 		g.Go(func() error {
 			return sender.Run(gctx)
 		})
+		// Backup job outcomes and the app's backup catalogue go to the
+		// platform over the same authenticated channel.
+		l.SetBackupReporter(func(ctx context.Context, r launcher.BackupReport) error {
+			r.EnclaveID = sender.EnclaveID()
+			return sender.Post(ctx, "/api/v1/enclave/backups", r)
+		})
 	} else if *rsMgmtURL != "" || *rsEnclaveID != "" {
 		log.Warn("runtime-status push partially configured; need --mgmt-url and --enclave-id together")
 	}

@@ -69,6 +69,8 @@ case "$1 $2" in
 "repository create") touch ` + state + ` ;;
 "snapshot create")
   echo '{"id":"k1","startTime":"2026-10-29T10:00:00Z","endTime":"2026-10-29T10:00:05Z","rootEntry":{"summ":{"size":4096,"files":3,"numFailed":0}}}' ;;
+"blob stats")
+  echo "Count: 3"; echo "Total: 12345" ;;
 "snapshot list")
   echo '[{"id":"k1","startTime":"2026-10-29T10:00:00Z","rootEntry":{"summ":{"size":4096,"files":3}},"retentionReason":["latest-1"]}]' ;;
 esac
@@ -99,13 +101,16 @@ func calls(t *testing.T, logPath string) []string {
 func TestBackupCreatesRepositoryOnFirstUse(t *testing.T) {
 	bin, logPath := fakeKopia(t, true)
 	r := &Runner{log: zap.NewNop(), Binary: bin, StateBase: t.TempDir()}
-	snap, err := r.Backup(context.Background(), "myapp", "pw-hex", testTarget(),
+	res, err := r.Backup(context.Background(), "myapp", "pw-hex", testTarget(),
 		Retention{Daily: 35}, "/run/backups/myapp", "manual")
 	if err != nil {
 		t.Fatalf("Backup: %v", err)
 	}
-	if snap.ID != "k1" || snap.SizeBytes != 4096 || snap.Files != 3 {
+	if snap := res.Snapshot; snap.ID != "k1" || snap.SizeBytes != 4096 || snap.Files != 3 {
 		t.Fatalf("snapshot = %+v", snap)
+	}
+	if len(res.Snapshots) != 1 || res.StoredBytes != 12345 {
+		t.Fatalf("repository state = %d snapshots, %d bytes", len(res.Snapshots), res.StoredBytes)
 	}
 
 	got := calls(t, logPath)
@@ -116,6 +121,8 @@ func TestBackupCreatesRepositoryOnFirstUse(t *testing.T) {
 		"policy set --global --compression=zstd --keep-daily=35",
 		"snapshot create /run/backups/myapp --json --no-progress --description=manual",
 		"maintenance run",
+		"snapshot list --all --json",
+		"blob stats --raw",
 		"repository disconnect",
 	}
 	if len(got) != len(wantPrefixes) {

@@ -509,10 +509,11 @@ type Launcher struct {
 	// Content backups of vault-backed volumes (backup.go): the kopia runner,
 	// one backup at a time per host (backupRun), and the latest job per
 	// container (backupJobs, under backupMu).
-	backupRunner *backup.Runner
-	backupRun    sync.Mutex
-	backupMu     sync.Mutex
-	backupJobs   map[string]*BackupJob
+	backupRunner   *backup.Runner
+	backupRun      sync.Mutex
+	backupMu       sync.Mutex
+	backupJobs     map[string]*BackupJob
+	backupReporter BackupReporter // under backupMu
 
 	// Computed attestation data - recomputed on every load/unload.
 	platformTree   *merkle.Tree
