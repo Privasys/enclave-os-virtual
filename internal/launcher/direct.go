@@ -94,7 +94,9 @@ func (l *Launcher) DirectStatus(containerName string) (directtls.Status, error) 
 	if !ok {
 		return directtls.Status{}, fmt.Errorf("container %q not loaded", containerName)
 	}
-	return l.direct.Status(containerName), nil
+	st := l.direct.Status(containerName)
+	st.ProxyProtocol = l.ProxyProtocolStatus()
+	return st, nil
 }
 
 // applyApprovedDomains applies the domains the policy store holds for a

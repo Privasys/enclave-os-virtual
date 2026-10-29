@@ -31,8 +31,8 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"net/http"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -113,6 +113,17 @@ type Status struct {
 	CTCheckedAt         string               `json:"ct_checked_at,omitempty"`
 	CTError             string               `json:"ct_error,omitempty"`
 	ForeignCertificates []ForeignCertificate `json:"foreign_certificates"`
+	// ProxyProtocol is filled by the launcher: whether this host reads a
+	// PROXY protocol v2 header on direct splices, and from which addresses.
+	ProxyProtocol *ProxyProtocolStatus `json:"proxy_protocol,omitempty"`
+}
+
+// ProxyProtocolStatus tells the control plane whether a gateway may send a
+// PROXY header to this host: only when Active, and only from From.
+type ProxyProtocolStatus struct {
+	Supported bool     `json:"supported"`
+	Active    bool     `json:"active"`
+	From      []string `json:"from"`
 }
 
 // DomainStatus describes one direct name.
@@ -158,10 +169,10 @@ func New(cfg Config, log *zap.Logger) *Service {
 		cfg.CA = LetsEncrypt
 	}
 	s := &Service{
-		cfg:     cfg,
-		log:     log.Named("directtls"),
-		storage: &certmagic.FileStorage{Path: cfg.StorageRoot},
-		apps:    map[string]*app{},
+		cfg:      cfg,
+		log:      log.Named("directtls"),
+		storage:  &certmagic.FileStorage{Path: cfg.StorageRoot},
+		apps:     map[string]*app{},
 		obtained: &obtainedKeys{path: filepath.Join(cfg.StorageRoot, MarkerDir, obtainedFile)},
 		ctClient: &http.Client{Timeout: 30 * time.Second},
 		ctOurs:   map[int64]bool{},

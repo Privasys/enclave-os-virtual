@@ -200,3 +200,31 @@ func TestBuildConfigProxyProtocol(t *testing.T) {
 		t.Fatal("anyone else's header must be ignored, and headerless connections pass")
 	}
 }
+
+// The pushed list is exactly what Caddy trusts for a PROXY header, a
+// connection without a header is still accepted (IGNORE fallback, and the
+// allowed sources may omit it), and an empty list removes the wrapper.
+func TestSetProxyProtocolFromDrivesTheWrapper(t *testing.T) {
+	c := &Client{cfg: Config{ListenAddr: ":443"}, log: zap.NewNop(), routes: map[string]route{}}
+	c.routes["a.example"] = route{Hostname: "a.example", Upstream: "localhost:8000"}
+	// No admin endpoint in the test: set the config the way the setter does.
+	c.cfg.ProxyProtocolFrom = proxyProtocolCIDRs([]string{"203.0.113.10", "198.51.100.0/24", "nonsense"})
+	if got := c.ProxyProtocolFrom(); len(got) != 2 || got[0] != "203.0.113.10/32" || got[1] != "198.51.100.0/24" {
+		t.Fatalf("trusted = %v", got)
+	}
+	ws, ok := srv0Of(t, c)["listener_wrappers"].([]map[string]any)
+	if !ok || len(ws) != 2 || ws[0]["wrapper"] != "proxy_protocol" || ws[1]["wrapper"] != "tls" {
+		t.Fatalf("listener wrappers = %v", srv0Of(t, c)["listener_wrappers"])
+	}
+	allow := ws[0]["allow"].([]string)
+	if len(allow) != 2 || allow[0] != "203.0.113.10/32" {
+		t.Fatalf("allow = %v, want exactly the pushed list", allow)
+	}
+	if ws[0]["fallback_policy"] != "IGNORE" {
+		t.Fatalf("fallback = %v: anyone else, and a connection without a header, must still be served", ws[0]["fallback_policy"])
+	}
+	c.cfg.ProxyProtocolFrom = proxyProtocolCIDRs(nil)
+	if _, ok := srv0Of(t, c)["listener_wrappers"]; ok {
+		t.Fatal("an empty list must remove the wrapper")
+	}
+}

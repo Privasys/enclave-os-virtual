@@ -95,6 +95,9 @@ type Config struct {
 	// ProxyProtocolFrom are the platform gateways' addresses, from which a
 	// PROXY protocol v2 header (the client of a direct splice) is accepted.
 	ProxyProtocolFrom []string
+	// ProxyProtocolStatePath keeps the list the control plane pushed (on
+	// /data), which replaces ProxyProtocolFrom once present.
+	ProxyProtocolStatePath string
 
 	// MachineName is the instance machine name (e.g. "prod1").  Together
 	// with Hostname it determines container RA-TLS hostnames:
@@ -549,12 +552,12 @@ type Launcher struct {
 	// here (direct.go); nil when direct domains are not configured.
 	// directBranches holds each container's direct-TLS branch of its volume
 	// key, directDomains the names it serves now.
-	direct         *directtls.Service
-	directBranches map[string][]byte
-	directDomains  map[string][]string
-	directView     sync.Map // container -> []string, readable without l.mu
-	containerdHash         []byte
-	combinedImgHash        [32]byte
+	direct          *directtls.Service
+	directBranches  map[string][]byte
+	directDomains   map[string][]string
+	directView      sync.Map // container -> []string, readable without l.mu
+	containerdHash  []byte
+	combinedImgHash [32]byte
 
 	// attestationServersHash is the SHA-256 of the canonical attestation
 	// server URL list (sorted, newline-joined).  Nil-like (zero) when no
@@ -819,6 +822,9 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 			ExtensionsDir: cfg.ExtensionsDir,
 
 			ProxyProtocolFrom: cfg.ProxyProtocolFrom,
+		}
+		if from, ok := loadProxyProtocolFrom(cfg.ProxyProtocolStatePath); ok {
+			caddyCfg.ProxyProtocolFrom = from
 		}
 		if cfg.DirectStorage != "" {
 			l.direct = directtls.New(directtls.Config{

@@ -185,6 +185,25 @@ func (c *Client) RemoveRoute(hostname string) error {
 	return c.reload(false)
 }
 
+// SetProxyProtocolFrom replaces the addresses whose PROXY protocol v2 header
+// is honoured and reloads Caddy. It returns the normalised list in effect;
+// an empty list removes the wrapper.
+func (c *Client) SetProxyProtocolFrom(from []string) ([]string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	norm := proxyProtocolCIDRs(from)
+	c.cfg.ProxyProtocolFrom = norm
+	c.log.Info("setting proxy protocol sources", zap.Strings("from", norm))
+	return norm, c.reload(false)
+}
+
+// ProxyProtocolFrom returns the addresses currently trusted for the header.
+func (c *Client) ProxyProtocolFrom() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), proxyProtocolCIDRs(c.cfg.ProxyProtocolFrom)...)
+}
+
 // SetAliases sets the direct adopter hostnames served by the route of
 // hostname. Nil removes them.
 func (c *Client) SetAliases(hostname string, aliases []string) error {

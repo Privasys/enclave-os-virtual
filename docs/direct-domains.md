@@ -113,13 +113,20 @@ answers 402 unless a spend token names one.
 
 ## Client addresses
 
-A spliced connection reaches the enclave from the gateway's address. With
-`--proxy-protocol-from` set to the gateways' addresses, Caddy reads a PROXY
-protocol v2 header on connections from them only, so per-client rate limits
-see the real client on direct names. A header from anyone else is ignored,
-and a connection without one is served unchanged. The gateway sends the
-header on direct splices once it is told to (and never over an egress
-tunnel).
+A spliced connection reaches the enclave from the gateway's address. The
+control plane pushes the gateways' addresses to the host with
+`PUT /api/v1/edge/proxy-protocol {"from": ["ip or cidr", ...]}` (manager
+role); the list is kept on `/data` and survives restarts and runtime rolls.
+Caddy then reads a PROXY protocol v2 header on connections from those
+addresses only, so per-client rate limits see the real client on direct
+names. A header from anyone else is ignored, and a connection without one is
+served unchanged. An empty list turns it off.
+
+The gateway sends the header per route, and the control plane marks a direct
+route for it only after this host's status reports the list active and
+covering every gateway. A host that does not expect a header therefore never
+receives one, and nothing has to be enabled in a particular order. Never over
+an egress tunnel.
 
 ## Manager flags and status
 
@@ -127,7 +134,7 @@ tunnel).
 |---|---|---|
 | `--direct-storage` | `/data/caddy/caddy` | Storage root shared with Caddy (Caddy's own default, on `/data`). Empty disables direct domains. |
 | `--direct-ca` | Let's Encrypt | ACME directory URL |
-| `--proxy-protocol-from` | empty | Gateway addresses (CIDR or IP), env `PROXY_PROTOCOL_FROM` |
+| `--proxy-protocol-from` | empty | Bootstrap only: gateway addresses (CIDR or IP), env `PROXY_PROTOCOL_FROM`. A list pushed by the control plane replaces it. |
 
 `GET /api/v1/containers/{name}/direct` (manager role) returns:
 
@@ -141,6 +148,7 @@ tunnel).
   ],
   "ct_checked_at": "2026-10-29T18:00:00Z",
   "ct_error": "",
-  "foreign_certificates": []
+  "foreign_certificates": [],
+  "proxy_protocol": {"supported": true, "active": true, "from": ["203.0.113.10/32"]}
 }
 ```

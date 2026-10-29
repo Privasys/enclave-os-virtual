@@ -138,7 +138,7 @@ func runServe(args []string) error {
 	directStorage := fs.String("direct-storage", "/data/caddy/caddy",
 		"Storage root shared with Caddy for direct-domain certificates (on the encrypted /data volume); empty disables direct domains")
 	proxyProtocolFrom := fs.String("proxy-protocol-from", "",
-		"Comma-separated addresses (CIDR or IP) of the platform gateways, whose PROXY protocol v2 header (the client of a direct splice) is honoured; empty disables it")
+		"Bootstrap only: comma-separated addresses (CIDR or IP) of the platform gateways, whose PROXY protocol v2 header (the client of a direct splice) is honoured. The control plane normally pushes this list (PUT /api/v1/edge/proxy-protocol), which then replaces the flag")
 	directCA := fs.String("direct-ca", "",
 		"ACME directory for direct-domain certificates (empty: Let's Encrypt)")
 	machineName := fs.String("machine-name", "",
@@ -251,21 +251,23 @@ func runServe(args []string) error {
 
 	// Configure launcher.
 	launcherCfg := launcher.Config{
-		ContainerdSocket:   *containerdSocket,
-		CaddyAdminAddr:     "localhost:2019",
-		CaddyListenAddr:    *caddyListen,
-		ExtensionsDir:      *extensionsDir,
-		DirectStorage:      *directStorage,
-		DirectCA:           *directCA,
-		ProxyProtocolFrom:  splitList(*proxyProtocolFrom),
-		MachineName:        *machineName,
-		Hostname:           *hostname,
-		PlatformHostname:   platformHostname,
-		ManagementPort:     "9443",
-		CACertPath:         *caCert,
-		CAKeyPath:          *caKeyPath,
-		AttestationServers: []string(attestationServers),
-		DEKOriginFile:      *dekOriginFile,
+		ContainerdSocket:  *containerdSocket,
+		CaddyAdminAddr:    "localhost:2019",
+		CaddyListenAddr:   *caddyListen,
+		ExtensionsDir:     *extensionsDir,
+		DirectStorage:     *directStorage,
+		DirectCA:          *directCA,
+		ProxyProtocolFrom: splitList(*proxyProtocolFrom),
+		// The list the control plane pushes replaces the flag once present.
+		ProxyProtocolStatePath: "/data/manager-proxy-protocol.json",
+		MachineName:            *machineName,
+		Hostname:               *hostname,
+		PlatformHostname:       platformHostname,
+		ManagementPort:         "9443",
+		CACertPath:             *caCert,
+		CAKeyPath:              *caKeyPath,
+		AttestationServers:     []string(attestationServers),
+		DEKOriginFile:          *dekOriginFile,
 		// Wire tool-spec puller env injection. The launcher only
 		// synthesises TOOL_SPEC_* env vars when ALL three are set —
 		// pre-bootstrap (no enclave_id / token) leaves containers

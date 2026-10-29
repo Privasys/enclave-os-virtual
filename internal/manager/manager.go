@@ -562,6 +562,10 @@ func (s *Server) Start(ctx context.Context) error {
 	// lets a gateway splice an adopter name to this enclave.
 	mux.HandleFunc("GET /api/v1/containers/{name}/direct",
 		s.requireAuth(s.handleDirectStatus))
+	// Which gateway addresses may send a PROXY protocol v2 header on direct
+	// splices (direct.go). Host-wide, pushed by the control plane.
+	mux.HandleFunc("PUT /api/v1/edge/proxy-protocol",
+		s.requireAuth(s.handleSetProxyProtocol))
 
 	// The read side for the app: a container fetches the dependency set the
 	// runtime declared for it, to source its egress pins from. Container

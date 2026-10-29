@@ -97,3 +97,23 @@ func (s *Server) appAudiences(host string) []string {
 	}
 	return append(out, s.launcher.DirectDomainsOf(name)...)
 }
+
+// handleSetProxyProtocol handles PUT /api/v1/edge/proxy-protocol
+// {"from": ["ip or cidr", ...]}: the platform gateways whose PROXY protocol v2
+// header this host honours on direct splices. An empty list turns it off.
+// Connections without a header keep working from anywhere either way.
+func (s *Server) handleSetProxyProtocol(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		From []string `json:"from"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
+		s.jsonError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if _, err := s.launcher.SetProxyProtocolFrom(body.From); err != nil {
+		s.jsonError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.launcher.ProxyProtocolStatus())
+}
