@@ -2184,6 +2184,11 @@ const (
 	// RotatePhaseRetire kills the slot holding the old DEK, after the pointer
 	// has been advanced to the new handle.
 	RotatePhaseRetire RotatePhase = "retire"
+	// RotatePhaseRenew re-creates the CURRENT DEK under the new handle (same
+	// value, fresh vault TTL), on the new constellation when one is given. The
+	// LUKS slot, the backup repository and the owner's copy of a BYOK key all
+	// stay valid; there is nothing to retire (the old handle expires).
+	RotatePhaseRenew RotatePhase = "renew"
 )
 
 // RotateRequest drives one phase of an online volume-key rotation. The vault
@@ -2249,8 +2254,8 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 	if req.OldHandle == "" {
 		return fmt.Errorf("launcher: rotate: old_handle is required")
 	}
-	if req.Phase == RotatePhaseAdd && req.NewHandle == "" {
-		return fmt.Errorf("launcher: rotate: new_handle is required for the add phase")
+	if (req.Phase == RotatePhaseAdd || req.Phase == RotatePhaseRenew) && req.NewHandle == "" {
+		return fmt.Errorf("launcher: rotate: new_handle is required for the %s phase", req.Phase)
 	}
 
 	l.mu.Lock()
@@ -2334,6 +2339,35 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 			return fmt.Errorf("launcher: rotate retire: %w", err)
 		}
 		l.log.Info("volume key rotation: old slot retired", zap.String("name", req.Name), zap.String("old_handle", req.OldHandle))
+		return nil
+
+	case RotatePhaseRenew:
+		oldHex, _, _, err := vaultkey.ResolveOrProvision(ctx, l.log, oldCfg, req.OldHandle, "", digest, appID)
+		if err != nil {
+			return fmt.Errorf("launcher: renew: reconstruct current key: %w", err)
+		}
+		oldDEK, err := hex.DecodeString(oldHex)
+		if err != nil {
+			return fmt.Errorf("launcher: renew: %w", err)
+		}
+		newCfg.Material = oldDEK
+		// A retried renew finds the new handle already created: it must hold
+		// the same value, which the comparison below checks either way.
+		newHex, newOrigin, _, err := vaultkey.ResolveOrProvision(ctx, l.log, newCfg, req.NewHandle, req.NewKeyCreationGrant, digest, appID)
+		if err != nil {
+			return fmt.Errorf("launcher: renew: create the new generation: %w", err)
+		}
+		if subtle.ConstantTimeCompare([]byte(newHex), []byte(oldHex)) != 1 {
+			return fmt.Errorf("launcher: renew: %s holds a different key than %s; not switching to it", req.NewHandle, req.OldHandle)
+		}
+		l.volumeEncryption[req.Name] = newOrigin
+		l.recomputeAttestation()
+		if spec, ok := l.specs[req.Name]; ok && l.caddyClient != nil && spec.Hostname != "" && !spec.Internal {
+			if err := l.writeContainerExtensions(req.Name, spec.Hostname, spec.Port); err != nil {
+				l.log.Warn("renew: rewrite extensions failed", zap.String("name", req.Name), zap.Error(err))
+			}
+		}
+		l.log.Info("volume key renewed under a new generation", zap.String("name", req.Name), zap.String("new_handle", req.NewHandle))
 		return nil
 
 	default:

@@ -1353,8 +1353,9 @@ func (s *Server) handleFreezeContainer(w http.ResponseWriter, r *http.Request) {
 // management-service drives one phase of an online vault-key (KEK) rotation:
 // "add" installs the new keyslot (both old and new vault DEKs then open the
 // volume), "retire" kills the old keyslot once the platform has advanced the
-// app's key handle to the new generation. Manager-role only. See the
-// key-rotation design.
+// app's key handle to the new generation, and "renew" re-creates the current
+// key under the new generation (same value, fresh vault TTL). Manager-role
+// only. See the key-rotation design.
 // handleListVolumes reports every container LV with usage where mounted.
 func (s *Server) handleListVolumes(w http.ResponseWriter, r *http.Request) {
 	result := r.Context().Value(authResultKey).(*auth.AuthResult)
@@ -1548,10 +1549,11 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	// After add, both keys open the volume, so the replay can safely move to the
-	// new one now. If it cannot be recorded, fail the phase: the caller then
-	// never retires the old slot, and the replay's old handle still opens it.
-	if req.Phase == launcher.RotatePhaseAdd {
+	// After add (both keys open the volume) or renew (the new handle holds the
+	// same key), the replay can safely move to the new handle. If it cannot be
+	// recorded, fail the phase: the caller then never retires the old slot (or
+	// advances its pointer), and the replay's old handle still opens it.
+	if req.Phase == launcher.RotatePhaseAdd || req.Phase == launcher.RotatePhaseRenew {
 		moved, err := s.registry.RebindKey(name, req)
 		if err != nil {
 			s.log.Error("volume key rotation: replay registry not updated",

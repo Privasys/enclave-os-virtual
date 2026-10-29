@@ -88,6 +88,12 @@ type Config struct {
 	// key with a resource should reserve that resource here, so a failure
 	// leaves NO key and the retry starts clean.
 	BeforeProvision func() error
+	// Material, when set, is the DEK a create splits instead of generating a
+	// fresh one: renewing a key under its next generation keeps its value (the
+	// vaults' TTL is fixed at creation, so renewal is the only way to outlive
+	// it). Must be dekSize bytes. Ignored when the handle already exists: the
+	// caller compares what comes back.
+	Material []byte
 }
 
 func (c Config) threshold() int {
@@ -335,7 +341,12 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 
 	// ---- Phase 2: first boot — generate + create -----------------------
 	dek := make([]byte, dekSize)
-	if _, err := rand.Read(dek); err != nil {
+	if cfg.Material != nil {
+		if len(cfg.Material) != dekSize {
+			return "", "", false, fmt.Errorf("vaultkey: material has %d bytes, want %d", len(cfg.Material), dekSize)
+		}
+		copy(dek, cfg.Material)
+	} else if _, err := rand.Read(dek); err != nil {
 		return "", "", false, fmt.Errorf("vaultkey: generate DEK: %w", err)
 	}
 	generation := make([]byte, generationSize)
