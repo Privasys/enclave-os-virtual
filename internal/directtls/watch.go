@@ -1,11 +1,9 @@
 package directtls
 
-// Two background duties per app, both started by Apply:
+// A background duty per app, started by Apply:
 //
-//   - Ordering guard: a name is handed to certmagic only once it resolves.
-//     Every order placed before DNS exists fails validation, and Let's
-//     Encrypt allows few failed validations per account and name per hour,
-//     so ordering early can block issuance well after DNS is in place.
+//   - (The ordering guard lives in probe.go: no order until a validation
+//     would reach this enclave.)
 //
 //   - Certificate Transparency watch: every publicly trusted certificate is
 //     logged in CT. Each direct name is searched there periodically, and any
@@ -32,7 +30,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/caddyserver/certmagic"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.uber.org/zap"
@@ -42,7 +39,6 @@ const (
 	// CTSearch is the default Certificate Transparency search (crt.sh).
 	CTSearch = "https://crt.sh"
 
-	resolveEvery = 2 * time.Minute
 	ctEvery      = 6 * time.Hour
 	ctJitter     = 30 * time.Minute
 	ctFirst      = 5 * time.Minute
@@ -122,42 +118,6 @@ func (s *Service) recordCurrent(domains []string) {
 	for _, d := range domains {
 		if leaf, err := s.Leaf(d); err == nil {
 			s.obtained.record(d, SPKIHash(leaf))
-		}
-	}
-}
-
-// manageWhenResolvable hands each name to certmagic once it resolves.
-func (s *Service) manageWhenResolvable(ctx context.Context, container string, magic *certmagic.Config, domains []string) {
-	pending := append([]string(nil), domains...)
-	for {
-		var ready, waiting []string
-		for _, d := range pending {
-			lctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			addrs, err := s.lookupHost(lctx, d)
-			cancel()
-			if err == nil && len(addrs) > 0 {
-				ready = append(ready, d)
-			} else {
-				waiting = append(waiting, d)
-			}
-		}
-		if len(ready) > 0 {
-			if err := magic.ManageAsync(ctx, ready); err != nil {
-				s.log.Warn("direct names not managed", zap.String("container", container), zap.Strings("domains", ready), zap.Error(err))
-				waiting = append(waiting, ready...)
-			} else {
-				s.log.Info("direct names managed", zap.String("container", container), zap.Strings("domains", ready))
-			}
-		}
-		if len(waiting) == 0 {
-			return
-		}
-		s.log.Info("direct names waiting for DNS before ordering", zap.String("container", container), zap.Strings("domains", waiting))
-		pending = waiting
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(resolveEvery):
 		}
 	}
 }

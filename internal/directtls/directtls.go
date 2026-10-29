@@ -32,6 +32,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net/http"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -90,6 +91,14 @@ type Config struct {
 	// the system resolver). Both exist for tests.
 	CTSearch   string
 	LookupHost func(ctx context.Context, name string) ([]string, error)
+
+	// The ordering probe (probe.go): ProbeDial and ProbePort reach a name
+	// (nil and "" mean a plain TCP dial to port 443), ProbeFirstWait and
+	// ProbeMaxWait pace the retries (zero: 2 and 15 minutes). For tests.
+	ProbeDial      func(ctx context.Context, network, addr string) (net.Conn, error)
+	ProbePort      string
+	ProbeFirstWait time.Duration
+	ProbeMaxWait   time.Duration
 }
 
 // Status is what the control plane reads to decide whether a domain may go
@@ -112,6 +121,9 @@ type DomainStatus struct {
 	Issued     bool   `json:"issued"`
 	NotAfter   string `json:"not_after,omitempty"`
 	SPKISHA256 string `json:"spki_sha256,omitempty"`
+	// Probe is the last check that a validation would reach this enclave
+	// (probe.go); absent until the first issuance attempt.
+	Probe *ProbeState `json:"probe,omitempty"`
 }
 
 type app struct {
@@ -137,6 +149,7 @@ type Service struct {
 	obtained *obtainedKeys
 	ctClient *http.Client
 	ctOurs   map[int64]bool // crt.sh ids already matched to a key of ours
+	probes   map[string]ProbeState
 }
 
 // New builds the service. It does nothing until Apply names a domain.
@@ -152,6 +165,7 @@ func New(cfg Config, log *zap.Logger) *Service {
 		obtained: &obtainedKeys{path: filepath.Join(cfg.StorageRoot, MarkerDir, obtainedFile)},
 		ctClient: &http.Client{Timeout: 30 * time.Second},
 		ctOurs:   map[int64]bool{},
+		probes:   map[string]ProbeState{},
 	}
 	s.issuerKey = IssuerKey(cfg.CA)
 	return s
@@ -231,7 +245,9 @@ func (s *Service) Apply(container, canonical string, domains []string, key *ecds
 			return nil
 		},
 	})
-	magic.Issuers = []certmagic.Issuer{certmagic.NewACMEIssuer(magic, certmagic.ACMEIssuer{
+	// Every issuance (first order, retry, renewal) is gated on a probe that a
+	// validation would reach this enclave (probe.go).
+	magic.Issuers = []certmagic.Issuer{&probingIssuer{s: s, inner: certmagic.NewACMEIssuer(magic, certmagic.ACMEIssuer{
 		CA: s.cfg.CA,
 		// After a failure certmagic retries against a "test" CA (Let's
 		// Encrypt staging by default) with the SAME account, which staging
@@ -242,7 +258,7 @@ func (s *Service) Apply(container, canonical string, domains []string, key *ecds
 		AccountKeyPEM:        keyPEM,
 		DisableHTTPChallenge: true,
 		Logger:               s.log,
-	})}
+	})}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
@@ -252,7 +268,9 @@ func (s *Service) Apply(container, canonical string, domains []string, key *ecds
 
 	s.recordCurrent(domains)
 	go s.resolveAccount(ctx, container, a)
-	go s.manageWhenResolvable(ctx, container, magic, domains)
+	if err := magic.ManageAsync(ctx, domains); err != nil {
+		s.log.Warn("direct names not managed", zap.String("container", container), zap.Strings("domains", domains), zap.Error(err))
+	}
 	go s.watchCT(ctx, container, a)
 	s.log.Info("direct names set",
 		zap.String("container", container), zap.String("canonical", canonical), zap.Strings("domains", domains))
@@ -310,6 +328,7 @@ func (s *Service) Status(container string) Status {
 			ds.NotAfter = leaf.NotAfter.UTC().Format(time.RFC3339)
 			ds.SPKISHA256 = SPKIHash(leaf)
 		}
+		ds.Probe = s.probeOf(d)
 		st.Domains = append(st.Domains, ds)
 	}
 	return st

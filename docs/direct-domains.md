@@ -43,9 +43,16 @@ connection was served, and anything not positively served the RA-TLS leaf
   `/data` volume, in the storage root it shares with Caddy.
 - Issuance uses ACME TLS-ALPN-01 only. Caddy answers the challenge from the
   shared storage; the manager places the orders.
-- A name is ordered only once it resolves (rechecked every two minutes), so
-  orders placed before DNS exists do not use up the CA's failed-validation
-  allowance.
+- No order is placed until a validation would reach this enclave. Before
+  every issuance (first order, retry, renewal) the manager publishes a
+  throwaway TLS-ALPN-01 challenge in the shared storage, connects to the name
+  through public DNS offering only `acme-tls/1`, and checks the certificate it
+  gets back carries that challenge. Until it does (no DNS yet, or the gateway
+  not yet passing the challenge to this enclave), it waits and probes again,
+  from two minutes up to every fifteen, without contacting the CA, so the
+  CA's failed-validation allowance is never used up by an order that could
+  not succeed. Each domain's status carries the last probe:
+  `"probe": {"ok", "checked_at", "error"}`.
 
 On a direct name a client offering the `privasys-ratls/1` ALPN still gets the
 RA-TLS leaf, with the direct name in its SAN and the app's extensions.
