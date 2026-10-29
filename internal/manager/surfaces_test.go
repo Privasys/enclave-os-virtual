@@ -251,3 +251,41 @@ func TestSetSurfacesClears(t *testing.T) {
 		t.Error(s.SurfacesSummary(surfHost))
 	}
 }
+
+// TestDirectLegFollowsTheClearRules pins the direct adopter leg: same surface
+// rules as the gateway-terminated leg (a private path is not let through in
+// the clear), but the app and the client learn it as "direct", never as
+// attested and never as public.
+func TestDirectLegFollowsTheClearRules(t *testing.T) {
+	s := surfServer(t, webManifest)
+	direct := func(method, path string) *http.Request {
+		r := clearReq(method, path, nil)
+		r.Header.Set(edgeHeader, "direct")
+		return r
+	}
+	if !isClearLeg(direct("GET", "/api/v1/me")) {
+		t.Fatal("the direct leg must be a clear leg")
+	}
+	if s.clearAllowed(direct("GET", "/api/v1/me")) {
+		t.Fatal("a private path must not be served in the clear on the direct leg")
+	}
+	if !s.clearAllowed(direct("GET", "/api/v1/public/feed")) {
+		t.Fatal("a declared public route serves on the direct leg")
+	}
+	r := direct("GET", "/api/v1/public/feed")
+	rec := httptest.NewRecorder()
+	w, ok := s.servePublic(rec, r)
+	if !ok {
+		t.Fatalf("declared route refused: %d", rec.Code)
+	}
+	if got := r.Header.Get(TransportHeader); got != TransportDirect {
+		t.Fatalf("transport to the app = %q, want %q", got, TransportDirect)
+	}
+	w.WriteHeader(http.StatusOK)
+	if got := rec.Result().Header.Get(TransportHeader); got != TransportDirect {
+		t.Fatalf("transport to the client = %q, want %q", got, TransportDirect)
+	}
+	if isClearLeg(httptest.NewRequest("GET", "https://"+surfHost+"/", nil)) {
+		t.Fatal("no marker is the RA-TLS leg")
+	}
+}

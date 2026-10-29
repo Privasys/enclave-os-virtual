@@ -151,6 +151,15 @@ var AttestedDependencySet = oid(7, 1)
 // signed, which is what makes a rolled-back policy visible rather than silent.
 var AttestedAppPolicy = oid(7, 3)
 
+// DirectDomainKeys binds each direct adopter hostname of a container to the
+// key of its publicly trusted certificate, as UTF-8 lines
+// "<hostname> sha256:<hex SHA-256 of the SubjectPublicKeyInfo>", sorted and
+// newline-joined. A direct name is spliced to the enclave and served with a
+// certificate the enclave obtained over ACME, its key born here; a browser
+// cannot attest that, but anyone attesting the app host can compare this
+// value with the certificate the adopter name presents. Manager-owned.
+var DirectDomainKeys = oid(7, 4)
+
 // ParseEnvVarOID parses an OID for an app-defined attestation extension. It
 // accepts the full dot-notation OID under AppExtensionArcPrefix
 // ("1.3.6.1.4.1.65230.5.4.1.2") or just the sub-arc tail ("1.2", "1").

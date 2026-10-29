@@ -316,6 +316,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 	// owner never approved, so it needs to see the pins.
 	if s.policy != nil {
 		l.SetApprovedConstellations(s.policy)
+		l.SetApprovedDomains(s.policy)
 	}
 
 	s.spend = newSpendGate(s.log, cfg.IdpIssuer, cfg.MgmtBaseURL, cfg.EnclaveToken)
@@ -349,7 +350,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 	// management API, not a user data plane), the bootstrap endpoint
 	// (exempted inside the middleware), and well-known metadata.
 	sr.SetRequireSealed(func(r *http.Request) bool {
-		if r.Header.Get("X-Privasys-Edge") != "terminate" {
+		if !isClearLeg(r) {
 			return false
 		}
 		if _, ok := s.lookupAppHost(hostOnly(r.Host)); !ok {
@@ -551,6 +552,11 @@ func (s *Server) Start(ctx context.Context) error {
 	// manager-role routes above stop applying to it.
 	mux.HandleFunc("PUT /api/v1/containers/{name}/policy", s.handleSetAppPolicy)
 
+	// Direct domains (direct.go): what the control plane reads before it
+	// lets a gateway splice an adopter name to this enclave.
+	mux.HandleFunc("GET /api/v1/containers/{name}/direct",
+		s.requireAuth(s.handleDirectStatus))
+
 	// The read side for the app: a container fetches the dependency set the
 	// runtime declared for it, to source its egress pins from. Container
 	// token auth (the caller reads only its OWN set).
@@ -717,7 +723,7 @@ func (s *Server) Start(ctx context.Context) error {
 			// require-sealed predicate only let through for a declared
 			// surface and which is now served anonymous by construction.
 			if r.Header.Get(TransportHeader) == "" {
-				if isEdgeTerminated(r) {
+				if isClearLeg(r) {
 					pw, ok := s.servePublic(w, r)
 					if !ok {
 						return

@@ -52,6 +52,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/backup"
 	"github.com/Privasys/enclave-os-virtual/internal/caddy"
 	"github.com/Privasys/enclave-os-virtual/internal/container"
+	"github.com/Privasys/enclave-os-virtual/internal/directtls"
 	"github.com/Privasys/enclave-os-virtual/internal/extensions"
 	"github.com/Privasys/enclave-os-virtual/internal/manifest"
 	"github.com/Privasys/enclave-os-virtual/internal/merkle"
@@ -84,6 +85,12 @@ type Config struct {
 	// OID extension JSON files for Caddy's RA-TLS module. If empty, OID extensions
 	// are not written and Caddy integration is disabled.
 	ExtensionsDir string
+
+	// DirectStorage is the storage root (on the encrypted /data volume)
+	// shared with Caddy for direct-domain certificates. Empty disables
+	// direct domains. DirectCA is the ACME directory (empty: Let's Encrypt).
+	DirectStorage string
+	DirectCA      string
 
 	// MachineName is the instance machine name (e.g. "prod1").  Together
 	// with Hostname it determines container RA-TLS hostnames:
@@ -521,6 +528,15 @@ type Launcher struct {
 	// vault-backed load (dev, 2026-09-21).
 	approvedMu             sync.Mutex
 	approvedConstellations ApprovedConstellations
+	approvedDomains        ApprovedDomains
+
+	// direct obtains the certificates of adopter hostnames whose TLS ends
+	// here (direct.go); nil when direct domains are not configured.
+	// directBranches holds each container's direct-TLS branch of its volume
+	// key, directDomains the names it serves now.
+	direct         *directtls.Service
+	directBranches map[string][]byte
+	directDomains  map[string][]string
 	containerdHash         []byte
 	combinedImgHash        [32]byte
 
@@ -739,6 +755,8 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		attestationTokens:  make(map[string]string),
 		sovereignBranches:  make(map[string][]byte),
 		holderBranches:     make(map[string][]byte),
+		directBranches:     make(map[string][]byte),
+		directDomains:      make(map[string][]string),
 		storageFacts:       make(map[string]string),
 		backupRunner:       backup.NewRunner(log),
 		backupJobs:         make(map[string]*BackupJob),
@@ -781,6 +799,16 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 			CACertPath:    cfg.CACertPath,
 			CAKeyPath:     cfg.CAKeyPath,
 			ExtensionsDir: cfg.ExtensionsDir,
+		}
+		if cfg.DirectStorage != "" {
+			l.direct = directtls.New(directtls.Config{
+				StorageRoot: cfg.DirectStorage,
+				CA:          cfg.DirectCA,
+				OnChange:    l.directChanged,
+			}, log)
+			caddyCfg.DirectStorage = cfg.DirectStorage
+			caddyCfg.DirectIssuerDir = l.direct.IssuerDir()
+			caddyCfg.DirectCA = l.direct.CA()
 		}
 		l.caddyClient = caddy.NewClient(caddyCfg, log)
 	}
@@ -1622,6 +1650,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	var volEncryption string
 	var sovereignBranch []byte
 	var holderBranch []byte
+	var directBranch []byte
 	if req.Storage != "" {
 		if l.volMgr == nil {
 			return nil, fmt.Errorf("launcher: encrypted storage requested but no 'containers' VG available")
@@ -1680,6 +1709,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 			// still dropped after luksOpen as before.
 			sovereignBranch = deriveSovereignBranch(keyHex)
 			holderBranch = deriveHolderBranch(keyHex)
+			directBranch = deriveDirectBranch(keyHex)
 		}
 		// A restore creates the volume afresh with the app's existing key: the
 		// data the key implies is about to come from the backup, not the disk.
@@ -1879,6 +1909,9 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	if holderBranch != nil {
 		l.holderBranches[req.Name] = holderBranch
 	}
+	if directBranch != nil {
+		l.directBranches[req.Name] = directBranch
+	}
 	if fact := storageFact(req.Storage != "", declaresAppStorage(req.ResourceDecls)); fact != "" {
 		l.storageFacts[req.Name] = fact
 	}
@@ -1962,6 +1995,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 			if err := l.caddyClient.AddRoute(spec.Hostname, caddyUpstream, mutualAuth); err != nil {
 				l.log.Warn("failed to add Caddy route",
 					zap.String("hostname", spec.Hostname), zap.Error(err))
+			}
+			// The owner-approved direct domains, once this load has finished
+			// (the launcher lock is held here).
+			if l.direct != nil {
+				go l.applyApprovedDomains(req.Name)
 			}
 			if mutualAuth {
 				// Register the per-host allowed-caller policy so the manager can
@@ -2087,6 +2125,7 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 
 		// Remove per-container route and extensions.
 		if removedSpec.Hostname != "" && !removedSpec.Internal {
+			l.removeDirect(name, removedSpec.Hostname)
 			if err := l.caddyClient.RemoveRoute(removedSpec.Hostname); err != nil {
 				l.log.Warn("failed to remove Caddy route",
 					zap.String("hostname", removedSpec.Hostname), zap.Error(err))
@@ -2583,6 +2622,15 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string, port
 	// owner signed; an older one on the wire is a rolled-back policy.
 	if p, ok := l.appPolicy[containerName]; ok {
 		exts = append(exts, oids.Extension(oids.AttestedAppPolicy, p))
+	}
+
+	// Direct domain keys (OID 7.4): each adopter name this app serves with a
+	// publicly trusted certificate, bound to that certificate's key, so a
+	// verifier attesting the app can check the key was born here.
+	if l.direct != nil {
+		if kb := l.direct.KeyBindings(containerName); kb != nil {
+			exts = append(exts, oids.Extension(oids.DirectDomainKeys, kb))
+		}
 	}
 
 	// Per-app SDK-set X.509 attestation extensions (OIDs under

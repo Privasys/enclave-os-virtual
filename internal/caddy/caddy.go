@@ -63,6 +63,15 @@ type Config struct {
 	// ExtensionsDir is the directory where the manager writes per-hostname
 	// OID extension files (<hostname>.json).
 	ExtensionsDir string
+
+	// DirectStorage is the storage root shared with the manager's ACME
+	// client for direct-domain certificates; empty disables direct domains.
+	// DirectIssuerDir is the CA's directory under certificates/ in it, and
+	// DirectCA the ACME directory URL: Caddy needs an issuer of the same CA
+	// on direct names to find the acme-tls/1 challenge the manager stored.
+	DirectStorage   string
+	DirectIssuerDir string
+	DirectCA        string
 }
 
 // route is an internal representation of a Caddy reverse-proxy route.
@@ -78,6 +87,12 @@ type route struct {
 	// leaf + channel binder for the manager to verify. Off by default; every
 	// non-mutual host keeps the server-auth-only catch-all policy.
 	MutualAuth bool
+
+	// Aliases are direct adopter hostnames served by this same route: the
+	// platform gateway splices them to this enclave, and Caddy rewrites the
+	// Host to Hostname so the manager applies the app's own rules. The
+	// certificate is chosen by the ra_tls getter (caddy/ratls/direct.go).
+	Aliases []string
 }
 
 // Client manages Caddy routes via the admin API.
@@ -133,6 +148,7 @@ func (c *Client) AddRoute(hostname, upstream string, mutualAuth bool) error {
 		Hostname:   hostname,
 		Upstream:   upstream,
 		MutualAuth: mutualAuth,
+		Aliases:    c.routes[hostname].Aliases, // set separately (SetAliases)
 	}
 
 	c.log.Info("adding Caddy route",
@@ -156,6 +172,27 @@ func (c *Client) RemoveRoute(hostname string) error {
 
 	c.log.Info("removing Caddy route",
 		zap.String("hostname", hostname))
+
+	return c.reload(false)
+}
+
+// SetAliases sets the direct adopter hostnames served by the route of
+// hostname. Nil removes them.
+func (c *Client) SetAliases(hostname string, aliases []string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	r, ok := c.routes[hostname]
+	if !ok {
+		return fmt.Errorf("caddy: no route for hostname %q", hostname)
+	}
+	r.Aliases = append([]string(nil), aliases...)
+	sort.Strings(r.Aliases)
+	c.routes[hostname] = r
+
+	c.log.Info("setting direct aliases",
+		zap.String("hostname", hostname),
+		zap.Strings("aliases", r.Aliases))
 
 	return c.reload(false)
 }
@@ -301,6 +338,9 @@ func (c *Client) buildConfig() map[string]any {
 	// mutualHosts collects the SNI values that need a client-auth connection
 	// policy, built alongside the routes.
 	var mutualHosts []string
+	// directNames collects every direct adopter name, which gets an ACME
+	// issuer policy so Caddy can answer its acme-tls/1 challenge.
+	var directNames []string
 	for _, h := range hostnames {
 		r := c.routes[h]
 
@@ -346,6 +386,43 @@ func (c *Client) buildConfig() map[string]any {
 			},
 			"handle": handle,
 		})
+
+		// Direct adopter names: the same handlers, with the Host rewritten to
+		// the app's platform hostname on the way to the manager, which keys
+		// every per-app rule on it. The original name travels in
+		// X-Forwarded-Host. The leg (direct vs RA-TLS) is stamped by
+		// privasys_attest from the connection, not from anything here.
+		if len(r.Aliases) > 0 {
+			aliasHandle := make([]map[string]any, 0, len(handle))
+			for _, h := range handle {
+				if h["handler"] == "reverse_proxy" {
+					rp := make(map[string]any, len(h)+1)
+					for k, v := range h {
+						rp[k] = v
+					}
+					rp["headers"] = map[string]any{
+						"request": map[string]any{
+							"set": map[string]any{
+								"Host":             []string{r.Hostname},
+								"X-Forwarded-Host": []string{"{http.request.host}"},
+							},
+						},
+					}
+					h = rp
+				}
+				aliasHandle = append(aliasHandle, h)
+			}
+			routes = append(routes, map[string]any{
+				"match": []map[string]any{
+					{"host": r.Aliases},
+				},
+				"handle": aliasHandle,
+			})
+			directNames = append(directNames, r.Aliases...)
+			if r.MutualAuth {
+				mutualHosts = append(mutualHosts, r.Aliases...)
+			}
+		}
 	}
 
 	// Catch-all fallback emitted LAST. Caddy evaluates routes in order and
@@ -387,6 +464,10 @@ func (c *Client) buildConfig() map[string]any {
 	}
 	if c.cfg.ExtensionsDir != "" {
 		certGetter["extensions_dir"] = c.cfg.ExtensionsDir
+	}
+	if c.cfg.DirectStorage != "" {
+		certGetter["direct_storage"] = c.cfg.DirectStorage
+		certGetter["direct_issuer_key"] = c.cfg.DirectIssuerDir
 	}
 
 	// Connection policies, evaluated in order (first SNI match wins). Each
@@ -477,7 +558,32 @@ func (c *Client) buildConfig() map[string]any {
 		srv0["strict_sni_host"] = false
 	}
 
-	return map[string]any{
+	policies := []map[string]any{}
+	if c.cfg.DirectStorage != "" && len(directNames) > 0 {
+		sort.Strings(directNames)
+		// Direct names: the ra_tls getter still serves every handshake (it
+		// returns the publicly trusted certificate or the RA-TLS leaf by
+		// ALPN). The issuer is here only so certmagic, which answers
+		// acme-tls/1 before any getter runs, looks for the challenge under
+		// this CA in the shared storage. The names are deliberately not
+		// listed for automation: the manager obtains them, never Caddy.
+		policies = append(policies, map[string]any{
+			"subjects":        directNames,
+			"get_certificate": []map[string]any{certGetter},
+			"issuers": []map[string]any{{
+				"module": "acme",
+				"ca":     c.cfg.DirectCA,
+				"challenges": map[string]any{
+					"http": map[string]any{"disabled": true},
+				},
+			}},
+		})
+	}
+	policies = append(policies, map[string]any{
+		"get_certificate": []map[string]any{certGetter},
+	})
+
+	cfg := map[string]any{
 		"apps": map[string]any{
 			"http": map[string]any{
 				"servers": map[string]any{
@@ -486,15 +592,18 @@ func (c *Client) buildConfig() map[string]any {
 			},
 			"tls": map[string]any{
 				"automation": map[string]any{
-					"policies": []map[string]any{
-						{
-							"get_certificate": []map[string]any{certGetter},
-						},
-					},
+					"policies": policies,
 				},
 			},
 		},
 	}
+	if c.cfg.DirectStorage != "" {
+		cfg["storage"] = map[string]any{
+			"module": "file_system",
+			"root":   c.cfg.DirectStorage,
+		}
+	}
+	return cfg
 }
 
 // adminURL returns the full URL to the Caddy admin API endpoint.

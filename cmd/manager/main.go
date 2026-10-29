@@ -133,6 +133,12 @@ func runServe(args []string) error {
 		"External HTTPS listen address for Caddy")
 	extensionsDir := fs.String("extensions-dir", "/run/manager/extensions",
 		"Directory for per-hostname RA-TLS OID extension files")
+	// Caddy's own default storage (caddy.service sets XDG_DATA_HOME=/data/caddy),
+	// so naming it explicitly moves nothing.
+	directStorage := fs.String("direct-storage", "/data/caddy/caddy",
+		"Storage root shared with Caddy for direct-domain certificates (on the encrypted /data volume); empty disables direct domains")
+	directCA := fs.String("direct-ca", "",
+		"ACME directory for direct-domain certificates (empty: Let's Encrypt)")
 	machineName := fs.String("machine-name", "",
 		"Machine name for this instance (e.g. prod1); determines container RA-TLS hostnames: <name>.<machine-name>.<hostname>")
 	hostname := fs.String("hostname", "",
@@ -247,6 +253,8 @@ func runServe(args []string) error {
 		CaddyAdminAddr:     "localhost:2019",
 		CaddyListenAddr:    *caddyListen,
 		ExtensionsDir:      *extensionsDir,
+		DirectStorage:      *directStorage,
+		DirectCA:           *directCA,
 		MachineName:        *machineName,
 		Hostname:           *hostname,
 		PlatformHostname:   platformHostname,

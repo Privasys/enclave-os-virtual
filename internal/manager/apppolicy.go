@@ -3,8 +3,8 @@ package manager
 // Owner-signed app policy.
 //
 // The control plane distributes policy; the owner authors it. A policy
-// document carries the app's owners, its dependency set and its allowed
-// callers, signed with the owner's policy key. The first document an app
+// document carries the app's owners, its dependency set, its allowed
+// callers and its direct domains, signed with the owner's policy key. The first document an app
 // accepts pins that key; afterwards nothing the control plane sends can change
 // the app's policy without the owner's signature.
 //
@@ -95,6 +95,17 @@ func (s *Server) handleSetAppPolicy(w http.ResponseWriter, r *http.Request) {
 	if len(doc.Owners) > 0 {
 		s.launcher.SetConfigOwners(name, doc.Owners)
 		applied = append(applied, "owners")
+	}
+	// Direct domains: the store keeps the approved list (a document without
+	// the field keeps it), so apply what it now holds.
+	if doc.Domains != nil {
+		if err := s.launcher.SetDirectDomains(name, s.policy.DomainsFor(appID)); err != nil {
+			s.log.Warn("app policy accepted but its direct domains were not applied",
+				zap.String("container", name), zap.Error(err))
+			s.jsonError(w, http.StatusConflict, "policy accepted, but its domains could not be applied: "+err.Error())
+			return
+		}
+		applied = append(applied, "domains")
 	}
 
 	// Advertise which document this container enforces (OID 7.2), so a

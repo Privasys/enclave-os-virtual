@@ -93,6 +93,11 @@ type RATLSCertGetter struct {
 	// GPUEvidenceDir is where the gpu-attest daemon writes the cached NVIDIA
 	// GPU CC evidence (gpu-evidence.bin). Empty means /run.
 	GPUEvidenceDir string `json:"gpu_evidence_dir,omitempty"`
+	// DirectStorage is the Caddy storage root the manager obtains direct
+	// certificates into, and DirectIssuerKey the certmagic issuer key of
+	// their CA. Both empty disables direct names (see direct.go).
+	DirectStorage   string `json:"direct_storage,omitempty"`
+	DirectIssuerKey string `json:"direct_issuer_key,omitempty"`
 
 	attester Attester
 	caCert   *x509.Certificate
@@ -200,6 +205,19 @@ func (g *RATLSCertGetter) Provision(ctx caddy.Context) error {
 // changes never rotate the key before its 24 hours are up.
 func (g *RATLSCertGetter) GetCertificate(_ context.Context, hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	sni := hello.ServerName
+	// A direct name serves its publicly trusted certificate to every client
+	// that did not ask for RA-TLS (direct.go).
+	if g.isDirectName(sni) {
+		if !offersALPN(hello, RATLSALPN) {
+			cert, err := g.directCertificate(sni)
+			if err != nil {
+				return nil, err
+			}
+			tagConn(hello, legDirect)
+			return cert, nil
+		}
+		tagConn(hello, legRATLS)
+	}
 	// Validity is stamped from the manager's clock, not the host's. The
 	// handshake never waits on or fails over time (see clock.go).
 	now := issueTime()

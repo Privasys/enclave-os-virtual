@@ -68,6 +68,7 @@ type Attest struct {
 // remote address, unique per TCP connection).
 type connInfo struct {
 	tag           string
+	leg           string // direct.go: which certificate the connection was served
 	touched       time.Time
 	clientContext []byte
 	clientCtxAt   time.Time
@@ -132,6 +133,18 @@ func (h *Attest) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 		tag = c.tag
 	}
 	r.Header.Set(hdrAttestation, tag)
+	// On a direct name the leg is decided here, from the connection, never
+	// from the request: anything not positively served the RA-TLS leaf is
+	// the direct leg (direct.go).
+	if r.TLS != nil {
+		if g := current.Load(); g.isDirectName(r.TLS.ServerName) {
+			if connLeg(r.RemoteAddr) == legRATLS {
+				r.Header.Del(hdrEdge)
+			} else {
+				r.Header.Set(hdrEdge, legDirect)
+			}
+		}
+	}
 	return next.ServeHTTP(w, r)
 }
 

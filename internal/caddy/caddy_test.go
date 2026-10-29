@@ -112,3 +112,64 @@ func TestBuildConfigMutualRouteHasPeerHandler(t *testing.T) {
 		t.Fatalf("server-auth route handlers = %v, want [privasys_attest reverse_proxy]", got)
 	}
 }
+
+// A direct adopter name rides the app's route with the Host rewritten to the
+// app hostname, gets an ACME issuer policy (so Caddy answers acme-tls/1 from
+// the shared storage) but is never listed for automation, and the storage
+// root is the one shared with the manager.
+func TestBuildConfigDirectAliases(t *testing.T) {
+	c := &Client{cfg: Config{
+		ListenAddr:      ":443",
+		DirectStorage:   "/data/caddy",
+		DirectIssuerDir: "acme-v02.api.letsencrypt.org-directory",
+		DirectCA:        "https://acme-v02.api.letsencrypt.org/directory",
+	}, log: zap.NewNop(), routes: map[string]route{}}
+	c.routes["app.apps.example.org"] = route{
+		Hostname: "app.apps.example.org", Upstream: "10.0.0.1:9443",
+		Aliases: []string{"shop.example.com"},
+	}
+	cfg := c.buildConfig()
+
+	if st, _ := cfg["storage"].(map[string]any); st["root"] != "/data/caddy" {
+		t.Fatalf("storage = %v, want the shared root", cfg["storage"])
+	}
+	routes := srv0Of(t, c)["routes"].([]map[string]any)
+	var alias map[string]any
+	for _, r := range routes {
+		m := r["match"].([]map[string]any)
+		if hosts := m[0]["host"].([]string); len(hosts) == 1 && hosts[0] == "shop.example.com" {
+			alias = r
+		}
+	}
+	if alias == nil {
+		t.Fatal("no route for the direct name")
+	}
+	var rewritten bool
+	for _, h := range alias["handle"].([]map[string]any) {
+		if h["handler"] == "reverse_proxy" {
+			set := h["headers"].(map[string]any)["request"].(map[string]any)["set"].(map[string]any)
+			rewritten = set["Host"].([]string)[0] == "app.apps.example.org"
+		}
+	}
+	if !rewritten {
+		t.Fatal("the direct route must rewrite Host to the app hostname")
+	}
+
+	pols := cfg["apps"].(map[string]any)["tls"].(map[string]any)["automation"].(map[string]any)["policies"].([]map[string]any)
+	if len(pols) != 2 {
+		t.Fatalf("want a direct policy and the catch-all, got %d", len(pols))
+	}
+	if subj := pols[0]["subjects"].([]string); len(subj) != 1 || subj[0] != "shop.example.com" {
+		t.Fatalf("direct policy subjects = %v", subj)
+	}
+	if _, ok := pols[0]["issuers"]; !ok {
+		t.Fatal("the direct policy needs the ACME issuer for the challenge lookup")
+	}
+	if _, ok := cfg["apps"].(map[string]any)["tls"].(map[string]any)["certificates"]; ok {
+		t.Fatal("Caddy must never automate direct names itself")
+	}
+	getter := pols[1]["get_certificate"].([]map[string]any)[0]
+	if getter["direct_storage"] != "/data/caddy" || getter["direct_issuer_key"] == "" {
+		t.Fatalf("the getter is not told where direct certificates live: %v", getter)
+	}
+}

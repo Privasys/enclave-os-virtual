@@ -292,3 +292,21 @@ func TestBindingMatchesTheIdentityProvider(t *testing.T) {
 		t.Fatalf("Binding = %s, want the identity provider's %s", got, want)
 	}
 }
+
+func TestValidateDomains(t *testing.T) {
+	ok := [][]string{nil, {"app.example.com"}, {"a.example.com", "b-2.example.org"}}
+	for _, d := range ok {
+		if err := ValidateDomains(d); err != nil {
+			t.Errorf("ValidateDomains(%v) = %v, want nil", d, err)
+		}
+	}
+	bad := [][]string{
+		{"*.example.com"}, {"App.example.com"}, {"example"}, {"example.com."},
+		{"-a.example.com"}, {"a.example.com", "a.example.com"}, {"a_b.example.com"},
+	}
+	for _, d := range bad {
+		if err := ValidateDomains(d); err == nil {
+			t.Errorf("ValidateDomains(%v) = nil, want an error", d)
+		}
+	}
+}

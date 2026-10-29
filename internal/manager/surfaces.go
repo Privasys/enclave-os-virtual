@@ -48,12 +48,16 @@ import (
 //   - "attested": TLS ended at the enclave (RA-TLS direct, mutual RA-TLS);
 //   - "public":   plaintext on the gateway-terminated leg, on a declared
 //     static or public surface. Anonymous; the gateway read it.
+//   - "direct":   plaintext on a direct adopter name: TLS ended here with a
+//     publicly trusted certificate, so nobody but the enclave read it, but
+//     the client verified no attestation. Same rules as "public" otherwise.
 const TransportHeader = sessionrelay.TransportHeader
 
 const (
 	TransportSealed   = sessionrelay.TransportSealed
 	TransportAttested = "attested"
 	TransportPublic   = "public"
+	TransportDirect   = "direct"
 )
 
 // edgeHeader is the gateway's trusted marker that it terminated TLS on
@@ -199,11 +203,36 @@ func isEdgeTerminated(r *http.Request) bool {
 	return r.Header.Get(edgeHeader) == "terminate"
 }
 
+// isDirectLeg reports whether the request arrived on a direct adopter name
+// with the publicly trusted certificate. Caddy's privasys_attest handler sets
+// the marker from the connection (and overwrites a client's), so a direct
+// request can never pass as RA-TLS.
+func isDirectLeg(r *http.Request) bool {
+	return r.Header.Get(edgeHeader) == "direct"
+}
+
+// isClearLeg reports whether the client did not verify the enclave: the
+// gateway-terminated leg or a direct name. Both get the same rules: sealed
+// bodies, or a declared static or public surface.
+func isClearLeg(r *http.Request) bool {
+	return isEdgeTerminated(r) || isDirectLeg(r)
+}
+
+// clearTransport is the transport stamp of a plaintext request on a clear leg.
+func clearTransport(r *http.Request) string {
+	if isDirectLeg(r) {
+		return TransportDirect
+	}
+	return TransportPublic
+}
+
 // servePublic applies the clear-leg treatment to a request the predicate let
 // through, and returns the writer the rest of the chain must use. ok is
 // false when the request was answered here (preflight, refusal, rate limit).
 func (s *Server) servePublic(w http.ResponseWriter, r *http.Request) (http.ResponseWriter, bool) {
 	host := hostOnly(r.Host)
+	// Read before the header scrub below removes the leg marker.
+	transport := clearTransport(r)
 	surf := s.surfacesOf(host)
 	if surf == nil {
 		// Let through by the predicate on its own exemptions (/healthz,
@@ -240,7 +269,7 @@ func (s *Server) servePublic(w http.ResponseWriter, r *http.Request) (http.Respo
 		allowHeaders := append([]string{"Accept", "Content-Type"}, surf.PublicHeaders(path)...)
 		h.Set("Access-Control-Allow-Headers", strings.Join(allowHeaders, ", "))
 		h.Set("Access-Control-Max-Age", "600")
-		h.Set(TransportHeader, TransportPublic)
+		h.Set(TransportHeader, transport)
 		w.WriteHeader(http.StatusNoContent)
 		publicRequests.WithLabelValues(host, "preflight").Inc()
 		return nil, false
@@ -275,11 +304,12 @@ func (s *Server) servePublic(w http.ResponseWriter, r *http.Request) (http.Respo
 	if client != "" {
 		r.Header.Set("X-Forwarded-For", client)
 	}
-	r.Header.Set(TransportHeader, TransportPublic)
+	r.Header.Set(TransportHeader, transport)
 	if seenCredential {
 		publicCredentialsSeen.WithLabelValues(host).Inc()
 		s.publicLimiter.noteCredential(host)
-		s.log.Warn("a credential reached the gateway on a public route; dropped before the app",
+		s.log.Warn("a credential arrived on a public route; dropped before the app",
+			zap.String("transport", transport),
 			zap.String("host", host), zap.String("method", r.Method), zap.String("path", path))
 	}
 
@@ -287,6 +317,7 @@ func (s *Server) servePublic(w http.ResponseWriter, r *http.Request) (http.Respo
 		ResponseWriter: w,
 		cors:           isPublicRoute && surf.OpenCORS(),
 		static:         !isPublicRoute,
+		transport:      transport,
 	}
 	start := time.Now()
 	s.log.Info("public request",
@@ -318,6 +349,7 @@ type publicResponseWriter struct {
 	http.ResponseWriter
 	cors        bool
 	static      bool
+	transport   string // TransportPublic or TransportDirect
 	wroteHeader bool
 	status      int
 }
@@ -334,7 +366,11 @@ func (w *publicResponseWriter) WriteHeader(code int) {
 			h.Del(name)
 		}
 	}
-	h.Set(TransportHeader, TransportPublic)
+	transport := w.transport
+	if transport == "" {
+		transport = TransportPublic
+	}
+	h.Set(TransportHeader, transport)
 	if w.cors {
 		h.Set("Access-Control-Allow-Origin", "*")
 		h.Set("Access-Control-Expose-Headers", "Content-Type, ETag, Last-Modified, Retry-After, "+TransportHeader)

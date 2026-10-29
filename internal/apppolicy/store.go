@@ -26,6 +26,11 @@ type pin struct {
 	// Kept with the pin so it is known at the next boot, before any policy
 	// has been delivered: that is exactly when a key would be resolved.
 	Constellation *Constellation `json:"constellation,omitempty"`
+	// Domains are the direct adopter hostnames the owner approved. Kept with
+	// the pin for the same reason as the constellation: a reload re-sends the
+	// stored document, which is refused as not newer, so the next load must
+	// find them here.
+	Domains []string `json:"domains,omitempty"`
 }
 
 // Store keeps each app's pin. It lives on the manager's /data volume, which is
@@ -130,7 +135,13 @@ func (s *Store) Accept(raw []byte) (*Document, []byte, error) {
 	if doc.Constellation.Valid() {
 		constellation = doc.Constellation
 	}
-	s.pins[doc.AppID] = pin{Approver: next, Seq: doc.Seq, Constellation: constellation}
+	// Likewise for domains: a document without the field keeps them, and an
+	// explicit empty list removes them all.
+	domains := current.Domains
+	if doc.Domains != nil {
+		domains = doc.Domains
+	}
+	s.pins[doc.AppID] = pin{Approver: next, Seq: doc.Seq, Constellation: constellation, Domains: domains}
 	if err := s.saveLocked(); err != nil {
 		delete(s.pins, doc.AppID)
 		if pinned {
@@ -194,4 +205,12 @@ func (s *Store) ConstellationFor(appID string) *Constellation {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.pins[appID].Constellation
+}
+
+// DomainsFor returns the direct adopter hostnames the app's owner approved,
+// nil when none.
+func (s *Store) DomainsFor(appID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.pins[appID].Domains...)
 }

@@ -86,6 +86,11 @@ type Document struct {
 	// verifier remain the only readers of their contents.
 	Dependencies   json.RawMessage `json:"dependencies,omitempty"`
 	AllowedCallers json.RawMessage `json:"allowed_callers,omitempty"`
+	// Domains are the adopter hostnames the app serves with TLS that ends in
+	// this enclave (a certificate obtained here over ACME, its key born
+	// here). Only names the owner signed are ever requested, so the platform
+	// cannot point the enclave at a name the owner did not approve.
+	Domains []string `json:"domains,omitempty"`
 	// Constellation pins where this app's data key lives, so the control
 	// plane cannot steer a new key onto a constellation it chose.
 	Constellation *Constellation `json:"constellation,omitempty"`
@@ -125,6 +130,9 @@ func Parse(raw []byte) (*Document, []byte, string, error) {
 	}
 	if doc.Seq == 0 {
 		return nil, nil, "", fmt.Errorf("apppolicy: document seq must be 1 or more")
+	}
+	if err := ValidateDomains(doc.Domains); err != nil {
+		return nil, nil, "", err
 	}
 	return &doc, append([]byte(nil), env.Document...), strings.TrimSpace(env.ApprovalToken), nil
 }
@@ -238,6 +246,51 @@ func (c *Constellation) Matches(mrenclave string, endpoints []string) bool {
 			return false
 		}
 		want[key]--
+	}
+	return true
+}
+
+// MaxDomains bounds the adopter hostnames one policy may name.
+const MaxDomains = 20
+
+// ValidateDomains checks the shape of a policy's domains: lowercase fully
+// qualified hostnames, no wildcard, no duplicate. Ownership is the control
+// plane's check (DNS proof); this one only keeps a malformed name from ever
+// reaching an ACME order.
+func ValidateDomains(domains []string) error {
+	if len(domains) > MaxDomains {
+		return fmt.Errorf("apppolicy: %d domains, at most %d", len(domains), MaxDomains)
+	}
+	seen := make(map[string]bool, len(domains))
+	for _, d := range domains {
+		if !validHostname(d) {
+			return fmt.Errorf("apppolicy: %q is not a lowercase fully qualified hostname", d)
+		}
+		if seen[d] {
+			return fmt.Errorf("apppolicy: domain %q named twice", d)
+		}
+		seen[d] = true
+	}
+	return nil
+}
+
+func validHostname(h string) bool {
+	if len(h) == 0 || len(h) > 253 || strings.HasSuffix(h, ".") {
+		return false
+	}
+	labels := strings.Split(h, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, l := range labels {
+		if len(l) == 0 || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return false
+		}
+		for _, c := range l {
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
 	}
 	return true
 }
