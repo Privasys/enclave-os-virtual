@@ -173,3 +173,30 @@ func TestBuildConfigDirectAliases(t *testing.T) {
 		t.Fatalf("the getter is not told where direct certificates live: %v", getter)
 	}
 }
+
+// The PROXY protocol wrapper is present only with a gateway list, trusts
+// only those addresses, and keeps the tls wrapper after it.
+func TestBuildConfigProxyProtocol(t *testing.T) {
+	c := &Client{cfg: Config{ListenAddr: ":443"}, log: zap.NewNop(), routes: map[string]route{}}
+	if _, ok := srv0Of(t, c)["listener_wrappers"]; ok {
+		t.Fatal("no gateway list, no wrapper")
+	}
+	c.cfg.ProxyProtocolFrom = []string{"34.155.7.30", "10.0.0.0/8", "nonsense", "2001:db8::1"}
+	ws := srv0Of(t, c)["listener_wrappers"].([]map[string]any)
+	if len(ws) != 2 || ws[0]["wrapper"] != "proxy_protocol" || ws[1]["wrapper"] != "tls" {
+		t.Fatalf("wrappers = %v", ws)
+	}
+	allow := ws[0]["allow"].([]string)
+	want := []string{"34.155.7.30/32", "10.0.0.0/8", "2001:db8::1/128"}
+	if len(allow) != len(want) {
+		t.Fatalf("allow = %v, want %v", allow, want)
+	}
+	for i := range want {
+		if allow[i] != want[i] {
+			t.Fatalf("allow = %v, want %v", allow, want)
+		}
+	}
+	if ws[0]["fallback_policy"] != "IGNORE" {
+		t.Fatal("anyone else's header must be ignored, and headerless connections pass")
+	}
+}

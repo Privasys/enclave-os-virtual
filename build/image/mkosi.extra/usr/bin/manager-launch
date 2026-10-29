@@ -38,4 +38,5 @@ exec /usr/bin/manager serve \
     --enclave-token "${ENCLAVE_TOKEN:-}" \
     --tunnel-gateways "${TUNNEL_GATEWAYS:-}" \
     --tunnel-server-name "${TUNNEL_SERVER_NAME:-}" \
+    --proxy-protocol-from "${PROXY_PROTOCOL_FROM:-}" \
     --log-level info

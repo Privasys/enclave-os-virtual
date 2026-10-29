@@ -137,6 +137,8 @@ func runServe(args []string) error {
 	// so naming it explicitly moves nothing.
 	directStorage := fs.String("direct-storage", "/data/caddy/caddy",
 		"Storage root shared with Caddy for direct-domain certificates (on the encrypted /data volume); empty disables direct domains")
+	proxyProtocolFrom := fs.String("proxy-protocol-from", "",
+		"Comma-separated addresses (CIDR or IP) of the platform gateways, whose PROXY protocol v2 header (the client of a direct splice) is honoured; empty disables it")
 	directCA := fs.String("direct-ca", "",
 		"ACME directory for direct-domain certificates (empty: Let's Encrypt)")
 	machineName := fs.String("machine-name", "",
@@ -255,6 +257,7 @@ func runServe(args []string) error {
 		ExtensionsDir:      *extensionsDir,
 		DirectStorage:      *directStorage,
 		DirectCA:           *directCA,
+		ProxyProtocolFrom:  splitList(*proxyProtocolFrom),
 		MachineName:        *machineName,
 		Hostname:           *hostname,
 		PlatformHostname:   platformHostname,
@@ -540,4 +543,15 @@ func signerOrNil(s *enclaveauth.Signer) enclaveauth.RequestSigner {
 		return nil
 	}
 	return s
+}
+
+// splitList splits a comma-separated flag value, dropping empty entries.
+func splitList(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

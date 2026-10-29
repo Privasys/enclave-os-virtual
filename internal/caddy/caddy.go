@@ -25,7 +25,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,6 +74,13 @@ type Config struct {
 	DirectStorage   string
 	DirectIssuerDir string
 	DirectCA        string
+
+	// ProxyProtocolFrom lists the addresses (CIDR or bare IP) of the
+	// platform gateways. When set, a PROXY protocol v2 header is read on
+	// connections from them (the client address of a direct splice);
+	// connections from anywhere else, and gateway connections without a
+	// header, are served exactly as before. Empty: no wrapper at all.
+	ProxyProtocolFrom []string
 }
 
 // route is an internal representation of a Caddy reverse-proxy route.
@@ -557,6 +566,21 @@ func (c *Client) buildConfig() map[string]any {
 	if len(mutualHosts) > 0 {
 		srv0["strict_sni_host"] = false
 	}
+	if allow := proxyProtocolCIDRs(c.cfg.ProxyProtocolFrom); len(allow) > 0 {
+		// USE the header from the gateways; IGNORE it from anyone else (a
+		// client cannot claim an address), and a connection with no header
+		// passes untouched either way: RA-TLS splices, terminate-leg dials
+		// and the control plane by IP send none.
+		srv0["listener_wrappers"] = []map[string]any{
+			{
+				"wrapper":         "proxy_protocol",
+				"timeout":         "5s",
+				"allow":           allow,
+				"fallback_policy": "IGNORE",
+			},
+			{"wrapper": "tls"},
+		}
+	}
 
 	policies := []map[string]any{}
 	if c.cfg.DirectStorage != "" && len(directNames) > 0 {
@@ -612,4 +636,24 @@ func (c *Client) adminURL(path string) string {
 		return "http://caddy" + path // host is ignored for Unix sockets
 	}
 	return "http://" + c.cfg.AdminAddr + path
+}
+
+// proxyProtocolCIDRs normalises the gateway list to CIDRs (a bare IP is one
+// host), dropping anything unparsable.
+func proxyProtocolCIDRs(in []string) []string {
+	var out []string
+	for _, a := range in {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(a); err == nil {
+			out = append(out, p.String())
+			continue
+		}
+		if ip, err := netip.ParseAddr(a); err == nil {
+			out = append(out, netip.PrefixFrom(ip, ip.BitLen()).String())
+		}
+	}
+	return out
 }

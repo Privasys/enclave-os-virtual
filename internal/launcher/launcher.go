@@ -92,6 +92,10 @@ type Config struct {
 	DirectStorage string
 	DirectCA      string
 
+	// ProxyProtocolFrom are the platform gateways' addresses, from which a
+	// PROXY protocol v2 header (the client of a direct splice) is accepted.
+	ProxyProtocolFrom []string
+
 	// MachineName is the instance machine name (e.g. "prod1").  Together
 	// with Hostname it determines container RA-TLS hostnames:
 	//   Container: <name>.<MachineName>.<Hostname>
@@ -801,6 +805,8 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 			CACertPath:    cfg.CACertPath,
 			CAKeyPath:     cfg.CAKeyPath,
 			ExtensionsDir: cfg.ExtensionsDir,
+
+			ProxyProtocolFrom: cfg.ProxyProtocolFrom,
 		}
 		if cfg.DirectStorage != "" {
 			l.direct = directtls.New(directtls.Config{
