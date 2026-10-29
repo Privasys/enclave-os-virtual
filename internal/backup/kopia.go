@@ -375,6 +375,32 @@ func parseBlobTotal(out string) (int64, error) {
 	return 0, errors.New("backup: no total in blob stats")
 }
 
+// ChangePassword moves the app's repository from oldPassword to newPassword
+// (an app key rotation: both derive from the old and new keys). kopia re-wraps
+// the repository's key, so every snapshot, old and new, opens with the new
+// password. Idempotent: a repository that already opens with newPassword, or
+// that does not exist, is left alone.
+func (r *Runner) ChangePassword(ctx context.Context, app, oldPassword, newPassword string, t Target) error {
+	if s, err := r.open(ctx, app, newPassword, t, false); err == nil {
+		s.close()
+		return nil
+	} else if strings.Contains(err.Error(), "not initialized") {
+		return nil
+	}
+	s, err := r.open(ctx, app, oldPassword, t, false)
+	if err != nil {
+		return err
+	}
+	defer s.close()
+	// The new password reaches kopia through its environment, like the old.
+	s.env = append(s.env, "KOPIA_NEW_PASSWORD="+newPassword)
+	if _, err := s.run(ctx, "repository", "change-password"); err != nil {
+		return err
+	}
+	r.log.Info("backup repository password changed (app key rotation)", zap.String("app", app))
+	return nil
+}
+
 // Restore writes snapshot snapshotID (or the most recent one, for "latest") of
 // the app's repository into dest, which must be the app's freshly created,
 // empty volume. Owners, permissions and timestamps are restored as recorded.

@@ -2218,6 +2218,11 @@ type RotateRequest struct {
 	NewKeyCreationGrant string `json:"new_key_creation_grant,omitempty"`
 
 	AppId string `json:"app_id,omitempty"`
+
+	// BackupTarget, set for an app with backups, makes the add phase also move
+	// the backup repository's password from the old key to the new one, so
+	// every backup keeps opening with the app's current key.
+	BackupTarget *backup.Target `json:"backup_target,omitempty"`
 }
 
 // RotateVolumeKey performs one phase of a vault-key (KEK) rotation on a
@@ -2290,6 +2295,23 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 		}
 		if err := l.volMgr.AddKey(req.Name, oldDEK, newDEK); err != nil {
 			return fmt.Errorf("launcher: rotate add: %w", err)
+		}
+		// The backup repository's password derives from the app key: move it
+		// now, while both keys are in hand. On failure the platform does not
+		// advance the key pointer, so the volume and the repository both stay
+		// on the old key (the new slot is harmless) and the add is retried.
+		if req.BackupTarget != nil {
+			oldPw, perr := backup.RepositoryPassword(oldDEK)
+			if perr != nil {
+				return fmt.Errorf("launcher: rotate add: %w", perr)
+			}
+			newPw, perr := backup.RepositoryPassword(newDEK)
+			if perr != nil {
+				return fmt.Errorf("launcher: rotate add: %w", perr)
+			}
+			if err := l.backupRunner.ChangePassword(ctx, req.Name, oldPw, newPw, *req.BackupTarget); err != nil {
+				return fmt.Errorf("launcher: rotate add: backup repository password: %w", err)
+			}
 		}
 		// The new handle is now a live keyslot; reflect it as the volume's
 		// attested key origin (OID 3.4) for the running app.

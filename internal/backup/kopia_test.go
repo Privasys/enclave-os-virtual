@@ -236,3 +236,24 @@ func TestInvalidAppName(t *testing.T) {
 		t.Fatal("app name with a slash accepted")
 	}
 }
+
+func TestChangePasswordIsIdempotent(t *testing.T) {
+	// The fake opens any password once the repository exists, so the
+	// new-password probe succeeds and nothing is changed.
+	bin, logPath := fakeKopia(t, false)
+	r := &Runner{log: zap.NewNop(), Binary: bin, StateBase: t.TempDir()}
+	if err := r.ChangePassword(context.Background(), "myapp", "old", "new", testTarget()); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range calls(t, logPath) {
+		if strings.HasPrefix(c, "repository change-password") {
+			t.Fatalf("changed a repository that already opens with the new password: %q", c)
+		}
+	}
+	// No repository: nothing to change, no error.
+	bin, _ = fakeKopia(t, true)
+	r.Binary = bin
+	if err := r.ChangePassword(context.Background(), "myapp", "old", "new", testTarget()); err != nil {
+		t.Fatalf("no repository: %v", err)
+	}
+}
