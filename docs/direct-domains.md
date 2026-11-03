@@ -106,6 +106,12 @@ success the token is removed and replaced by:
 |---|---|
 | `X-Privasys-Sub` | the token's subject (the same header the sealed leg carries) |
 | `X-Privasys-Attestation-Level` | `verified` when the sign-in was the wallet, `unverified` otherwise |
+| `X-Privasys-Email` | the token's `email` claim, when it has one |
+| `X-Privasys-Name` | the token's `name` claim, when it has one, percent-encoded UTF-8 |
+
+The identity provider keeps no profile, so only the token from the code
+exchange, right after the sign-in, carries `email` and `name`; a token minted
+by refresh does not. An app stores them on first sight, keyed by the subject.
 
 A token that cannot be verified is refused with 401. No token is an anonymous
 request. The direct leg never makes an end user a payer: a priced route

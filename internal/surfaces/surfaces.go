@@ -310,7 +310,7 @@ func (s *Surfaces) Validate() error {
 // leg's allow-list: credentials and runtime-asserted identity.
 var neverAllowed = map[string]bool{
 	"Authorization": true, "Cookie": true, "X-App-Auth": true,
-	"X-Privasys-Sub": true, "X-Privasys-Spend": true, "X-Privasys-Spend-Proof": true,
+	"X-Privasys-Sub": true, "X-Privasys-Email": true, "X-Privasys-Name": true, "X-Privasys-Spend": true, "X-Privasys-Spend-Proof": true,
 	"X-Privasys-Transport": true, "X-Privasys-Edge": true,
 }
 

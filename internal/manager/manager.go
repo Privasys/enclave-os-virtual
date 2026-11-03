@@ -732,6 +732,7 @@ func (s *Server) Start(ctx context.Context) error {
 			r.Header.Del(voucherRPIDHeader)
 			// The sign-in assurance is runtime-asserted (direct.go).
 			r.Header.Del(AttestationLevelHeader)
+			stripAssertedProfile(r.Header)
 			// Which leg (surfaces.go). The session relay marked a request it
 			// unsealed; anything else is either RA-TLS direct (TLS ended
 			// here) or plaintext on the gateway-terminated leg, which the
@@ -751,6 +752,8 @@ func (s *Server) Start(ctx context.Context) error {
 				} else {
 					r.Header.Set(TransportHeader, TransportAttested)
 				}
+			} else if r.Header.Get(TransportHeader) == TransportSealed {
+				r = s.assertSealedIdentity(r)
 			}
 			// Freeze gate: if the container declared a config_api at
 			// load time and has not yet been configured, serve only

@@ -57,7 +57,8 @@ func (s *Server) priceForRequest(containerName string, r *http.Request) (apifees
 // asserted (spendgate.go: the user allowed the calling app to spend for
 // them, proven by a token bound to that app's key). Fallback is the
 // relay-asserted X-Privasys-Sub, set exclusively by the session-relay
-// middleware after an EncAuth bootstrap.
+// middleware after an EncAuth bootstrap; a subject taken from an inner bearer
+// (assertSealedIdentity) is not that, and pays for nothing.
 //
 // An app-supplied acting user (the former X-Privasys-On-Behalf-Of) is
 // never a payer: the app may say whom it serves, but only the platform or
@@ -90,6 +91,9 @@ func (s *Server) callerIdentity(r *http.Request) string {
 	// is stripped from every other request).
 	if sub := strings.TrimSpace(r.Header.Get(spend.HeaderPayer)); sub != "" {
 		return sub
+	}
+	if r.Context().Value(bearerSubjectKey{}) != nil {
+		return ""
 	}
 	return r.Header.Get("X-Privasys-Sub")
 }

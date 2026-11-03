@@ -333,15 +333,24 @@ func (v *Verifier) AuthenticateCaller(tokenStr string) (sub string, wallet bool,
 	return sub, wallet, nil
 }
 
+// AppUser is what a verified end-user bearer says about the person. Email and
+// Name are empty unless this token carries them: the identity provider keeps
+// no profile, so only the token minted at the code exchange does, never one
+// minted by refresh.
+type AppUser struct {
+	Sub    string
+	Wallet bool // the sign-in was the wallet (the IdP's `wallet` marker)
+	Email  string
+	Name   string
+}
+
 // AuthenticateAppUser validates a bearer an end user presents to ONE app:
 // the same checks as AuthenticateUser, except that the audience must be one
 // of the app's own (audiences), never the platform audience. A token minted
-// for one app therefore cannot be replayed to another. It returns the
-// subject and whether the sign-in was the wallet (the IdP's `wallet`
-// marker, as for AuthenticateCaller).
-func (v *Verifier) AuthenticateAppUser(tokenStr string, audiences []string) (sub string, wallet bool, err error) {
+// for one app therefore cannot be replayed to another.
+func (v *Verifier) AuthenticateAppUser(tokenStr string, audiences []string) (AppUser, error) {
 	if len(audiences) == 0 {
-		return "", false, errors.New("auth: no app audience to check the token against")
+		return AppUser{}, errors.New("auth: no app audience to check the token against")
 	}
 	claims, err := v.verifyClaimsFor(tokenStr, func(claims map[string]interface{}) error {
 		for _, a := range audiences {
@@ -352,19 +361,47 @@ func (v *Verifier) AuthenticateAppUser(tokenStr string, audiences []string) (sub
 		return fmt.Errorf("auth: token audience is not this app (%v)", audiences)
 	})
 	if err != nil {
-		return "", false, err
+		return AppUser{}, err
 	}
-	sub, _ = claims["sub"].(string)
+	return appUserFrom(claims)
+}
+
+// AuthenticateSubject validates a bearer presented inside a session already
+// authenticated as sub. The audience is not the check here, the subject is:
+// the session has proved who this is, and a token naming that same subject
+// can only add what the identity provider said about them. A token naming
+// anyone else is refused.
+func (v *Verifier) AuthenticateSubject(tokenStr, sub string) (AppUser, error) {
 	if sub == "" {
-		return "", false, errors.New("auth: token names no subject")
+		return AppUser{}, errors.New("auth: no subject to check the token against")
+	}
+	claims, err := v.verifyClaimsFor(tokenStr, func(claims map[string]interface{}) error {
+		if got, _ := claims["sub"].(string); got != sub {
+			return errors.New("auth: token names another subject")
+		}
+		return nil
+	})
+	if err != nil {
+		return AppUser{}, err
+	}
+	return appUserFrom(claims)
+}
+
+func appUserFrom(claims map[string]interface{}) (AppUser, error) {
+	var u AppUser
+	u.Sub, _ = claims["sub"].(string)
+	if u.Sub == "" {
+		return AppUser{}, errors.New("auth: token names no subject")
 	}
 	switch w := claims["wallet"].(type) {
 	case bool:
-		wallet = w
+		u.Wallet = w
 	case string:
-		wallet = w == "true"
+		u.Wallet = w == "true"
 	}
-	return sub, wallet, nil
+	u.Email, _ = claims["email"].(string)
+	u.Name, _ = claims["name"].(string)
+	return u, nil
 }
 
 // Audience returns the expected OIDC audience — also the namespace prefix
