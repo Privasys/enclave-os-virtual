@@ -336,7 +336,8 @@ func (v *Verifier) AuthenticateCaller(tokenStr string) (sub string, wallet bool,
 // AppUser is what a verified end-user bearer says about the person. Email and
 // Name are empty unless this token carries them: the identity provider keeps
 // no profile, so only the token minted at the code exchange does, never one
-// minted by refresh.
+// minted by refresh. Email is an address the token says was proved; one the
+// holder merely typed is left out.
 type AppUser struct {
 	Sub    string
 	Wallet bool // the sign-in was the wallet (the IdP's `wallet` marker)
@@ -399,7 +400,16 @@ func appUserFrom(claims map[string]interface{}) (AppUser, error) {
 	case string:
 		u.Wallet = w == "true"
 	}
-	u.Email, _ = claims["email"].(string)
+	switch v := claims["email_verified"].(type) {
+	case bool:
+		if v {
+			u.Email, _ = claims["email"].(string)
+		}
+	case string:
+		if v == "true" {
+			u.Email, _ = claims["email"].(string)
+		}
+	}
 	u.Name, _ = claims["name"].(string)
 	return u, nil
 }

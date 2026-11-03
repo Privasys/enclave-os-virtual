@@ -50,7 +50,8 @@ const directSubHeader = "X-Privasys-Sub"
 // the runtime just verified. Present only on a token from the code exchange,
 // right after the sign-in: the identity provider keeps no profile, so a token
 // minted by refresh says nothing and the app stores these on first sight. The
-// name is percent-encoded UTF-8; decode it before use.
+// email is only ever an address the token says was proved. The name is
+// percent-encoded UTF-8; decode it before use.
 const (
 	emailHeader = "X-Privasys-Email"
 	nameHeader  = "X-Privasys-Name"

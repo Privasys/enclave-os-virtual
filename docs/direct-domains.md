@@ -106,7 +106,7 @@ success the token is removed and replaced by:
 |---|---|
 | `X-Privasys-Sub` | the token's subject (the same header the sealed leg carries) |
 | `X-Privasys-Attestation-Level` | `verified` when the sign-in was the wallet, `unverified` otherwise |
-| `X-Privasys-Email` | the token's `email` claim, when it has one |
+| `X-Privasys-Email` | the token's `email` claim, only when `email_verified` says it was proved |
 | `X-Privasys-Name` | the token's `name` claim, when it has one, percent-encoded UTF-8 |
 
 The identity provider keeps no profile, so only the token from the code

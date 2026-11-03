@@ -76,7 +76,7 @@ func (i *identityIssuer) token(t *testing.T, sub, aud string, extra map[string]a
 	return input + "." + b64(sig)
 }
 
-var withProfile = map[string]any{"email": "ada@example.com", "name": "Zoë O'Neil"}
+var withProfile = map[string]any{"email": "ada@example.com", "email_verified": "true", "name": "Zoë O'Neil"}
 
 const encodedName = "Zo%C3%AB%20O%27Neil"
 

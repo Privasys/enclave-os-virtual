@@ -32,8 +32,17 @@ func TestAuthenticateAppUser(t *testing.T) {
 	if u, err = f.verifier.AuthenticateAppUser(tok([]any{"other", "shop.example.com"}, map[string]any{"wallet": "true"}), app); err != nil || !u.Wallet {
 		t.Fatalf("hostname audience with the wallet marker: %+v err=%v", u, err)
 	}
-	if u, err = f.verifier.AuthenticateAppUser(tok(app[0], map[string]any{"email": "ada@example.com", "name": "Ada"}), app); err != nil || u.Email != "ada@example.com" || u.Name != "Ada" {
+	if u, err = f.verifier.AuthenticateAppUser(tok(app[0], map[string]any{"email": "ada@example.com", "email_verified": "true", "name": "Ada"}), app); err != nil || u.Email != "ada@example.com" || u.Name != "Ada" {
 		t.Fatalf("the token's profile: %+v err=%v", u, err)
+	}
+	for _, claims := range []map[string]any{
+		{"email": "typed@example.com", "name": "Ada"},
+		{"email": "typed@example.com", "email_verified": false, "name": "Ada"},
+		{"email": "typed@example.com", "email_verified": "false", "name": "Ada"},
+	} {
+		if u, err = f.verifier.AuthenticateAppUser(tok(app[0], claims), app); err != nil || u.Email != "" || u.Name != "Ada" {
+			t.Fatalf("an unproved address: %v gave %+v err=%v", claims, u, err)
+		}
 	}
 	for name, bad := range map[string]string{
 		"platform audience": tok("enclave-os-virtual", nil),
