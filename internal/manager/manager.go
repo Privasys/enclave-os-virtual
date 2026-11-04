@@ -504,10 +504,9 @@ func hostOnly(h string) string {
 // Start starts the management API server. It blocks until the context is
 // cancelled, then gracefully shuts down.
 func (s *Server) Start(ctx context.Context) error {
-	// Replay persisted apps before opening the listener so they begin
-	// pulling/starting immediately. Each Load is async (the launcher
-	// returns once the container record is registered as "pulling"),
-	// so this loop is fast even for large images.
+	// Replay persisted apps before opening the listener: each one is
+	// announced before this returns, so the first status query already
+	// lists it. The loads themselves run in goroutines, one after another.
 	if err := s.replayRegistry(ctx); err != nil {
 		s.log.Warn("registry replay failed", zap.Error(err))
 	}
@@ -1187,7 +1186,10 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 	// the load goroutine. container.Pull registers a "pulling" stub
 	// before the network call so the container is visible in status
 	// queries right away.
+	loadDone := s.launcher.AnnounceLoad(req.Name, req.Image)
 	go func() {
+		defer loadDone()
+		defer s.launcher.TakeLoadTurn(req.Name)()
 		// Use Background ctx: r.Context() is cancelled when this
 		// handler returns, which would abort the pull mid-flight.
 		//
@@ -2285,7 +2287,10 @@ func (s *Server) replayRegistry(ctx context.Context) error {
 
 	for _, e := range deduped {
 		req := e
+		loadDone := s.launcher.AnnounceLoad(req.Name, req.Image)
 		go func() {
+			defer loadDone()
+			defer s.launcher.TakeLoadTurn(req.Name)()
 			// Wait until launcher.Run() has connected to containerd —
 			// otherwise launcher.Load() panics dereferencing a nil
 			// l.mgr. Server.Start runs in parallel with launcher.Run,

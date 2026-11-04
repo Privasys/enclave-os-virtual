@@ -689,6 +689,11 @@ type Launcher struct {
 	failMu   sync.Mutex
 	failures map[string]string
 
+	// loading counts the loads announced per container and not finished yet,
+	// and loadTurns runs one load per container at a time. Guarded by failMu.
+	loading   map[string]*pendingLoad
+	loadTurns map[string]*sync.Mutex
+
 	// billingFrozen tracks the host-driven billing freeze per container
 	// (name → reason, e.g. "credits_exhausted"). A present entry means the
 	// container's task is paused (cgroup freezer) and the manager returns 503
@@ -768,6 +773,8 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		attributeProviders: make(map[string]string),
 		surfaces:           make(map[string]*surfaces.Surfaces),
 		failures:           make(map[string]string),
+		loading:            make(map[string]*pendingLoad),
+		loadTurns:          make(map[string]*sync.Mutex),
 		billingFrozen:      make(map[string]string),
 		containerTokens:    make(map[string]string),
 		resourceDecls:      make(map[string][]ResourceDecl),
@@ -981,6 +988,56 @@ func (l *Launcher) clearFailure(name string) {
 	l.failMu.Lock()
 	delete(l.failures, name)
 	l.failMu.Unlock()
+}
+
+// pendingLoad is a load the manager has accepted but not finished.
+type pendingLoad struct {
+	image string
+	count int
+}
+
+// AnnounceLoad records that a load of this container is on its way, and returns
+// the function that ends the record. Loads queue behind one another (Load holds
+// l.mu for a whole image import), so a replayed or redeployed container can wait
+// minutes before anything else mentions it. Until then the status report lists
+// it as pulling: the control plane repairs a container it finds absent by
+// redeploying it, which would restart the wait.
+func (l *Launcher) AnnounceLoad(name, image string) (done func()) {
+	l.failMu.Lock()
+	defer l.failMu.Unlock()
+	p := l.loading[name]
+	if p == nil {
+		p = &pendingLoad{}
+		l.loading[name] = p
+	}
+	p.image = image
+	p.count++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.failMu.Lock()
+			defer l.failMu.Unlock()
+			if p.count--; p.count == 0 {
+				delete(l.loading, name)
+			}
+		})
+	}
+}
+
+// TakeLoadTurn blocks until no other load of this container is running, and
+// returns the function that gives the turn back. Two overlapping loads of one
+// container would otherwise have the loser fail as "already loaded" and mark
+// the winner's healthy container failed.
+func (l *Launcher) TakeLoadTurn(name string) (release func()) {
+	l.failMu.Lock()
+	turn := l.loadTurns[name]
+	if turn == nil {
+		turn = &sync.Mutex{}
+		l.loadTurns[name] = turn
+	}
+	l.failMu.Unlock()
+	turn.Lock()
+	return turn.Unlock
 }
 
 // ContainerCount returns the number of running containers.
@@ -2534,11 +2591,10 @@ func (l *Launcher) VolumeDelete(name string) error {
 // control plane read the enclave as unreachable. The container list and
 // the freeze/failure maps each have their own locks.
 func (l *Launcher) StatusReport() []ContainerStatus {
-	mgr := l.mgr
-	if mgr == nil {
-		return nil
+	var containers []*container.ManagedContainer
+	if mgr := l.mgr; mgr != nil {
+		containers = mgr.List()
 	}
-	containers := mgr.List()
 	l.freezeMu.RLock()
 	defer l.freezeMu.RUnlock()
 	l.failMu.Lock()
@@ -2563,6 +2619,16 @@ func (l *Launcher) StatusReport() []ContainerStatus {
 			}
 		}
 		result = append(result, cs)
+	}
+	for name, p := range l.loading {
+		if !seen[name] {
+			seen[name] = true
+			result = append(result, ContainerStatus{
+				Name:   name,
+				Image:  p.image,
+				Status: string(container.StatusPulling),
+			})
+		}
 	}
 	// A failed pull removes the containerd stub, so the container would
 	// otherwise vanish from this report and the control plane would loop
