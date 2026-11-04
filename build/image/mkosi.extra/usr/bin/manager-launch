@@ -24,7 +24,7 @@ exec /usr/bin/manager serve \
     --attestation-servers "${ATTESTATION_SERVERS:-}" \
     --caddy-listen :443 \
     --extensions-dir /run/manager/extensions \
-    --machine-name "$(hostname)" \
+    --machine-name "${MACHINE_NAME:-$(hostname)}" \
     --hostname "${HOSTNAME_SUFFIX:-}" \
     --platform-hostname "${PLATFORM_HOSTNAME:-}" \
     --proxy-url "${PROXY_URL:-http://localhost:8080}" \
