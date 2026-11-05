@@ -1,6 +1,6 @@
 # Hold the NVIDIA 595-server userspace at the version of the CC kernel
 # modules that actually load (the signed bundle from the cvm-images kernel-v*
-# release, nvidia-cc-bundle-signed-595.91.07-7.0.0-38-generic). libcuda,
+# release, nvidia-cc-bundle-signed-595.91.07-7.0.0-42-generic). libcuda,
 # nvidia-smi and the firmware must match the loaded module exactly, or the
 # GPU never comes up.
 #

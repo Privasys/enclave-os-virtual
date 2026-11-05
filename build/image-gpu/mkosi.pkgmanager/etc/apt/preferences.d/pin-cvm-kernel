@@ -1,4 +1,4 @@
-# Pin the patched cvm-images kernel ABI (7.0.0-38-generic) and block any
+# Pin the patched cvm-images kernel ABI (7.0.0-42-generic) and block any
 # newer Ubuntu HWE kernel from being installed alongside it.
 #
 # Why: nvidia-driver-595-server-open and various other Recommends pull in
