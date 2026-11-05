@@ -60,3 +60,6 @@ cat > '/usr/lib/systemd/system/dev-mapper-data\x2dcrypt.device.d/50-luks-format-
 JobRunningTimeoutSec=15min
 DROPIN
 echo "data-crypt device timeout drop-in installed (gpu)"
+
+# The guest clock is kept correct from NTS (etc/chrony/chrony.conf).
+systemctl enable chrony.service
