@@ -343,6 +343,9 @@ type AppUser struct {
 	Wallet bool // the sign-in was the wallet (the IdP's `wallet` marker)
 	Email  string
 	Name   string
+	// Expires is the token's exp: a connection opened on it (a WebSocket on
+	// a direct name) ends then.
+	Expires time.Time
 }
 
 // AuthenticateAppUser validates a bearer an end user presents to ONE app:
@@ -411,6 +414,9 @@ func appUserFrom(claims map[string]interface{}) (AppUser, error) {
 		}
 	}
 	u.Name, _ = claims["name"].(string)
+	if exp, ok := claims["exp"].(float64); ok {
+		u.Expires = time.Unix(int64(exp), 0)
+	}
 	return u, nil
 }
 

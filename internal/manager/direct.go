@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
+	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 	"go.uber.org/zap"
 )
 
@@ -145,32 +146,113 @@ func (s *Server) assertSealedIdentity(r *http.Request) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), bearerSubjectKey{}, true))
 }
 
+// A browser cannot set a header on a WebSocket, only its subprotocols. So
+// the auth SDK carries the token on a direct name's WebSocket as two
+// subprotocols, wsProtocol and wsBearerPrefix + token. The runtime takes the
+// token out before the app sees the request, and answers wsProtocol on the
+// handshake (a browser drops a socket whose server picks none of those it
+// offered) unless the app picked one of the others.
+const (
+	wsProtocolHeader = "Sec-WebSocket-Protocol"
+	wsProtocol       = "privasys.v1"
+	wsBearerPrefix   = "privasys.bearer."
+)
+
+// wsProtocolKey marks a request whose WebSocket handshake answers wsProtocol.
+type wsProtocolKey struct{}
+
+// takeWSBearer removes the runtime's subprotocols from h and returns the
+// token one of them carried, if any. Every other subprotocol stays for the
+// app.
+func takeWSBearer(h http.Header) (token string, ok bool) {
+	var rest []string
+	for _, line := range h.Values(wsProtocolHeader) {
+		for _, p := range strings.Split(line, ",") {
+			p = strings.TrimSpace(p)
+			switch {
+			case p == "":
+			case p == wsProtocol:
+				ok = true
+			case strings.HasPrefix(p, wsBearerPrefix):
+				token = strings.TrimPrefix(p, wsBearerPrefix)
+			default:
+				rest = append(rest, p)
+			}
+		}
+	}
+	if !ok && token == "" {
+		return "", false
+	}
+	h.Del(wsProtocolHeader)
+	if len(rest) > 0 {
+		h.Set(wsProtocolHeader, strings.Join(rest, ", "))
+	}
+	return token, true
+}
+
+// answerWSProtocol is the app proxy's response hook for a handshake marked
+// by serveDirect.
+func answerWSProtocol(resp *http.Response) {
+	if resp.StatusCode != http.StatusSwitchingProtocols || resp.Request == nil {
+		return
+	}
+	if resp.Request.Context().Value(wsProtocolKey{}) == nil || resp.Header.Get(wsProtocolHeader) != "" {
+		return
+	}
+	resp.Header.Set(wsProtocolHeader, wsProtocol)
+}
+
+// isUpgrade reports whether r asks to switch protocols (a WebSocket).
+func isUpgrade(r *http.Request) bool {
+	for _, v := range r.Header.Values("Connection") {
+		for _, t := range strings.Split(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(t), "upgrade") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // serveDirect prepares a private request on a direct adopter name, for an
 // app that opted in (surfaces.direct "private"). An end user's privasys.id
-// token in Authorization, minted for this app, is verified here and replaced
-// by the subject, the sign-in assurance and any profile the token carries; the
-// app never sees the token. No
-// token is an anonymous request. ok is false when it was answered here.
-func (s *Server) serveDirect(w http.ResponseWriter, r *http.Request) bool {
+// token in Authorization, or for a WebSocket in its subprotocols, minted for
+// this app, is verified here and replaced by the subject, the sign-in
+// assurance and any profile the token carries; the app never sees the token.
+// No token is an anonymous request. A WebSocket opened on a token closes when
+// the token expires, and the client opens it again with a fresh one. ok is
+// false when the request was answered here.
+func (s *Server) serveDirect(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 	r.Header.Del(directSubHeader)
 	r.Header.Del(AttestationLevelHeader)
 	stripAssertedProfile(r.Header)
 	r.Header.Set(TransportHeader, TransportDirect)
 
-	authz := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authz, "Bearer ") {
-		return true
+	token := ""
+	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
+		token = strings.TrimPrefix(authz, "Bearer ")
+	}
+	if isUpgrade(r) {
+		if t, ok := takeWSBearer(r.Header); ok {
+			r = r.WithContext(context.WithValue(r.Context(), wsProtocolKey{}, true))
+			if token == "" {
+				token = t
+			}
+		}
+	}
+	if token == "" {
+		return r, true
 	}
 	if s.verifier == nil {
 		s.jsonError(w, http.StatusUnauthorized, "this runtime has no identity provider to check the token")
-		return false
+		return r, false
 	}
 	host := hostOnly(r.Host)
-	u, err := s.verifier.AuthenticateAppUser(strings.TrimPrefix(authz, "Bearer "), s.appAudiences(host))
+	u, err := s.verifier.AuthenticateAppUser(token, s.appAudiences(host))
 	if err != nil {
 		s.log.Info("direct bearer refused", zap.String("host", host), zap.Error(err))
 		s.jsonError(w, http.StatusUnauthorized, "the token is not valid for this app")
-		return false
+		return r, false
 	}
 	r.Header.Del("Authorization")
 	r.Header.Set(directSubHeader, u.Sub)
@@ -180,7 +262,20 @@ func (s *Server) serveDirect(w http.ResponseWriter, r *http.Request) bool {
 		level = "verified"
 	}
 	r.Header.Set(AttestationLevelHeader, level)
-	return true
+	if isUpgrade(r) && !u.Expires.IsZero() {
+		// The app proxy closes an upgraded connection when its request's
+		// context ends. The token was just checked against trusted time, so
+		// its remaining life is measured from there.
+		now, err := trustedtime.Now()
+		if err != nil {
+			s.jsonError(w, http.StatusServiceUnavailable, "no trusted time to bound the connection")
+			return r, false
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), u.Expires.Sub(now))
+		context.AfterFunc(r.Context(), cancel)
+		r = r.WithContext(ctx)
+	}
+	return r, true
 }
 
 // appAudiences are the audiences an end user's token may carry for the app

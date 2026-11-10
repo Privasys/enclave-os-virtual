@@ -117,7 +117,7 @@ func TestDirectAssertsTheTokensProfile(t *testing.T) {
 	s, iss := newIdentityServer(t)
 
 	r := directRequest(iss.token(t, "s1", surfHost, withProfile))
-	if !s.serveDirect(httptest.NewRecorder(), r) {
+	if _, ok := s.serveDirect(httptest.NewRecorder(), r); !ok {
 		t.Fatal("refused")
 	}
 	wantProfile(t, r, "ada@example.com", encodedName)
@@ -126,7 +126,7 @@ func TestDirectAssertsTheTokensProfile(t *testing.T) {
 	}
 
 	r = directRequest(iss.token(t, "s1", surfHost, nil))
-	if !s.serveDirect(httptest.NewRecorder(), r) {
+	if _, ok := s.serveDirect(httptest.NewRecorder(), r); !ok {
 		t.Fatal("refused")
 	}
 	wantProfile(t, r, "", "")
@@ -136,7 +136,7 @@ func TestDirectAssertsTheTokensProfile(t *testing.T) {
 
 	// Anonymous: an inbound profile never reaches the app.
 	r = directRequest("")
-	if !s.serveDirect(httptest.NewRecorder(), r) {
+	if _, ok := s.serveDirect(httptest.NewRecorder(), r); !ok {
 		t.Fatal("refused")
 	}
 	wantProfile(t, r, "", "")

@@ -309,7 +309,7 @@ func TestDirectPrivateOptIn(t *testing.T) {
 	})
 	r.Header.Set(edgeHeader, "direct")
 	rec := httptest.NewRecorder()
-	if !s.serveDirect(rec, r) {
+	if _, ok := s.serveDirect(rec, r); !ok {
 		t.Fatalf("anonymous direct request refused: %d", rec.Code)
 	}
 	if r.Header.Get("X-Privasys-Sub") != "" || r.Header.Get(AttestationLevelHeader) != "" {
@@ -323,7 +323,7 @@ func TestDirectPrivateOptIn(t *testing.T) {
 	r = clearReq("GET", "/api/v1/me", map[string]string{"Authorization": "Bearer x.y.z"})
 	r.Header.Set(edgeHeader, "direct")
 	rec = httptest.NewRecorder()
-	if s.serveDirect(rec, r) || rec.Code != http.StatusUnauthorized {
+	if _, ok := s.serveDirect(rec, r); ok || rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unverifiable bearer: ok, code %d; want refused with 401", rec.Code)
 	}
 

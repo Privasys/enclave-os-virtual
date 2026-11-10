@@ -412,6 +412,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		ModifyResponse: func(resp *http.Response) error {
 			resp.Header.Del(billingChargedHeader)
 			resp.Header.Del(billingPriceHeader)
+			answerWSProtocol(resp)
 			return nil
 		},
 		// Stream SSE / chunked bodies promptly (e.g. /v1/chat/completions).
@@ -739,7 +740,8 @@ func (s *Server) Start(ctx context.Context) error {
 			// surface and which is now served anonymous by construction.
 			if r.Header.Get(TransportHeader) == "" {
 				if isDirectLeg(r) && !s.clearAllowed(r) && s.surfacesOf(host).DirectPrivate() {
-					if !s.serveDirect(w, r) {
+					var ok bool
+					if r, ok = s.serveDirect(w, r); !ok {
 						return
 					}
 				} else if isClearLeg(r) {
