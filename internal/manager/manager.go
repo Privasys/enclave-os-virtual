@@ -1188,12 +1188,18 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 	// the load goroutine. container.Pull registers a "pulling" stub
 	// before the network call so the container is visible in status
 	// queries right away.
-	loadDone := s.launcher.AnnounceLoad(req.Name, req.Image)
+	loadCtx, loadDone := s.launcher.AnnounceLoad(req.Name, req.Image)
 	go func() {
 		defer loadDone()
 		defer s.launcher.TakeLoadTurn(req.Name)()
-		// Use Background ctx: r.Context() is cancelled when this
-		// handler returns, which would abort the pull mid-flight.
+		// A stop that came while this load waited for its turn ends it.
+		if loadCtx.Err() != nil {
+			s.log.Info("load cancelled before it started", zap.String("name", req.Name))
+			return
+		}
+		// Run under the load's own ctx, not r.Context(): that is cancelled
+		// when this handler returns, which would abort the pull mid-flight.
+		// Only a stop (CancelLoads) ends loadCtx.
 		//
 		// Replace-on-reload: Load rejects an already-loaded name, so a
 		// re-deploy with a new image or port would otherwise be a silent
@@ -1208,7 +1214,13 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 			s.log.Warn("pre-load unload failed (continuing with load)",
 				zap.String("name", req.Name), zap.Error(err))
 		}
-		if _, err := s.launcher.Load(context.Background(), req); err != nil {
+		if _, err := s.launcher.Load(loadCtx, req); err != nil {
+			if errors.Is(context.Cause(loadCtx), launcher.ErrLoadCancelled) {
+				// Stopped on purpose: not a failure to report.
+				s.log.Info("load cancelled by a stop", zap.String("name", req.Name), zap.Error(err))
+				s.launcher.AbandonLoad(req.Name)
+				return
+			}
 			s.log.Error("async load failed",
 				zap.String("name", req.Name),
 				zap.Error(err),
@@ -1226,12 +1238,16 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 		// exists), so the persisted request never carries it.
 		req.Restore = nil
 		req.NewVolume = false
-		if err := s.registry.Save(req); err != nil {
-			s.log.Warn("registry save failed (container is running but won't auto-restart)",
-				zap.String("name", req.Name),
-				zap.Error(err),
-			)
-		}
+		// Not when a stop came in just after the load finished: its unload
+		// removes the container, and a saved entry would bring it back at boot.
+		s.launcher.CommitLoad(loadCtx, func() {
+			if err := s.registry.Save(req); err != nil {
+				s.log.Warn("registry save failed (container is running but won't auto-restart)",
+					zap.String("name", req.Name),
+					zap.Error(err),
+				)
+			}
+		})
 		containersLoaded.Set(float64(s.launcher.ContainerCount()))
 	}()
 
@@ -1285,6 +1301,15 @@ func (s *Server) handleUnloadContainer(w http.ResponseWriter, r *http.Request) {
 		zap.String("auth_source", result.Source),
 		zap.String("auth_subject", result.Subject),
 	)
+
+	// A stop wins over a load still on its way: cancel it (and any queued
+	// behind it) first, so a stuck image download cannot keep the app from
+	// stopping. The cancel comes before Unload takes the launcher lock, so a
+	// load past its download either finished first (and is unloaded below) or
+	// sees the cancel and records nothing.
+	if n := s.launcher.CancelLoads(name); n > 0 {
+		s.log.Info("cancelled loads on their way", zap.String("name", name), zap.Int("loads", n))
+	}
 
 	if err := s.launcher.Unload(r.Context(), name); err != nil {
 		// "Not loaded" is not necessarily a failure, and treating it as one
@@ -2289,10 +2314,14 @@ func (s *Server) replayRegistry(ctx context.Context) error {
 
 	for _, e := range deduped {
 		req := e
-		loadDone := s.launcher.AnnounceLoad(req.Name, req.Image)
+		loadCtx, loadDone := s.launcher.AnnounceLoad(req.Name, req.Image)
 		go func() {
 			defer loadDone()
 			defer s.launcher.TakeLoadTurn(req.Name)()
+			if loadCtx.Err() != nil {
+				s.log.Info("replay cancelled before it started", zap.String("name", req.Name))
+				return
+			}
 			// Wait until launcher.Run() has connected to containerd —
 			// otherwise launcher.Load() panics dereferencing a nil
 			// l.mgr. Server.Start runs in parallel with launcher.Run,
@@ -2311,7 +2340,12 @@ func (s *Server) replayRegistry(ctx context.Context) error {
 				zap.String("name", req.Name),
 				zap.String("image", req.Image),
 			)
-			if _, err := s.launcher.Load(context.Background(), req); err != nil {
+			if _, err := s.launcher.Load(loadCtx, req); err != nil {
+				if errors.Is(context.Cause(loadCtx), launcher.ErrLoadCancelled) {
+					s.log.Info("replay cancelled by a stop", zap.String("name", req.Name), zap.Error(err))
+					s.launcher.AbandonLoad(req.Name)
+					return
+				}
 				s.log.Warn("replay load failed",
 					zap.String("name", req.Name),
 					zap.Error(err),

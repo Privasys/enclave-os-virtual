@@ -376,8 +376,11 @@ func (m *Manager) Pull(ctx context.Context, spec manifest.Container, auth *Regis
 		MaxIdleConns:        10,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 30 * time.Second,
-		ForceAttemptHTTP2:   false,
-		TLSClientConfig:     &tls.Config{NextProtos: []string{"http/1.1"}},
+		// A registry that accepts the request and never answers would
+		// otherwise hold the pull until the stall watch below ends it.
+		ResponseHeaderTimeout: 2 * time.Minute,
+		ForceAttemptHTTP2:     false,
+		TLSClientConfig:       &tls.Config{NextProtos: []string{"http/1.1"}},
 	}
 	httpClient := &http.Client{Transport: httpTransport}
 	resOpts := docker.ResolverOptions{Client: httpClient}
@@ -400,6 +403,21 @@ func (m *Manager) Pull(ctx context.Context, spec manifest.Container, auth *Regis
 	}
 	resolver := docker.NewResolver(resOpts)
 
+	// End the pull if it stops receiving bytes (see PullStallTimeout). It
+	// counts the blobs fetched and the bytes of the ones still arriving.
+	pullCtx, cancelPull := context.WithCancelCause(ctx)
+	defer cancelPull(nil)
+	go watchPullStall(pullCtx, cancelPull, pullStallCheck, PullStallTimeout, func() int64 {
+		progressMu.Lock()
+		fetched := fetchedSize
+		digests := make([]string, 0, len(seen))
+		for d := range seen {
+			digests = append(digests, d.String())
+		}
+		progressMu.Unlock()
+		return fetched + m.ingestedBytes(pullCtx, digests)
+	})
+
 	pullOnce := func() (client.Image, error) {
 		// Reset progress trackers per attempt so that retries don't
 		// double-count bytes from a previous failed attempt.
@@ -409,7 +427,7 @@ func (m *Manager) Pull(ctx context.Context, spec manifest.Container, auth *Regis
 		seen = make(map[godigest.Digest]bool)
 		progressMu.Unlock()
 
-		return m.client.Pull(ctx, spec.Image,
+		return m.client.Pull(pullCtx, spec.Image,
 			client.WithPullUnpack,
 			client.WithResolver(resolver),
 			client.WithImageHandlerWrapper(func(inner images.Handler) images.Handler {
@@ -456,8 +474,10 @@ func (m *Manager) Pull(ctx context.Context, spec manifest.Container, auth *Regis
 		if err == nil {
 			break
 		}
-		if ctx.Err() != nil {
-			break // context cancelled, no point retrying
+		if pullCtx.Err() != nil {
+			// Cancelled or stalled: say which, not just "context canceled".
+			err = context.Cause(pullCtx)
+			break
 		}
 		// Only retry on errors that look transient.
 		es := err.Error()
@@ -480,8 +500,8 @@ func (m *Manager) Pull(ctx context.Context, spec manifest.Container, auth *Regis
 			zap.Error(err),
 		)
 		select {
-		case <-ctx.Done():
-			err = ctx.Err()
+		case <-pullCtx.Done():
+			err = context.Cause(pullCtx)
 		case <-time.After(backoff):
 		}
 	}
@@ -965,6 +985,17 @@ func (m *Manager) forceRemoveOrphan(ctx context.Context, name string) {
 }
 
 // Stop stops and removes a container.
+// Forget drops the entry a pull registered for a container that was never
+// created, so a load abandoned after its pull leaves nothing listed. A created
+// container is left alone: Stop removes those.
+func (m *Manager) Forget(name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if mc, ok := m.containers[name]; ok && mc.Task == nil && mc.Container == nil {
+		delete(m.containers, name)
+	}
+}
+
 func (m *Manager) Stop(ctx context.Context, name string) error {
 	ctx = m.ctx(ctx)
 

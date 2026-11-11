@@ -694,6 +694,10 @@ type Launcher struct {
 	loading   map[string]*pendingLoad
 	loadTurns map[string]*sync.Mutex
 
+	// reserved holds the loads past their checks whose image is still being
+	// fetched, so l.mu is not held across the download. Guarded by l.mu.
+	reserved map[string]loadReservation
+
 	// billingFrozen tracks the host-driven billing freeze per container
 	// (name → reason, e.g. "credits_exhausted"). A present entry means the
 	// container's task is paused (cgroup freezer) and the manager returns 503
@@ -775,6 +779,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		failures:           make(map[string]string),
 		loading:            make(map[string]*pendingLoad),
 		loadTurns:          make(map[string]*sync.Mutex),
+		reserved:           make(map[string]loadReservation),
 		billingFrozen:      make(map[string]string),
 		containerTokens:    make(map[string]string),
 		resourceDecls:      make(map[string][]ResourceDecl),
@@ -993,35 +998,75 @@ func (l *Launcher) clearFailure(name string) {
 // pendingLoad is a load the manager has accepted but not finished.
 type pendingLoad struct {
 	image string
-	count int
+	// cancels holds one entry per announced load, so a stop can end them all.
+	cancels map[*int]context.CancelCauseFunc
 }
 
-// AnnounceLoad records that a load of this container is on its way, and returns
-// the function that ends the record. Loads queue behind one another (Load holds
-// l.mu for a whole image import), so a replayed or redeployed container can wait
-// minutes before anything else mentions it. Until then the status report lists
-// it as pulling: the control plane repairs a container it finds absent by
-// redeploying it, which would restart the wait.
-func (l *Launcher) AnnounceLoad(name, image string) (done func()) {
+// ErrLoadCancelled is why a load ends when its container is stopped while the
+// load is still on its way.
+var ErrLoadCancelled = errors.New("load cancelled: the container was stopped")
+
+// AnnounceLoad records that a load of this container is on its way. It returns
+// the context the load must run under, which CancelLoads ends, and the function
+// that ends the record. A load of one app queues behind the one before it, so a
+// replayed or redeployed container can wait minutes before anything else
+// mentions it. Until then the status report lists it as pulling: the control
+// plane repairs a container it finds absent by redeploying it, which would
+// restart the wait.
+func (l *Launcher) AnnounceLoad(name, image string) (ctx context.Context, done func()) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	key := new(int)
 	l.failMu.Lock()
 	defer l.failMu.Unlock()
 	p := l.loading[name]
 	if p == nil {
-		p = &pendingLoad{}
+		p = &pendingLoad{cancels: make(map[*int]context.CancelCauseFunc)}
 		l.loading[name] = p
 	}
 	p.image = image
-	p.count++
+	p.cancels[key] = cancel
 	var once sync.Once
-	return func() {
+	return ctx, func() {
 		once.Do(func() {
 			l.failMu.Lock()
 			defer l.failMu.Unlock()
-			if p.count--; p.count == 0 {
+			delete(p.cancels, key)
+			if len(p.cancels) == 0 {
 				delete(l.loading, name)
 			}
+			cancel(nil)
 		})
 	}
+}
+
+// CancelLoads ends every announced load of this container: the one running and
+// the ones queued behind it. A stop must win over a load still on its way, or a
+// stuck pull could only be cleared by restarting the host.
+func (l *Launcher) CancelLoads(name string) int {
+	l.failMu.Lock()
+	defer l.failMu.Unlock()
+	p := l.loading[name]
+	if p == nil {
+		return 0
+	}
+	for _, cancel := range p.cancels {
+		cancel(ErrLoadCancelled)
+	}
+	return len(p.cancels)
+}
+
+// CommitLoad runs commit (recording a finished load, so it replays at boot)
+// unless the load was cancelled, and reports whether it ran. It is atomic with
+// CancelLoads: a stop that cancels first is never undone by the commit, and one
+// that comes after it finds the record to remove.
+func (l *Launcher) CommitLoad(ctx context.Context, commit func()) bool {
+	l.failMu.Lock()
+	defer l.failMu.Unlock()
+	if ctx.Err() != nil {
+		return false
+	}
+	commit()
+	return true
 }
 
 // TakeLoadTurn blocks until no other load of this container is running, and
@@ -1242,6 +1287,9 @@ func (l *Launcher) resolveSessionRelayKey(ctx context.Context, req LoadRequest, 
 		return
 	}
 
+	// Load calls this holding l.mu: a vault that never answers must not hold it.
+	ctx, cancel := context.WithTimeout(ctx, vaultCallTimeout)
+	defer cancel()
 	seedHex, _, _, err := vaultkey.ResolveOrProvision(ctx, l.log, vaultkey.Config{
 		Endpoints:            req.VaultEndpoints,
 		MrenclaveHex:         req.VaultMrenclave,
@@ -1549,14 +1597,6 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// The owner's signed policy wins over the control plane's copy of it.
 	l.applySignedPolicy(&req)
 
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	// Check for duplicate name.
-	if _, exists := l.specs[req.Name]; exists {
-		return nil, fmt.Errorf("launcher: container %q already loaded", req.Name)
-	}
-
 	spec := req.toContainerSpec()
 
 	// Use the hostname from the deploy request for the Caddy route
@@ -1565,29 +1605,48 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		spec.Hostname = req.Hostname
 	}
 
-	// Check for duplicate hostname (should not happen with deterministic
-	// derivation, but guard against name collisions).
-	if spec.Hostname != "" {
-		for _, s := range l.specs {
-			if s.Hostname == spec.Hostname {
-				return nil, fmt.Errorf("launcher: hostname %q already in use by %q", spec.Hostname, s.Name)
-			}
-		}
+	// Under l.mu: the checks against the containers loaded and the loads on
+	// their way, a reservation of the name, hostname and port, and the image
+	// prune. The image download that follows runs WITHOUT l.mu, because every
+	// app call that reads launcher state waits on it: one stalled pull held it
+	// on 2026-11-11 and every app on prod m1 stopped answering.
+	l.mu.Lock()
+	if err := l.reserveLoadLocked(req.Name, loadReservation{image: req.Image, hostname: spec.Hostname, port: req.Port}); err != nil {
+		l.mu.Unlock()
+		return nil, err
 	}
+	defer l.releaseLoad(req.Name)
 
-	// Check for duplicate host port. Containers share the host network
-	// namespace, so two apps cannot both bind the same TCP port — if we
-	// let a second Load through, the container would crash on bind and
-	// the manager would be left with a STOPPED task and a dangling
-	// in-memory spec. This bit us after an unattended VM restart where
-	// the registry had two GPU apps both pinned to 8080.
-	if req.Port > 0 {
-		for _, s := range l.specs {
-			if s.Port == req.Port {
-				return nil, fmt.Errorf("launcher: host port %d already in use by %q", req.Port, s.Name)
-			}
+	// Reclaim disk BEFORE pulling: the containerd image store lives on the
+	// small persistent /data PD, images from every previously-deployed app
+	// version accumulate with no host to prune from, and a full store hangs
+	// the pull at "pulling" forever (2026-07-09 m1-tdx-france wedge). Keep the
+	// image about to be pulled, every currently-loaded container's image, the
+	// image of every load on its way (reserved), AND every image in the
+	// manager's registry (`desiredImages`) — the last is essential because
+	// replay loads apps CONCURRENTLY, so pruning on only the specs loaded so
+	// far would evict a sibling app's cached image mid-replay and, on a full
+	// disk, that re-pull never completes. Best-effort — a running image
+	// refuses delete and is skipped. It runs under l.mu, so a load that
+	// reserves after it cannot lose its image to it.
+	keep := map[string]bool{req.Image: true}
+	for _, s := range l.specs {
+		keep[s.Image] = true
+	}
+	for _, r := range l.reserved {
+		keep[r.image] = true
+	}
+	if l.desiredImages != nil {
+		for _, img := range l.desiredImages() {
+			keep[img] = true
 		}
 	}
+	if n, perr := l.mgr.PruneImages(ctx, keep); perr != nil {
+		l.log.Warn("image prune before pull failed (continuing)", zap.Error(perr))
+	} else if n > 0 {
+		l.log.Info("pruned unused images before pull", zap.Int("removed", n))
+	}
+	l.mu.Unlock()
 
 	// For a private image, export the pull credential from the owner's vault
 	// FIRST (the requested digest is known from the pinned ref, so we can stamp
@@ -1600,7 +1659,8 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		if derr != nil {
 			return nil, fmt.Errorf("launcher: %w", derr)
 		}
-		credBytes, err := vaultkey.Export(ctx, l.log, vaultkey.Config{
+		vctx, vcancel := context.WithTimeout(ctx, vaultCallTimeout)
+		credBytes, err := vaultkey.Export(vctx, l.log, vaultkey.Config{
 			Endpoints:            req.VaultEndpoints,
 			MrenclaveHex:         req.VaultMrenclave,
 			AttestationServerURL: req.VaultAttestationServer,
@@ -1608,6 +1668,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 			EnclaveID:            l.cfg.ToolSpecEnclaveID,
 			EnclaveToken:         l.cfg.ToolSpecEnclaveToken,
 		}, req.RegistrySecretHandle, reqDigest, parseAppID(req.AppId))
+		vcancel()
 		if err != nil {
 			return nil, fmt.Errorf("launcher: registry credential: %w", err)
 		}
@@ -1619,32 +1680,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 			zap.String("name", req.Name), zap.String("handle", req.RegistrySecretHandle))
 	}
 
-	// Reclaim disk BEFORE pulling: the containerd image store lives on the
-	// small persistent /data PD, images from every previously-deployed app
-	// version accumulate with no host to prune from, and a full store hangs
-	// the pull at "pulling" forever (2026-07-09 m1-tdx-france wedge). Keep the
-	// image about to be pulled, every currently-loaded container's image, AND
-	// every image in the manager's registry (`desiredImages`) — the last is
-	// essential because replay loads apps CONCURRENTLY, so pruning on only the
-	// specs loaded so far would evict a sibling app's cached image mid-replay
-	// and, on a full disk, that re-pull never completes. Best-effort — a
-	// running image refuses delete and is skipped. (l.mu is held.)
-	keep := map[string]bool{req.Image: true}
-	for _, s := range l.specs {
-		keep[s.Image] = true
-	}
-	if l.desiredImages != nil {
-		for _, img := range l.desiredImages() {
-			keep[img] = true
-		}
-	}
-	if n, perr := l.mgr.PruneImages(ctx, keep); perr != nil {
-		l.log.Warn("image prune before pull failed (continuing)", zap.Error(perr))
-	} else if n > 0 {
-		l.log.Info("pruned unused images before pull", zap.Int("removed", n))
-	}
-
-	// Pull image.
+	// Pull image (without l.mu; it ends by itself if it stalls).
 	l.log.Info("pulling image",
 		zap.String("name", req.Name),
 		zap.String("image", req.Image),
@@ -1728,6 +1764,16 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		}
 	}
 
+	// The rest changes launcher state, so it runs under l.mu again. A stop
+	// that came while the image was downloading ends the load here (the
+	// unload handler cancels ctx before it takes l.mu, so it cannot slip in
+	// between this check and the state recorded below).
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("launcher: %s: %w", req.Name, context.Cause(ctx))
+	}
+
 	// Provision per-container encrypted volume if requested. With a
 	// KeyHandle the DEK comes from (or, on first boot, is filled into)
 	// the vault constellation, so the volume survives host reboots and
@@ -1759,7 +1805,8 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 			if err := l.checkApprovedConstellation(req.AppId, req.VaultMrenclave, req.VaultEndpoints); err != nil {
 				return nil, fmt.Errorf("vault constellation: %w", err)
 			}
-			keyHex, origin, reconstructed, err := vaultkey.ResolveOrProvision(ctx, l.log, vaultkey.Config{
+			vctx, vcancel := context.WithTimeout(ctx, vaultCallTimeout)
+			keyHex, origin, reconstructed, err := vaultkey.ResolveOrProvision(vctx, l.log, vaultkey.Config{
 				Endpoints:            req.VaultEndpoints,
 				MrenclaveHex:         req.VaultMrenclave,
 				AttestationServerURL: req.VaultAttestationServer,
@@ -1784,6 +1831,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 					return l.volMgr.Reserve(req.Name, req.Storage)
 				},
 			}, req.KeyHandle, req.KeyCreationGrant, digest, parseAppID(req.AppId))
+			vcancel()
 			if err != nil {
 				return nil, fmt.Errorf("launcher: vault volume key: %w", err)
 			}
