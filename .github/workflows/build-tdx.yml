@@ -82,12 +82,36 @@ jobs:
             go-tdx-${{ runner.os }}-
 
       - name: Restore mkosi build cache
+        id: mkosicache
         uses: actions/cache@v5
         with:
-          path: build/image/mkosi.cache
+          # The repository metadata (mkosi.cache) and the downloaded .debs
+          # (mkosi.pkgcache). The key covers the config, Snapshot= included, so
+          # an exact hit holds exactly the package set this build installs and
+          # the build needs nothing from snapshot.ubuntu.com. A dev build and
+          # its prod build share the key: the profile is not part of it.
+          path: |
+            build/image/mkosi.cache
+            build/image/mkosi.pkgcache
           key: mkosi-tdx-${{ runner.os }}-${{ hashFiles('build/image/mkosi.conf', 'build/image/mkosi.profiles/**') }}
           restore-keys: |
             mkosi-tdx-${{ runner.os }}-
+
+      - name: Week of the year (runner apt cache key)
+        id: week
+        run: echo "w=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore runner apt packages
+        uses: actions/cache@v5
+        with:
+          # The build tools' .debs (Install mkosi and build dependencies), so
+          # they do not come from archive.ubuntu.com on every run. Weekly key:
+          # the runner image moves, and a stale .deb is simply downloaded anew.
+          path: ~/apt-debs
+          key: runner-apt-${{ runner.os }}-${{ steps.week.outputs.w }}
+          restore-keys: |
+            runner-apt-${{ runner.os }}-
+
       - name: Clone SDK siblings (go.mod replace directives)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -185,6 +209,10 @@ jobs:
         run: |
           sudo pip3 install --break-system-packages pefile \
             'mkosi @ https://github.com/systemd/mkosi/archive/refs/tags/v26.tar.gz'
+          # Seed apt's archive with the cached .debs; apt checks each against
+          # the signed index and downloads only what is missing or newer.
+          mkdir -p ~/apt-debs
+          sudo cp ~/apt-debs/*.deb /var/cache/apt/archives/ 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y \
             python3-pip bubblewrap systemd-container \
@@ -192,6 +220,7 @@ jobs:
             mtools dosfstools e2fsprogs \
             grub-efi-amd64-signed shim-signed \
             systemd-ukify systemd-boot-efi systemd-boot
+          cp /var/cache/apt/archives/*.deb ~/apt-debs/ 2>/dev/null || true
 
       - name: Recreate symlinks
         run: |
@@ -243,7 +272,14 @@ jobs:
         run: |
           chmod +x build/image/mkosi.extra/usr/bin/luks-setup
           cd build/image
-          mkdir -p mkosi.cache
+          mkdir -p mkosi.cache mkosi.pkgcache
+          # On an exact cache hit the metadata is the pinned snapshot's own:
+          # reuse it rather than sync it again. A partial hit (an older
+          # Snapshot=) must sync.
+          CACHE_ONLY=""
+          if [[ "${{ steps.mkosicache.outputs.cache-hit }}" == "true" ]]; then
+            CACHE_ONLY="--cache-only=metadata"
+          fi
           PROFILES="--profile gcp"
           # Dev-profile (SSH + debug tools, distinct ImageId/measurements) is
           # selected by the workflow_dispatch input OR by a tag ending in `-dev`
@@ -252,7 +288,14 @@ jobs:
           if [[ "${{ github.event.inputs.dev_profile }}" == "true" || "${{ github.ref_name }}" == *-dev ]]; then
             PROFILES="$PROFILES --profile dev"
           fi
-          sudo mkosi $PROFILES --cache-dir mkosi.cache build
+          sudo mkosi $PROFILES $CACHE_ONLY --cache-dir mkosi.cache --package-cache-dir mkosi.pkgcache build
+
+      - name: Make the mkosi cache readable for the cache save
+        if: always()
+        # mkosi runs as root; apt leaves root-only directories (lists/partial)
+        # that the runner user's cache save cannot read, and the save failed
+        # on every build until this step.
+        run: sudo chown -R "$(id -u):$(id -g)" build/image/mkosi.cache build/image/mkosi.pkgcache 2>/dev/null || true
 
       - name: Replace unsigned GRUB with Canonical-signed binary
         run: |

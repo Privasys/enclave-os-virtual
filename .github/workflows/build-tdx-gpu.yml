@@ -93,14 +93,35 @@ jobs:
             go-tdx-gpu-${{ runner.os }}-
 
       - name: Restore mkosi build cache
+        id: mkosicache
         uses: actions/cache@v5
         with:
-          # apt + downloaded .debs cached between builds. Keyed on mkosi
-          # configuration + APT pin files; invalidated when those change.
-          path: build/image-gpu/mkosi.cache
+          # The repository metadata (mkosi.cache) and the downloaded .debs
+          # (mkosi.pkgcache). The key covers the config, Snapshot= and the APT
+          # pin files included, so an exact hit holds exactly the package set
+          # this build installs and the build needs nothing from
+          # snapshot.ubuntu.com. A dev build and its prod build share the key.
+          path: |
+            build/image-gpu/mkosi.cache
+            build/image-gpu/mkosi.pkgcache
           key: mkosi-tdx-gpu-${{ runner.os }}-${{ hashFiles('build/image-gpu/mkosi.conf', 'build/image-gpu/mkosi.profiles/**', 'build/image-gpu/mkosi.pkgmanager/**', 'build/image/mkosi.conf') }}
           restore-keys: |
             mkosi-tdx-gpu-${{ runner.os }}-
+
+      - name: Week of the year (runner apt cache key)
+        id: week
+        run: echo "w=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore runner apt packages
+        uses: actions/cache@v5
+        with:
+          # The build tools' .debs (Install mkosi and build dependencies), so
+          # they do not come from archive.ubuntu.com on every run. Weekly key:
+          # the runner image moves, and a stale .deb is simply downloaded anew.
+          path: ~/apt-debs
+          key: runner-apt-${{ runner.os }}-${{ steps.week.outputs.w }}
+          restore-keys: |
+            runner-apt-${{ runner.os }}-
 
       - name: Clone SDK siblings (go.mod replace directives)
         env:
@@ -238,6 +259,10 @@ jobs:
         run: |
           sudo pip3 install --break-system-packages pefile \
             'mkosi @ https://github.com/systemd/mkosi/archive/refs/tags/v26.tar.gz'
+          # Seed apt's archive with the cached .debs; apt checks each against
+          # the signed index and downloads only what is missing or newer.
+          mkdir -p ~/apt-debs
+          sudo cp ~/apt-debs/*.deb /var/cache/apt/archives/ 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y \
             python3-pip bubblewrap systemd-container \
@@ -245,6 +270,7 @@ jobs:
             mtools dosfstools e2fsprogs \
             grub-efi-amd64-signed shim-signed \
             systemd-ukify systemd-boot-efi systemd-boot
+          cp /var/cache/apt/archives/*.deb ~/apt-debs/ 2>/dev/null || true
 
       - name: Recreate symlinks
         run: |
@@ -303,10 +329,15 @@ jobs:
         run: |
           chmod +x build/image/mkosi.extra/usr/bin/luks-setup
           cd build/image-gpu
-          mkdir -p mkosi.cache
-          # --cache-dir keeps the apt cache + downloaded .debs between
-          # CI runs (restored above via actions/cache); typical saving
-          # 4-8 min per build on the apt-get install step.
+          mkdir -p mkosi.cache mkosi.pkgcache
+          # --cache-dir keeps the repository metadata and --package-cache-dir
+          # the downloaded .debs between CI runs (restored above). On an exact
+          # cache hit the metadata is the pinned snapshot's own: reuse it
+          # rather than sync it again. A partial hit (an older Snapshot=) syncs.
+          CACHE_ONLY=""
+          if [[ "${{ steps.mkosicache.outputs.cache-hit }}" == "true" ]]; then
+            CACHE_ONLY="--cache-only=metadata"
+          fi
           PROFILES="--profile gcp"
           # Dev-profile is selected by the workflow_dispatch input OR by a tag
           # ending in `-dev` (tdx-gpu-vX.Y.Z-dev). The tag path produces a
@@ -314,7 +345,14 @@ jobs:
           if [[ "${{ github.event.inputs.dev_profile }}" == "true" || "${{ github.ref_name }}" == *-dev ]]; then
             PROFILES="$PROFILES --profile dev"
           fi
-          sudo mkosi $PROFILES --cache-dir mkosi.cache build
+          sudo mkosi $PROFILES $CACHE_ONLY --cache-dir mkosi.cache --package-cache-dir mkosi.pkgcache build
+
+      - name: Make the mkosi cache readable for the cache save
+        if: always()
+        # mkosi runs as root; apt leaves root-only directories (lists/partial)
+        # that the runner user's cache save cannot read, and the save failed
+        # on every build until this step.
+        run: sudo chown -R "$(id -u):$(id -g)" build/image-gpu/mkosi.cache build/image-gpu/mkosi.pkgcache 2>/dev/null || true
 
       - name: Replace unsigned GRUB with Canonical-signed binary
         run: |
