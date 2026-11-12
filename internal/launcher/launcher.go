@@ -3213,14 +3213,24 @@ func (l *Launcher) waitForShutdown(ctx context.Context) error {
 		l.log.Info("context cancelled, shutting down")
 	}
 
-	// Graceful shutdown - stop all containers.
+	// Graceful shutdown - stop all containers, in parallel, within
+	// shutdownDeadline so the unit's TimeoutStopSec (manager.service) is never
+	// reached and a power-button shutdown completes cleanly.
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 
-	l.mgr.StopAll(context.Background())
-	l.log.Info("all containers stopped")
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownDeadline)
+	defer cancel()
+	start := time.Now()
+	l.mgr.StopAll(ctx)
+	l.log.Info("all containers stopped", zap.Duration("took", time.Since(start)))
 	return nil
 }
+
+// shutdownDeadline bounds the whole container shutdown: the SIGTERM grace
+// (container.ShutdownStopGrace), the SIGKILL wait and the deletes. It sits
+// under manager.service's TimeoutStopSec=45.
+const shutdownDeadline = 35 * time.Second
 
 // pinnedDigestBytes extracts the 32-byte SHA-256 from a digest-pinned image
 // reference ("...@sha256:<64hex>"). It is the requested digest, known before the

@@ -996,7 +996,26 @@ func (m *Manager) Forget(name string) {
 	}
 }
 
+// unloadStopGrace is how long Stop gives a container to exit on SIGTERM before
+// SIGKILL when one app is unloaded or redeployed.
+const unloadStopGrace = 10 * time.Second
+
+// ShutdownStopGrace is the SIGTERM grace each container gets when the whole
+// host shuts down (StopAll). The containers stop in parallel, so it bounds the
+// shutdown however many apps the host runs.
+var ShutdownStopGrace = 15 * time.Second
+
+// killWait bounds the wait for a task to exit after SIGKILL. A GPU process can
+// take seconds to release its device memory; past this the shutdown goes on.
+const killWait = 10 * time.Second
+
+// Stop stops and deletes one container, SIGKILLing it if SIGTERM has not ended
+// it within unloadStopGrace.
 func (m *Manager) Stop(ctx context.Context, name string) error {
+	return m.stop(ctx, name, unloadStopGrace)
+}
+
+func (m *Manager) stop(ctx context.Context, name string, grace time.Duration) error {
 	ctx = m.ctx(ctx)
 
 	m.mu.RLock()
@@ -1018,17 +1037,29 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 	mc.mu.Unlock()
 
 	if mc.Task != nil {
+		// A frozen (billing-paused) task cannot act on SIGTERM until thawed.
+		if mc.GetStatus() == StatusFrozen {
+			_ = mc.Task.Resume(ctx)
+		}
+		// Subscribe to the exit before signalling, so a fast exit is not missed.
+		exitCh, waitErr := mc.Task.Wait(ctx)
 		if err := mc.Task.Kill(ctx, 15); err != nil { // SIGTERM
 			m.log.Warn("failed to send SIGTERM", zap.String("name", name), zap.Error(err))
 		}
-		// Wait for exit (with timeout).
-		exitCh, err := mc.Task.Wait(ctx)
-		if err == nil {
+		if waitErr == nil {
 			select {
 			case <-exitCh:
-			case <-time.After(10 * time.Second):
-				m.log.Warn("SIGTERM timeout, sending SIGKILL", zap.String("name", name))
+			case <-time.After(grace):
+				m.log.Warn("SIGTERM timeout, sending SIGKILL", zap.String("name", name), zap.Duration("grace", grace))
 				_ = mc.Task.Kill(ctx, 9)
+				select {
+				case <-exitCh:
+				case <-time.After(killWait):
+					m.log.Warn("task still running after SIGKILL", zap.String("name", name))
+				case <-ctx.Done():
+				}
+			case <-ctx.Done():
+				_ = mc.Task.Kill(context.WithoutCancel(ctx), 9)
 			}
 		}
 		_, _ = mc.Task.Delete(ctx)
@@ -1099,7 +1130,11 @@ func (m *Manager) Resume(ctx context.Context, name string) error {
 	return nil
 }
 
-// StopAll stops all managed containers.
+// StopAll stops all managed containers, in parallel, each with
+// ShutdownStopGrace before SIGKILL. Run one after another, a host's shutdown
+// took the sum of every app's stop and overran the unit's stop timeout (a
+// vLLM container alone could hold it), so a power-button shutdown ended in a
+// power cut instead.
 func (m *Manager) StopAll(ctx context.Context) {
 	m.mu.RLock()
 	names := make([]string, 0, len(m.containers))
@@ -1108,11 +1143,17 @@ func (m *Manager) StopAll(ctx context.Context) {
 	}
 	m.mu.RUnlock()
 
+	var wg sync.WaitGroup
 	for _, name := range names {
-		if err := m.Stop(ctx, name); err != nil {
-			m.log.Error("failed to stop container", zap.String("name", name), zap.Error(err))
-		}
+		wg.Add(1)
+		go func(name string) {
+			defer wg.Done()
+			if err := m.stop(ctx, name, ShutdownStopGrace); err != nil {
+				m.log.Error("failed to stop container", zap.String("name", name), zap.Error(err))
+			}
+		}(name)
 	}
+	wg.Wait()
 }
 
 // Get returns the ManagedContainer by name.

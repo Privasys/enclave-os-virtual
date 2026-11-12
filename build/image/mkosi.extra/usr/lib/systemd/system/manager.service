@@ -14,6 +14,11 @@ RuntimeDirectory=manager/extensions
 ExecStart=/bin/bash /usr/bin/manager-launch
 Restart=on-failure
 RestartSec=5
+# On stop the manager SIGTERMs every container in parallel, SIGKILLs any still
+# running after 15 s, and gives up after 35 s in all (launcher shutdownDeadline).
+# This backstop keeps a power-button shutdown well inside a host's graceful
+# stop window instead of systemd's default 90 s.
+TimeoutStopSec=45
 
 # Security hardening.
 #
