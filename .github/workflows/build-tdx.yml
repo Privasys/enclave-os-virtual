@@ -214,7 +214,9 @@ jobs:
           mkdir -p ~/apt-debs
           sudo cp ~/apt-debs/*.deb /var/cache/apt/archives/ 2>/dev/null || true
           sudo apt-get update
-          sudo apt-get install -y \
+          # The runner image tells apt to delete packages after installing;
+          # keep them so the cache above has something to save.
+          sudo apt-get install -y -o APT::Keep-Downloaded-Packages=true \
             python3-pip bubblewrap systemd-container \
             cryptsetup sbsigntool erofs-utils \
             mtools dosfstools e2fsprogs \
