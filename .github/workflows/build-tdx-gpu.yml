@@ -21,6 +21,19 @@ on:
   # dispatching this workflow.
   push:
     tags: ['tdx-gpu-v*']
+    # Package-cache warm-up: GitHub serves a tag build only the caches saved on
+    # that tag or on main, so the package cache must be saved from main. A
+    # change to the package set (Snapshot=, package lists, APT pins) re-seeds it
+    # here; main runs publish nothing (every publish step is tag-gated).
+    branches: [main]
+    paths:
+      - 'build/image-gpu/mkosi.conf'
+      - 'build/image-gpu/mkosi.profiles/**'
+      - 'build/image-gpu/mkosi.pkgmanager/**'
+      - 'build/image/mkosi.conf'
+  # Weekly, so the cache is used before GitHub's 7-day eviction.
+  schedule:
+    - cron: '37 3 * * 1'
   pull_request:
     branches: [main]
     paths:
