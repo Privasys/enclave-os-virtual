@@ -305,6 +305,11 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		apiFees:      apifees.Open(feesPath, log),
 		walletCall:   auth.NewWalletCallVerifier(cfg.WalletProviderJWKS, log),
 	}
+	// Only a loaded app's Host may hold a session-relay identity key.
+	sr.SetKnownHost(func(host string) bool {
+		_, ok := s.lookupAppHost(host)
+		return ok
+	})
 	// Ingress mutual-RA-TLS verifier. It resolves the attestation server from
 	// the launcher (updated at runtime via PUT /api/v1/attestation-servers) and
 	// permits dev-image callers only when this VM itself runs a dev image.

@@ -130,6 +130,12 @@ type Manager struct {
 	// (enc-pub-plan.md, Sc 2).
 	encKeys map[string]*ecdh.PrivateKey
 
+	// knownHost reports whether a Host is served by this manager. The Host
+	// is client-supplied and bootstrap needs no credential, so a key is only
+	// generated for a known one: encKeys stays bounded by the apps loaded
+	// here. Set via SetKnownHost; nil accepts every Host.
+	knownHost func(host string) bool
+
 	// Optional EncAuth verifier. When non-nil, handleInit accepts an
 	// `encauth` field in the request body and uses it to short-circuit
 	// the FIDO2 ceremony (silent rebind). Returns the canonical
@@ -233,16 +239,31 @@ func NewManager() *Manager {
 	}
 }
 
+// errUnknownHost refuses a bootstrap for a Host this manager does not serve.
+var errUnknownHost = errors.New("sessionrelay: unknown host")
+
+// SetKnownHost installs the predicate deciding which Hosts may be given a
+// lazily generated identity key. host is normalised (see hostKey).
+func (m *Manager) SetKnownHost(f func(host string) bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.knownHost = f
+}
+
 // encKeyForHost returns the session-relay identity key for a Host,
 // lazily generating an ephemeral one if no vault-backed key has been
 // installed for it yet (SetEncStaticKeyForHost replaces it later). Each
-// app's Host gets its own key.
+// app's Host gets its own key. A Host with no key that knownHost does not
+// recognise gets errUnknownHost and leaves no entry behind.
 func (m *Manager) encKeyForHost(host string) (*ecdh.PrivateKey, []byte, error) {
 	h := hostKey(host)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if k := m.encKeys[h]; k != nil {
 		return k, k.PublicKey().Bytes(), nil
+	}
+	if m.knownHost != nil && !m.knownHost(h) {
+		return nil, nil, errUnknownHost
 	}
 	k, err := ecdh.P256().GenerateKey(rand.Reader)
 	if err != nil {
@@ -472,6 +493,10 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 	// enc_pub it derives K against (and that the voucher pins) is THIS app's
 	// key — vault-backed once the app's Load installed it, else ephemeral.
 	encPriv, encPubBytes, err := m.encKeyForHost(r.Host)
+	if errors.Is(err, errUnknownHost) {
+		http.Error(w, "unknown host", http.StatusNotFound)
+		return
+	}
 	if err != nil {
 		http.Error(w, "ecdh keygen: "+err.Error(), http.StatusInternalServerError)
 		return
