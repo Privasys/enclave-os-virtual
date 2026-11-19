@@ -48,6 +48,10 @@ const (
 	hdrEdge = "X-Privasys-Edge"
 
 	directMarkerTTL = 2 * time.Second
+
+	// maxDirectMarkers bounds the marker cache, whose keys are client-supplied
+	// names. A cleared entry only costs another stat.
+	maxDirectMarkers = 4096
 )
 
 // directMarker is what the manager writes for a direct name.
@@ -100,6 +104,9 @@ func (g *RATLSCertGetter) isDirectName(name string) bool {
 	_, err := os.Stat(filepath.Join(g.DirectStorage, directMarkerDir, name+".json"))
 	e = directMarkerEntry{direct: err == nil, checked: now}
 	direct.mu.Lock()
+	if len(direct.markers) >= maxDirectMarkers {
+		clear(direct.markers)
+	}
 	direct.markers[name] = e
 	direct.mu.Unlock()
 	return e.direct

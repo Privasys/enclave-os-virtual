@@ -25,6 +25,14 @@ import (
 // previousRetention is how long a rotated key stays answerable.
 const previousRetention = 15 * time.Minute
 
+// leafPurgeInterval is how often keys past their retention are dropped.
+const leafPurgeInterval = time.Minute
+
+// sharedLeafName names the one key serving every SNI this host has no app for.
+// The SNI is client-supplied and arrives before any authentication, so only a
+// name the manager published holds a key of its own (see GetCertificate).
+const sharedLeafName = ""
+
 // leafKey is the key of one SNI, with the deterministic quote minted for it.
 type leafKey struct {
 	sni      string
@@ -51,6 +59,7 @@ var leaves = struct {
 	mu     sync.Mutex
 	bySNI  map[string]*leafKey
 	bySPKI map[[32]byte]*leafKey
+	purged time.Time
 }{bySNI: map[string]*leafKey{}, bySPKI: map[[32]byte]*leafKey{}}
 
 // leafKeyFor returns the current key of an SNI, rotating it when it is older
@@ -59,9 +68,17 @@ var leaves = struct {
 func leafKeyFor(sni string, now time.Time) *leafKey {
 	leaves.mu.Lock()
 	defer leaves.mu.Unlock()
-	for h, lk := range leaves.bySPKI {
-		if now.Sub(lk.created) > leafLifetime+previousRetention {
-			delete(leaves.bySPKI, h)
+	if now.Sub(leaves.purged) >= leafPurgeInterval {
+		leaves.purged = now
+		for h, lk := range leaves.bySPKI {
+			if now.Sub(lk.created) > leafLifetime+previousRetention {
+				delete(leaves.bySPKI, h)
+			}
+		}
+		for name, lk := range leaves.bySNI {
+			if now.Sub(lk.created) > leafLifetime+previousRetention {
+				delete(leaves.bySNI, name)
+			}
 		}
 	}
 	if lk, ok := leaves.bySNI[sni]; ok && now.Sub(lk.created) < leafLifetime {

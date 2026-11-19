@@ -9,8 +9,9 @@
 // extensions written by the measured manager (per hostname, in ExtensionsDir).
 // The leaf key lives for 24 hours and is kept across re-mints that only change
 // extension values (a deploy, a configuration change), so a deterministic quote
-// minted for the key stays valid across such a re-mint. Leaves are served per
-// SNI by the "tls.get_certificate.ra_tls" module (RATLSCertGetter).
+// minted for the key stays valid across such a re-mint. Each published hostname
+// has its own key, and every other SNI shares one, served by the
+// "tls.get_certificate.ra_tls" module (RATLSCertGetter).
 //
 // # Evidence
 //
@@ -53,6 +54,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -205,9 +207,13 @@ func (g *RATLSCertGetter) Provision(ctx caddy.Context) error {
 // changes never rotate the key before its 24 hours are up.
 func (g *RATLSCertGetter) GetCertificate(_ context.Context, hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	sni := hello.ServerName
+	if !validSNI(sni) {
+		return nil, errors.New("ra_tls: malformed server name")
+	}
 	// A direct name serves its publicly trusted certificate to every client
 	// that did not ask for RA-TLS (direct.go).
-	if g.isDirectName(sni) {
+	isDirect := g.isDirectName(sni)
+	if isDirect {
 		if !offersALPN(hello, RATLSALPN) {
 			cert, err := g.directCertificate(sni)
 			if err != nil {
@@ -221,6 +227,13 @@ func (g *RATLSCertGetter) GetCertificate(_ context.Context, hello *tls.ClientHel
 	// Validity is stamped from the manager's clock, not the host's. The
 	// handshake never waits on or fails over time (see clock.go).
 	now := issueTime()
+	// A name with no app here (the control plane dialling by IP, or any other
+	// client) shares one key and its leaf is not kept, so no table grows with
+	// the names clients send.
+	if !isDirect && !g.hasExtensions(sni) {
+		cert, _, err := g.mint(leafKeyFor(sharedLeafName, now), hello, now)
+		return cert, err
+	}
 	lk := leafKeyFor(sni, now)
 
 	g.mu.RLock()
@@ -301,7 +314,12 @@ func (g *RATLSCertGetter) mint(lk *leafKey, hello *tls.ClientHelloInfo, now time
 		PrivateKey:  lk.key,
 	}
 
-	g.logger.Info("RA-TLS v2 certificate issued",
+	// The shared leaf is minted on every handshake.
+	logIssued := g.logger.Info
+	if lk.sni == sharedLeafName {
+		logIssued = g.logger.Debug
+	}
+	logIssued("RA-TLS v2 certificate issued",
 		zap.String("server_name", hello.ServerName),
 		zap.String("leaf", base64.RawURLEncoding.EncodeToString(lk.spkiHash[:])),
 		zap.Int("extensions", len(hostExts)),
@@ -365,6 +383,38 @@ type extensionEntry struct {
 type extensionsFile struct {
 	Extensions []extensionEntry `json:"extensions"`
 	Upstream   string           `json:"upstream,omitempty"`
+}
+
+// maxSNILen is the longest server name accepted: <name>.json must still fit a
+// file name.
+const maxSNILen = 250
+
+// validSNI reports whether name can be a host name or IP literal. The SNI is
+// client-supplied and becomes part of a file name.
+func validSNI(name string) bool {
+	if len(name) > maxSNILen {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.', c == '-', c == '_', c == ':':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// hasExtensions reports whether the manager published extensions for name,
+// which it does for the platform hostname and every loaded app.
+func (g *RATLSCertGetter) hasExtensions(name string) bool {
+	if g.ExtensionsDir == "" || name == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(g.ExtensionsDir, name+".json"))
+	return err == nil
 }
 
 // loadHostnameExtensions reads <extensions_dir>/<hostname>.json and returns
