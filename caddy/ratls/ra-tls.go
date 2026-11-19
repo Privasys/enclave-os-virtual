@@ -62,6 +62,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -441,6 +442,20 @@ func (g *RATLSCertGetter) loadHostnameExtensions(hostname string) ([]pkix.Extens
 	if err != nil {
 		return nil, fmt.Errorf("ra_tls: %s: %w", path, err)
 	}
+	// A certificate may carry each extension once: Go's x509 refuses a
+	// duplicate, and every handshake to the hostname would then fail. The
+	// first occurrence wins, so the manager's entries win over the container's.
+	seen := make(map[string]bool, len(exts))
+	exts = slices.DeleteFunc(exts, func(ext pkix.Extension) bool {
+		id := ext.Id.String()
+		if seen[id] {
+			g.logger.Warn("dropping a duplicate extension from the manager's file",
+				zap.String("hostname", hostname), zap.String("oid", id))
+			return true
+		}
+		seen[id] = true
+		return false
+	})
 
 	// Reserved OIDs are stripped from what the container declares: a workload
 	// may only publish under the app-defined sub-arc, never an identity or
@@ -459,6 +474,16 @@ func (g *RATLSCertGetter) loadHostnameExtensions(hostname string) ([]pkix.Extens
 					zap.String("hostname", hostname),
 					zap.String("oid", ext.Id.String()))
 				continue
+			}
+			if id := ext.Id.String(); seen[id] {
+				// Already stamped by the manager (for example pushed by the
+				// app and still declared on the pull endpoint): the stamped
+				// value is kept.
+				g.logger.Warn("dropping container-declared OID already present on the certificate",
+					zap.String("hostname", hostname), zap.String("oid", id))
+				continue
+			} else {
+				seen[id] = true
 			}
 			exts = append(exts, ext)
 		}
