@@ -106,6 +106,13 @@ const (
 	// silent rebinds happen at most a few times per hour.
 	rebindRateLimit  = 6
 	rebindRateWindow = time.Minute
+
+	// The sid is read before the voucher's signatures are checked, so the
+	// table is bounded in entries and in the size of each key. A real sid is
+	// 43 characters. maxRebindEntries is swept at most every rebindSweepEvery.
+	maxRebindSIDLen  = 128
+	maxRebindEntries = 10_000
+	rebindSweepEvery = time.Second
 )
 
 // Manager owns active sessions. Safe for concurrent use.
@@ -163,8 +170,10 @@ type Manager struct {
 	// rests on enc_pub equality).
 	expectedWorkloadDigest map[string][32]byte
 
-	// Fixed-window EncAuth rebind counters keyed by voucher sid.
-	rebinds map[string]*rebindWindow
+	// Fixed-window EncAuth rebind counters keyed by voucher sid. rebindSwept
+	// is the last sweep of expired windows.
+	rebinds     map[string]*rebindWindow
+	rebindSwept time.Time
 
 	// Optional predicate: when it returns true for a non-sealed request,
 	// the middleware refuses it with 403 sealed-transport-required
@@ -802,22 +811,32 @@ func (m *Manager) gcLocked() {
 }
 
 // allowRebind records one EncAuth-backed bootstrap attempt for sid and
-// reports whether it is within the fixed per-window budget. Expired
-// windows are swept opportunistically so the map cannot grow unbounded
-// under randomly-forged sids.
+// reports whether it is within the fixed per-window budget. A sid too long
+// to be real is refused. A new sid arriving while the table is full is
+// allowed without being counted, so forged sids cannot use up the budget of
+// real ones: the voucher's signatures still decide.
 func (m *Manager) allowRebind(sid string) bool {
+	if len(sid) > maxRebindSIDLen {
+		return false
+	}
 	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.rebinds) > 10_000 {
-		for k, w := range m.rebinds {
-			if now.Sub(w.start) > rebindRateWindow {
-				delete(m.rebinds, k)
-			}
-		}
-	}
 	w, ok := m.rebinds[sid]
 	if !ok || now.Sub(w.start) > rebindRateWindow {
+		if !ok && len(m.rebinds) >= maxRebindEntries {
+			if now.Sub(m.rebindSwept) >= rebindSweepEvery {
+				m.rebindSwept = now
+				for k, w := range m.rebinds {
+					if now.Sub(w.start) > rebindRateWindow {
+						delete(m.rebinds, k)
+					}
+				}
+			}
+			if len(m.rebinds) >= maxRebindEntries {
+				return true
+			}
+		}
 		m.rebinds[sid] = &rebindWindow{start: now, count: 1}
 		return true
 	}
