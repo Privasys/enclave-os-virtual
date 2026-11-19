@@ -1795,6 +1795,11 @@ func (s *Server) handleSetAttestationExtension(w http.ResponseWriter, r *http.Re
 // serving-cert extensions in place; the response echoes the canonical
 // OID 6.1 encoding now advertised.
 func (s *Server) handleSetDependencies(w http.ResponseWriter, r *http.Request) {
+	result := r.Context().Value(authResultKey).(*auth.AuthResult)
+	if !result.HasManagerAccess() {
+		s.jsonError(w, http.StatusForbidden, "manager role required for container operations")
+		return
+	}
 	name := r.PathValue("name")
 	if name == "" {
 		s.jsonError(w, http.StatusBadRequest, "container name is required")

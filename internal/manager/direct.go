@@ -302,6 +302,11 @@ func (s *Server) appAudiences(host string) []string {
 // header this host honours on direct splices. An empty list turns it off.
 // Connections without a header keep working from anywhere either way.
 func (s *Server) handleSetProxyProtocol(w http.ResponseWriter, r *http.Request) {
+	result := r.Context().Value(authResultKey).(*auth.AuthResult)
+	if !result.HasManagerAccess() {
+		s.jsonError(w, http.StatusForbidden, "manager role required for edge operations")
+		return
+	}
 	var body struct {
 		From []string `json:"from"`
 	}
