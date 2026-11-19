@@ -142,7 +142,8 @@ an egress tunnel.
 | `--direct-ca` | Let's Encrypt | ACME directory URL |
 | `--proxy-protocol-from` | empty | Bootstrap only: gateway addresses (CIDR or IP), env `PROXY_PROTOCOL_FROM`. A list pushed by the control plane replaces it. |
 
-`GET /api/v1/containers/{name}/direct` (manager role) returns:
+`GET /api/v1/containers/{name}/direct` (monitoring or manager role; it only
+reads) returns:
 
 ```json
 {
