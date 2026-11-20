@@ -409,6 +409,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 			pr.Out.URL.Host = upstream
 			pr.Out.Host = pr.In.Host
 			pr.SetXForwarded()
+			restoreDirectForwardedHost(pr)
 		},
 		// Billing headers are runtime-asserted, never app-asserted: scrub
 		// whatever the container set so an app cannot forge a charge or a
@@ -2364,4 +2365,39 @@ func (s *Server) replayRegistry(ctx context.Context) error {
 		}()
 	}
 	return nil
+}
+
+// restoreDirectForwardedHost gives the container back the name a direct
+// visitor asked for. Caddy rewrites a direct adopter name's Host to the app's
+// platform hostname, which every per-app rule keys on, and carries the
+// original name in X-Forwarded-Host; SetXForwarded then overwrote it with the
+// rewritten Host, so an app serving several names could not tell them apart.
+// Only on the direct leg, which privasys_attest stamps from the connection,
+// and only a single well-formed host name: anything else keeps what
+// SetXForwarded wrote.
+func restoreDirectForwardedHost(pr *httputil.ProxyRequest) {
+	if !isDirectLeg(pr.In) {
+		return
+	}
+	name := pr.In.Header.Get("X-Forwarded-Host")
+	if !validForwardedHost(name) {
+		return
+	}
+	pr.Out.Header.Set("X-Forwarded-Host", name)
+}
+
+// validForwardedHost reports a single DNS name, optionally with a port.
+func validForwardedHost(v string) bool {
+	h := hostOnly(v)
+	if h == "" || len(h) > 253 || strings.HasPrefix(h, ".") || strings.HasSuffix(h, ".") || strings.Contains(h, "..") {
+		return false
+	}
+	for _, c := range h {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '.':
+		default:
+			return false
+		}
+	}
+	return true
 }
