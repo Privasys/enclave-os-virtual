@@ -1364,6 +1364,18 @@ func (l *Launcher) armSessionRelayWorkloadDigest(containerName, host string) {
 		zap.String("host", host), zap.String("workload_digest", hex.EncodeToString(digest[:])))
 }
 
+// rearmWorkloadDigest re-arms a running container's workload digest after a
+// value it hashes changed in place (the volume key's generation, OID 3.4).
+//
+// Must be called with l.mu held.
+func (l *Launcher) rearmWorkloadDigest(containerName string) {
+	spec, ok := l.specs[containerName]
+	if !ok || spec.Hostname == "" || spec.Internal {
+		return
+	}
+	l.armSessionRelayWorkloadDigest(containerName, spec.Hostname)
+}
+
 // armSurfaces hands the app's declared surfaces (parsed and checked at Load
 // from the measured labels) to the manager, which serves exactly those
 // routes in the clear on the gateway-terminated leg, anonymous by
@@ -2440,6 +2452,10 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 		if err := l.remintServingExtensions(req.Name); err != nil {
 			l.log.Warn("rotate add: rewrite extensions failed", zap.String("name", req.Name), zap.Error(err))
 		}
+		// The key source is hashed into the voucher digest armed at Load: re-arm
+		// it, or every wallet sign-in is refused as workload-changed until a
+		// redeploy.
+		l.rearmWorkloadDigest(req.Name)
 		l.log.Info("volume key rotation: new slot added", zap.String("name", req.Name), zap.String("new_handle", req.NewHandle))
 		return nil
 
@@ -2485,6 +2501,10 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 		if err := l.remintServingExtensions(req.Name); err != nil {
 			l.log.Warn("renew: rewrite extensions failed", zap.String("name", req.Name), zap.Error(err))
 		}
+		// The key source is hashed into the voucher digest armed at Load: re-arm
+		// it, or every wallet sign-in is refused as workload-changed until a
+		// redeploy.
+		l.rearmWorkloadDigest(req.Name)
 		l.log.Info("volume key renewed under a new generation", zap.String("name", req.Name), zap.String("new_handle", req.NewHandle))
 		return nil
 

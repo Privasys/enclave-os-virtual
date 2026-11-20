@@ -45,3 +45,36 @@ func TestServingExtensionsCoverDirectNames(t *testing.T) {
 		t.Fatalf("direct name's key source = %q, want the v6 generation", got)
 	}
 }
+
+type digestRouter struct {
+	recordingRouter
+	digests map[string][32]byte
+}
+
+func (r *digestRouter) SetExpectedWorkloadDigest(host string, d [32]byte) { r.digests[host] = d }
+
+// A volume key moving to a new generation in place re-arms the voucher
+// digest with the new key source, so the wallet's next sign-in matches.
+func TestRearmWorkloadDigestFollowsKeySource(t *testing.T) {
+	l := depTestLauncher(t, t.TempDir(), nil)
+	r := &digestRouter{digests: map[string][32]byte{}}
+	l.appHostRouter = r
+	const host = "app1.apps.privasys.org"
+
+	l.mu.Lock()
+	l.volumeEncryption["app1"] = "vault:apps.privasys.org/app1/storage-kek/v1"
+	l.armSessionRelayWorkloadDigest("app1", host)
+	before := r.digests[host]
+	l.volumeEncryption["app1"] = "vault:apps.privasys.org/app1/storage-kek/v2"
+	l.rearmWorkloadDigest("app1")
+	after := r.digests[host]
+	l.armSessionRelayWorkloadDigest("app1", host) // what a fresh Load arms
+	l.mu.Unlock()
+
+	if after == before {
+		t.Fatal("digest not re-armed after the key source changed")
+	}
+	if after != r.digests[host] {
+		t.Fatal("re-armed digest differs from what a fresh load arms")
+	}
+}
