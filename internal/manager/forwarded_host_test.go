@@ -47,6 +47,16 @@ func TestDirectAliasKeepsForwardedHost(t *testing.T) {
 		t.Fatalf("direct alias: X-Forwarded-Host %q, Host %q", h.Get("X-Forwarded-Host"), host)
 	}
 
+	// A static or public surface: servePublic scrubbed the edge marker and
+	// stamped the transport, which must be enough.
+	req := httptest.NewRequest(http.MethodGet, "http://platform-monitoring.apps.privasys.org/", nil)
+	req.Header.Set(TransportHeader, TransportDirect)
+	req.Header.Set("X-Forwarded-Host", "support.privasys.org")
+	proxy.ServeHTTP(httptest.NewRecorder(), req)
+	if got.Get("X-Forwarded-Host") != "support.privasys.org" {
+		t.Fatalf("surface request on a direct name: X-Forwarded-Host %q", got.Get("X-Forwarded-Host"))
+	}
+
 	// Any other leg: the header is what SetXForwarded writes, the Host.
 	if h, _ := send("", "support.privasys.org"); h.Get("X-Forwarded-Host") != "platform-monitoring.apps.privasys.org" {
 		t.Fatalf("non-direct leg kept a client X-Forwarded-Host: %q", h.Get("X-Forwarded-Host"))

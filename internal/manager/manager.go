@@ -2376,7 +2376,10 @@ func (s *Server) replayRegistry(ctx context.Context) error {
 // and only a single well-formed host name: anything else keeps what
 // SetXForwarded wrote.
 func restoreDirectForwardedHost(pr *httputil.ProxyRequest) {
-	if !isDirectLeg(pr.In) {
+	// A public or static surface request lost the edge marker to the header
+	// scrub (servePublic), which stamped the transport instead; the session
+	// relay strips a client's transport header on entry, so both are ours.
+	if !isDirectLeg(pr.In) && pr.In.Header.Get(TransportHeader) != TransportDirect {
 		return
 	}
 	name := pr.In.Header.Get("X-Forwarded-Host")
