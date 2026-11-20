@@ -9,6 +9,18 @@ measured code.
 The app's platform hostname is unchanged: it stays the attested address that
 RA-TLS clients dial. A direct domain is an extra name on the same app route.
 
+## Which name the client asked for
+
+Caddy rewrites a direct name's `Host` to the app's platform hostname, so
+every per-host rule of the manager applies unchanged. The app receives:
+
+- `Host`: the platform hostname, on every leg;
+- `X-Forwarded-Host`: the name the client asked for. On the direct leg (a
+  private route, or a declared static or public surface) this is the direct
+  name, so an app serving several names can tell them apart. Only a single
+  well-formed DNS name, with an optional port, is passed on; anything else,
+  and every other leg, carries the platform hostname.
+
 ## The legs a request can arrive on
 
 The runtime stamps `X-Privasys-Transport` on every request it hands to an app
@@ -55,7 +67,11 @@ connection was served, and anything not positively served the RA-TLS leaf
   `"probe": {"ok", "checked_at", "error"}`.
 
 On a direct name a client offering the `privasys-ratls/1` ALPN still gets the
-RA-TLS leaf, with the direct name in its SAN and the app's extensions.
+RA-TLS leaf, with the direct name in its SAN and the app's extensions. The
+extensions are written for the platform hostname and every direct name
+together, at load and on every change to what the app attests (a volume key
+generation, the dependency set, the app policy, an SDK extension, a direct
+certificate's key), so a client attesting either name sees the same workload.
 
 ## Binding the public certificate to the attestation
 
