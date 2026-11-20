@@ -248,6 +248,10 @@ func (l *Launcher) SetDirectDomains(containerName string, domains []string) erro
 	if err := l.caddyClient.SetAliases(hostname, domains); err != nil {
 		return fmt.Errorf("caddy routes for direct domains: %w", err)
 	}
+	// The names' extensions were written above, before Apply knew their
+	// keys, and a certificate Apply loads from storage raises no event: stamp
+	// every serving name now, so OID 7.4 is on the leaves from the start.
+	l.directChanged(containerName)
 	l.log.Info("direct domains set",
 		zap.String("container", containerName), zap.String("hostname", hostname), zap.Strings("domains", domains))
 	return nil
@@ -257,21 +261,12 @@ func (l *Launcher) SetDirectDomains(containerName string, domains []string) erro
 // certificates was obtained or renewed, so OID 7.4 names the current key.
 func (l *Launcher) directChanged(containerName string) {
 	l.mu.Lock()
-	spec, ok := l.specs[containerName]
-	if !ok {
-		l.mu.Unlock()
+	defer l.mu.Unlock()
+	if _, ok := l.specs[containerName]; !ok {
 		return
 	}
-	hosts := append([]string{spec.Hostname}, l.directDomains[containerName]...)
-	for _, h := range hosts {
-		if err := l.writeContainerExtensions(containerName, h, spec.Port); err != nil {
-			l.log.Warn("direct key stamp not written", zap.String("host", h), zap.Error(err))
-		}
-	}
-	l.mu.Unlock()
-	if err := l.caddyClient.ReloadForce(); err != nil {
-		l.log.Warn("caddy reload after a direct certificate change failed; the stamp lands on the next issuance",
-			zap.String("container", containerName), zap.Error(err))
+	if err := l.remintServingExtensions(containerName); err != nil {
+		l.log.Warn("direct key stamp not written", zap.String("container", containerName), zap.Error(err))
 	}
 }
 

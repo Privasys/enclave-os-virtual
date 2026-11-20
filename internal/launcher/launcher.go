@@ -2437,10 +2437,8 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 		// attested key origin (OID 3.4) for the running app.
 		l.volumeEncryption[req.Name] = newOrigin
 		l.recomputeAttestation()
-		if spec, ok := l.specs[req.Name]; ok && l.caddyClient != nil && spec.Hostname != "" && !spec.Internal {
-			if err := l.writeContainerExtensions(req.Name, spec.Hostname, spec.Port); err != nil {
-				l.log.Warn("rotate add: rewrite extensions failed", zap.String("name", req.Name), zap.Error(err))
-			}
+		if err := l.remintServingExtensions(req.Name); err != nil {
+			l.log.Warn("rotate add: rewrite extensions failed", zap.String("name", req.Name), zap.Error(err))
 		}
 		l.log.Info("volume key rotation: new slot added", zap.String("name", req.Name), zap.String("new_handle", req.NewHandle))
 		return nil
@@ -2484,10 +2482,8 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 		}
 		l.volumeEncryption[req.Name] = newOrigin
 		l.recomputeAttestation()
-		if spec, ok := l.specs[req.Name]; ok && l.caddyClient != nil && spec.Hostname != "" && !spec.Internal {
-			if err := l.writeContainerExtensions(req.Name, spec.Hostname, spec.Port); err != nil {
-				l.log.Warn("renew: rewrite extensions failed", zap.String("name", req.Name), zap.Error(err))
-			}
+		if err := l.remintServingExtensions(req.Name); err != nil {
+			l.log.Warn("renew: rewrite extensions failed", zap.String("name", req.Name), zap.Error(err))
 		}
 		l.log.Info("volume key renewed under a new generation", zap.String("name", req.Name), zap.String("new_handle", req.NewHandle))
 		return nil
@@ -2872,6 +2868,47 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string, port
 	return extensions.Write(l.cfg.ExtensionsDir, hostname, exts, upstream)
 }
 
+// writeServingExtensions writes the extensions of every name a container's
+// leaves are issued for: its platform hostname and each direct adopter name.
+// Every post-load change to what the leaf attests (key source, dependency
+// set, app policy, SDK OIDs, direct key bindings) goes through here, so an
+// adopter name never keeps a leaf the hostname has moved on from.
+//
+// Must be called with l.mu held.
+func (l *Launcher) writeServingExtensions(containerName string) error {
+	spec, ok := l.specs[containerName]
+	if !ok || l.caddyClient == nil || spec.Hostname == "" || spec.Internal {
+		return nil
+	}
+	hosts := append([]string{spec.Hostname}, l.directDomains[containerName]...)
+	var first error
+	for _, h := range hosts {
+		if err := l.writeContainerExtensions(containerName, h, spec.Port); err != nil {
+			l.log.Warn("extensions not written", zap.String("container", containerName), zap.String("host", h), zap.Error(err))
+			if first == nil {
+				first = fmt.Errorf("%s: %w", h, err)
+			}
+		}
+	}
+	return first
+}
+
+// remintServingExtensions writes every serving name's extensions and forces
+// Caddy to re-issue, since the RA-TLS module caches the issued leaf.
+//
+// Must be called with l.mu held.
+func (l *Launcher) remintServingExtensions(containerName string) error {
+	// Reload even when one name failed: the others carry the change.
+	writeErr := l.writeServingExtensions(containerName)
+	if spec, ok := l.specs[containerName]; ok && l.caddyClient != nil && spec.Hostname != "" && !spec.Internal {
+		if err := l.caddyClient.ReloadForce(); err != nil {
+			l.log.Warn("caddy reload after an extensions change failed; the change lands on the next issuance",
+				zap.String("container", containerName), zap.Error(err))
+		}
+	}
+	return writeErr
+}
+
 // SetDependencies replaces a running container's attested dependency set
 // and re-mints its serving-certificate extensions in place — the runtime
 // equivalent of the WASM `wasm_set_dependencies` verb. The next RA-TLS
@@ -2902,7 +2939,7 @@ func (l *Launcher) SetDependencies(containerName string, set *ratls.DependencySe
 	// Internal containers have no serving certificate; the set still lives
 	// on the spec so GetDependencies serves it to the app for enforcement.
 	if spec.Hostname != "" && !spec.Internal && l.caddyClient != nil {
-		if err := l.writeContainerExtensions(containerName, spec.Hostname, spec.Port); err != nil {
+		if err := l.writeServingExtensions(containerName); err != nil {
 			return nil, fmt.Errorf("re-mint extensions: %w", err)
 		}
 		// Force Caddy to re-issue: the RA-TLS module caches the issued leaf,
@@ -3185,7 +3222,7 @@ func (l *Launcher) SetAttestationExtension(name, oid string, value []byte) error
 	}
 	l.oidExts[name][oid] = value
 	if l.caddyClient != nil && spec.Hostname != "" && !spec.Internal {
-		if err := l.writeContainerExtensions(name, spec.Hostname, spec.Port); err != nil {
+		if err := l.writeServingExtensions(name); err != nil {
 			return fmt.Errorf("rewrite extensions: %w", err)
 		}
 		// Reload Caddy so the RA-TLS module re-reads the extension file and
@@ -3374,19 +3411,16 @@ func (l *Launcher) SetAppPolicyStamp(containerName string, seq uint64, documentS
 	value = append(value, documentSHA256[:]...)
 
 	l.mu.Lock()
-	spec, ok := l.specs[containerName]
+	_, ok := l.specs[containerName]
 	if !ok {
 		l.mu.Unlock()
 		return fmt.Errorf("container %q not loaded", containerName)
 	}
 	l.appPolicy[containerName] = value
-	hostname, port, internal := spec.Hostname, spec.Port, spec.Internal
+	err := l.remintServingExtensions(containerName)
 	l.mu.Unlock()
-
-	if hostname != "" && !internal && l.caddyClient != nil {
-		if err := l.writeContainerExtensions(containerName, hostname, port); err != nil {
-			return fmt.Errorf("re-mint extensions for %s: %w", containerName, err)
-		}
+	if err != nil {
+		return fmt.Errorf("re-mint extensions for %s: %w", containerName, err)
 	}
 	return nil
 }
