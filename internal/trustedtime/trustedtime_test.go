@@ -610,3 +610,27 @@ func TestIssueTimeWhileFailingClosed(t *testing.T) {
 		t.Fatalf("healthy: got %v trusted=%v", it, trusted)
 	}
 }
+
+// The poll signature is checked against a config snapshot and needs no clock
+// lock: it runs here while the lock is held by someone else.
+func TestPollSignatureCheckNeedsNoClockLock(t *testing.T) {
+	r := newRig(t)
+	r.configure(t, 1)
+	cfg := r.c.cfg
+	good := ed25519.Sign(r.priv, PollSignedBytes("enc-1", t0.UnixMilli(), 1))
+	req := PollRequest{EnclaveID: "enc-1", TMs: t0.UnixMilli(), Seq: 1, KeyID: cfg.MonitorKeyID, Sig: base64.RawURLEncoding.EncodeToString(good)}
+
+	r.c.mu.Lock()
+	defer r.c.mu.Unlock()
+	if err := verifyPoll(cfg, req); err != nil {
+		t.Fatalf("a good poll: %v", err)
+	}
+	bad := req
+	bad.Seq = 2
+	if err := verifyPoll(cfg, bad); !errors.Is(err, ErrBadPoll) {
+		t.Fatalf("a poll whose fields moved under the signature: %v", err)
+	}
+	if err := verifyPoll(MonitorConfig{}, req); !errors.Is(err, ErrNotConfigured) {
+		t.Fatalf("no config: %v", err)
+	}
+}

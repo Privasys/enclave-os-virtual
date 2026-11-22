@@ -144,6 +144,29 @@ const (
 	VerdictIgnoredStale = "ignored_stale"
 )
 
+// verifyPoll checks that req is the pinned monitor's signed poll for this
+// enclave under cfg.
+func verifyPoll(cfg MonitorConfig, req PollRequest) error {
+	if !cfg.configured() {
+		return ErrNotConfigured
+	}
+	if req.EnclaveID != cfg.EnclaveID {
+		return fmt.Errorf("%w: enclave_id %q is not this enclave", ErrBadPoll, req.EnclaveID)
+	}
+	if !strings.EqualFold(req.KeyID, cfg.MonitorKeyID) {
+		return fmt.Errorf("%w: key_id %q is not the pinned monitor key %q", ErrBadPoll, req.KeyID, cfg.MonitorKeyID)
+	}
+	pub, err := cfg.publicKey()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrBadPoll, err)
+	}
+	sig, err := b64Decode(req.Sig)
+	if err != nil || !ed25519.Verify(pub, PollSignedBytes(req.EnclaveID, req.TMs, req.Seq), sig) {
+		return fmt.Errorf("%w: bad signature", ErrBadPoll)
+	}
+	return nil
+}
+
 // Poll applies a monitor poll. It returns ErrNotConfigured when no monitor is
 // pinned, ErrBadPoll when the poll is not the pinned monitor's, and an error
 // wrapping ErrUnavailable when NTS is needed and unreachable (the clock then
@@ -158,24 +181,21 @@ const (
 // What a poll finds goes in its reply only, never in an incident: the monitor
 // is already talking to the runtime, and an incident would make it poll again.
 func (c *Clock) Poll(req PollRequest) (PollReply, error) {
+	// The signature is checked against a snapshot of the pinned config,
+	// outside the clock lock, so unauthenticated polls never hold up the
+	// readers of trusted time. The poll is then applied only if the config
+	// is still the one it was checked against.
+	c.mu.Lock()
+	cfg := c.cfg
+	c.mu.Unlock()
+	if err := verifyPoll(cfg, req); err != nil {
+		return PollReply{}, err
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.cfg.configured() {
-		return PollReply{}, ErrNotConfigured
-	}
-	if req.EnclaveID != c.cfg.EnclaveID {
-		return PollReply{}, fmt.Errorf("%w: enclave_id %q is not this enclave", ErrBadPoll, req.EnclaveID)
-	}
-	if !strings.EqualFold(req.KeyID, c.cfg.MonitorKeyID) {
-		return PollReply{}, fmt.Errorf("%w: key_id %q is not the pinned monitor key %q", ErrBadPoll, req.KeyID, c.cfg.MonitorKeyID)
-	}
-	pub, err := c.cfg.publicKey()
-	if err != nil {
-		return PollReply{}, fmt.Errorf("%w: %v", ErrBadPoll, err)
-	}
-	sig, err := b64Decode(req.Sig)
-	if err != nil || !ed25519.Verify(pub, PollSignedBytes(req.EnclaveID, req.TMs, req.Seq), sig) {
-		return PollReply{}, fmt.Errorf("%w: bad signature", ErrBadPoll)
+	if c.cfg != cfg {
+		return PollReply{}, fmt.Errorf("%w: the monitor config changed while the poll was checked", ErrBadPoll)
 	}
 
 	reply := PollReply{EnclaveID: c.cfg.EnclaveID, Runtime: "virtual", ConfigKeyID: c.cfg.MonitorKeyID, NTS: PollNTS{Servers: []string{}}}
