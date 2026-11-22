@@ -4,6 +4,8 @@ import (
 	"net/http/httptest"
 	"regexp"
 	"testing"
+
+	"github.com/Privasys/enclave-os-virtual/internal/apifees"
 )
 
 func TestConsentRefusal(t *testing.T) {
@@ -67,7 +69,6 @@ func TestBilledResponseWriterImplicitOK(t *testing.T) {
 	}
 }
 
-
 // An app-supplied acting user is never a payer, with or without the
 // manager's peer verdict: only a verified bearer, the spend-token payer the
 // gate asserted, or the relay-asserted subject can be charged.
@@ -95,5 +96,35 @@ func TestCallerIdentityIgnoresAppSuppliedActingUser(t *testing.T) {
 	r.Header.Set("X-Privasys-Peer-Payer", "payer-sub")
 	if got := s.callerIdentity(r); got != "payer-sub" {
 		t.Fatalf("spend-token payer wins: got %q", got)
+	}
+}
+
+func TestLookupPriceCanonicalPath(t *testing.T) {
+	tbl := apifees.Table{
+		"/tools/search": {Tool: "search", Rule: apifees.PriceRule{Credits: 5}},
+		"/Tools/Search": {Tool: "search-dup", Rule: apifees.PriceRule{Credits: 9}},
+		"/tools/free":   {Tool: "free", Rule: apifees.PriceRule{Credits: 1}},
+	}
+	for _, p := range []string{
+		"/tools/search",
+		"/tools//search",
+		"/tools/./search",
+		"/x/../tools/search",
+		"/tools;a=b/search;c",
+		`/tools\search`,
+		"/TOOLS/SEARCH",
+		"/tools/search/",
+		"/.well-known/../tools/search",
+		"/__privasys/../tools/search",
+	} {
+		pt, ok := lookupPrice(tbl, p)
+		if !ok || pt.Rule.Credits != 9 {
+			t.Errorf("%q: got %+v ok=%v, want the higher price of the endpoint", p, pt, ok)
+		}
+	}
+	for _, p := range []string{"/tools/other", "/.well-known/x", "/__privasys/init", "/__PRIVASYS/init"} {
+		if _, ok := lookupPrice(tbl, p); ok {
+			t.Errorf("%q must not be priced", p)
+		}
 	}
 }

@@ -40,15 +40,37 @@ func (s *Server) priceForRequest(containerName string, r *http.Request) (apifees
 	if r.Method == http.MethodOptions {
 		return apifees.PricedTool{}, false
 	}
-	if strings.HasPrefix(r.URL.Path, "/.well-known/") || strings.HasPrefix(r.URL.Path, "/__privasys/") {
-		return apifees.PricedTool{}, false
-	}
 	tbl := s.launcher.ContainerPrices(containerName)
 	if tbl == nil {
 		return apifees.PricedTool{}, false
 	}
-	pt, ok := tbl[r.URL.Path]
-	return pt, ok
+	return lookupPrice(tbl, r.URL.Path)
+}
+
+// lookupPrice matches a request path against a price table on the canonical
+// form both sides share (configPathKey: no ;params, forward slashes, cleaned,
+// lowercase), so every spelling of a priced endpoint that reaches the app as
+// that endpoint is priced. The well-known and platform exemptions are decided
+// on the same canonical path. When two table entries share a canonical key,
+// the higher price applies.
+func lookupPrice(tbl apifees.Table, reqPath string) (apifees.PricedTool, bool) {
+	key := configPathKey(reqPath)
+	if strings.HasPrefix(key, "/.well-known/") || strings.HasPrefix(key, "/__privasys/") {
+		return apifees.PricedTool{}, false
+	}
+	var (
+		best  apifees.PricedTool
+		found bool
+	)
+	for endpoint, pt := range tbl {
+		if configPathKey(endpoint) != key {
+			continue
+		}
+		if !found || pt.Rule.Credits > best.Rule.Credits {
+			best, found = pt, true
+		}
+	}
+	return best, found
 }
 
 // callerIdentity resolves who is calling, for charge attribution. A

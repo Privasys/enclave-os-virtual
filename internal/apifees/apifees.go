@@ -78,7 +78,9 @@ type PricedTool struct {
 }
 
 // Table maps an HTTP request path (the tool's manifest `endpoint`) to its
-// price. Paths are matched literally, like the configure gate.
+// price. The runtime matches a request on the canonical path (no ;params,
+// forward slashes, cleaned, case-folded), like the configure gate, so every
+// spelling of an endpoint that reaches the app as that endpoint is priced.
 type Table map[string]PricedTool
 
 // manifest mirrors just the fields of the MCP manifest that pricing needs.
