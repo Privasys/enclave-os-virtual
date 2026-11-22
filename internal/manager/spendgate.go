@@ -44,6 +44,14 @@ const (
 	spendVerdictNo = time.Minute
 	// spendRevokedPoll is how often the revoked-session feed is polled.
 	spendRevokedPoll = 30 * time.Second
+	// spendVerdictKeep is how long an expired verdict is kept as the outage
+	// fallback before it is dropped.
+	spendVerdictKeep = time.Hour
+	// spendVerdictMax caps the verdict cache; at the cap an arbitrary entry
+	// makes room for the new one.
+	spendVerdictMax = 10_000
+	// spendVerdictSweep bounds how often the cache is swept.
+	spendVerdictSweep = time.Minute
 )
 
 // spendVerdict is one cached billable answer.
@@ -63,8 +71,9 @@ type spendGate struct {
 	token   string
 	http    *http.Client
 
-	mu       sync.Mutex
-	verdicts map[string]spendVerdict
+	mu        sync.Mutex
+	verdicts  map[string]spendVerdict
+	lastSweep time.Time
 
 	revMu   sync.RWMutex
 	revoked map[string]struct{}
@@ -199,9 +208,30 @@ func (g *spendGate) billable(ctx context.Context, p *spend.Payer) (bool, string)
 		ttl = spendVerdictNo
 	}
 	g.mu.Lock()
-	g.verdicts[key] = spendVerdict{billable: ok, reason: reason, until: now.Add(ttl)}
+	g.storeVerdictLocked(key, spendVerdict{billable: ok, reason: reason, until: now.Add(ttl)}, now)
 	g.mu.Unlock()
 	return ok, reason
+}
+
+// storeVerdictLocked caches a verdict, dropping verdicts expired for longer
+// than spendVerdictKeep (at most once per spendVerdictSweep) and keeping the
+// cache within spendVerdictMax.
+func (g *spendGate) storeVerdictLocked(key string, v spendVerdict, now time.Time) {
+	if now.Sub(g.lastSweep) >= spendVerdictSweep {
+		g.lastSweep = now
+		for k, old := range g.verdicts {
+			if now.Sub(old.until) > spendVerdictKeep {
+				delete(g.verdicts, k)
+			}
+		}
+	}
+	if _, ok := g.verdicts[key]; !ok && len(g.verdicts) >= spendVerdictMax {
+		for k := range g.verdicts {
+			delete(g.verdicts, k)
+			break
+		}
+	}
+	g.verdicts[key] = v
 }
 
 func (g *spendGate) askBillable(ctx context.Context, p *spend.Payer) (bool, string, error) {

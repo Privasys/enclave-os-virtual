@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -198,5 +199,25 @@ func TestSpendGateMgmtOutageFailsOpenWithCache(t *testing.T) {
 	r2 := f.request(t, "cai.apps.test", "alice")
 	if code, _ := f.gate.enforce(r2, "cai.apps.test", ""); code != 0 || r2.Header.Get(spend.HeaderPayer) != "alice" {
 		t.Fatalf("outage with nothing cached must serve: %d", code)
+	}
+}
+
+// The verdict cache drops long-expired verdicts and never grows past its cap.
+func TestSpendVerdictCacheIsBounded(t *testing.T) {
+	g := newSpendGate(zap.NewNop(), "", "", "")
+	now := time.Unix(1_700_000_000, 0)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.storeVerdictLocked("old", spendVerdict{billable: true, until: now}, now)
+	now = now.Add(spendVerdictKeep + 2*spendVerdictSweep)
+	g.storeVerdictLocked("fresh", spendVerdict{billable: true, until: now.Add(spendVerdictOK)}, now)
+	if _, ok := g.verdicts["old"]; ok {
+		t.Fatal("a verdict expired beyond the keep window survived the sweep")
+	}
+	for i := 0; i < spendVerdictMax+100; i++ {
+		g.storeVerdictLocked(fmt.Sprintf("k%d", i), spendVerdict{until: now.Add(time.Minute)}, now)
+	}
+	if n := len(g.verdicts); n != spendVerdictMax {
+		t.Fatalf("cache holds %d, want the cap %d", n, spendVerdictMax)
 	}
 }
