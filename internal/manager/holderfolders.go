@@ -623,11 +623,16 @@ func (s *Server) askHolder(w http.ResponseWriter, container, appID, resource, su
 	if !outstanding {
 		var err error
 		if p, err = s.caps.create(container, appID, appID, subject, decl); err != nil {
+			if errors.Is(err, errTooManyAsks) {
+				w.Header().Set("Retry-After", "60")
+				s.jsonError(w, http.StatusTooManyRequests, err.Error())
+				return
+			}
 			s.jsonError(w, http.StatusInternalServerError, "could not create the capability request")
 			return
 		}
 		p.ServiceURL = "https://" + host + holderCapabilitiesPath
-		go s.pushCapabilityRequest(container, subject, p.Nonce, host)
+		s.startCapabilityPush(container, subject, p.Nonce, host)
 	}
 	s.writeJSON(w, http.StatusConflict, map[string]any{
 		"status": "needs_holder", "nonce": p.Nonce, "app_host": host,

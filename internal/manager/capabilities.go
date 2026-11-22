@@ -174,7 +174,28 @@ type capabilityBroker struct {
 	// "the app" on the nonce route, which is this same process. That second
 	// call must find the ask settled, not unknown.
 	settled map[string]*settledAsk // nonce -> outcome
+	// lastSweep is when expired asks and outcomes were last dropped; sweeps
+	// run at most once per capabilitySweepInterval.
+	lastSweep time.Time
+	// pushSlots bounds the wallet pushes (each one a quote and a round trip
+	// to the control plane) in flight at once.
+	pushSlots chan struct{}
 }
+
+const (
+	// maxPendingAsksPerContainer bounds the outstanding asks one container
+	// may hold; an ask past it is refused until older ones settle or expire.
+	maxPendingAsksPerContainer = 256
+	// capabilitySweepInterval bounds how often the ask tables are swept.
+	capabilitySweepInterval = time.Second
+	// maxCapabilityPushes bounds concurrent wallet pushes; past it a push
+	// is skipped (the ask stays reachable from the app's UI by nonce).
+	maxCapabilityPushes = 16
+)
+
+// errTooManyAsks is returned by create when the container's pending asks are
+// at their cap.
+var errTooManyAsks = errors.New("too many outstanding capability requests")
 
 // settledAsk is what the nonce route can still say about a consumed nonce.
 type settledAsk struct {
@@ -188,12 +209,23 @@ func newCapabilityBroker(dir string, log *zap.Logger) *capabilityBroker {
 		log = zap.NewNop()
 	}
 	return &capabilityBroker{
-		dir:     dir,
-		log:     log,
-		keys:    map[string]ed25519.PrivateKey{},
-		pending: map[string]*capabilityPending{},
-		grants:  map[string]*capabilityGrant{},
-		settled: map[string]*settledAsk{},
+		dir:       dir,
+		log:       log,
+		keys:      map[string]ed25519.PrivateKey{},
+		pending:   map[string]*capabilityPending{},
+		grants:    map[string]*capabilityGrant{},
+		settled:   map[string]*settledAsk{},
+		pushSlots: make(chan struct{}, maxCapabilityPushes),
+	}
+}
+
+// tryPushSlot takes one of the push slots without waiting; release returns it.
+func (b *capabilityBroker) tryPushSlot() (release func(), ok bool) {
+	select {
+	case b.pushSlots <- struct{}{}:
+		return func() { <-b.pushSlots }, true
+	default:
+		return nil, false
 	}
 }
 
@@ -321,6 +353,15 @@ func (b *capabilityBroker) create(container, appID, resourceApp, subject string,
 		return nil, err
 	}
 	b.sweepLocked()
+	n := 0
+	for _, q := range b.pending {
+		if q.container == container {
+			n++
+		}
+	}
+	if n >= maxPendingAsksPerContainer {
+		return nil, errTooManyAsks
+	}
 	p := &capabilityPending{
 		Nonce:         base64.RawURLEncoding.EncodeToString(raw),
 		BindingPubkey: base64.StdEncoding.EncodeToString(k.Public().(ed25519.PublicKey)),
@@ -348,11 +389,22 @@ func (b *capabilityBroker) get(nonce string) (*capabilityPending, bool) {
 	defer b.mu.Unlock()
 	b.sweepLocked()
 	p, ok := b.pending[nonce]
+	if ok && time.Since(p.created) > capabilityPendingTTL {
+		return nil, false
+	}
 	return p, ok
 }
 
+// sweepLocked drops expired asks and outcomes, at most once per
+// capabilitySweepInterval. Readers still check expiry themselves (an entry
+// may outlive its TTL by up to one interval).
 func (b *capabilityBroker) sweepLocked() {
-	cut := time.Now().UTC().Add(-capabilityPendingTTL)
+	now := time.Now().UTC()
+	if now.Sub(b.lastSweep) < capabilitySweepInterval {
+		return
+	}
+	b.lastSweep = now
+	cut := now.Add(-capabilityPendingTTL)
 	for n, p := range b.pending {
 		if p.created.Before(cut) {
 			delete(b.pending, n)
@@ -372,7 +424,7 @@ func (b *capabilityBroker) settledBy(nonce, container string) (*capabilityGrant,
 	defer b.mu.Unlock()
 	b.sweepLocked()
 	s, ok := b.settled[nonce]
-	if !ok || s.container != container {
+	if !ok || s.container != container || time.Since(s.at) > capabilityPendingTTL {
 		return nil, false
 	}
 	return s.grant, true
@@ -383,7 +435,7 @@ func (b *capabilityBroker) settledBy(nonce, container string) (*capabilityGrant,
 func (b *capabilityBroker) resolve(nonce, status, capabilityID string, result map[string]string) (*capabilityPending, *capabilityGrant, error) {
 	b.mu.Lock()
 	p, ok := b.pending[nonce]
-	if !ok {
+	if !ok || time.Since(p.created) > capabilityPendingTTL {
 		b.mu.Unlock()
 		return nil, nil, errors.New("unknown or expired capability request")
 	}
@@ -569,6 +621,11 @@ func (s *Server) handleResourceRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	p, err := s.caps.create(name, appID, resourceApp, body.Subject, decl)
+	if errors.Is(err, errTooManyAsks) {
+		w.Header().Set("Retry-After", "60")
+		s.jsonError(w, http.StatusTooManyRequests, err.Error())
+		return
+	}
 	if err != nil {
 		s.log.Warn("capability request failed", zap.String("container", name), zap.Error(err))
 		s.jsonError(w, http.StatusInternalServerError, "could not create the capability request")
@@ -578,7 +635,7 @@ func (s *Server) handleResourceRequest(w http.ResponseWriter, r *http.Request) {
 	if decl.Kind == launcher.AppStorageKind {
 		p.ServiceURL = "https://" + host + holderCapabilitiesPath
 	}
-	go s.pushCapabilityRequest(name, body.Subject, p.Nonce, host)
+	s.startCapabilityPush(name, body.Subject, p.Nonce, host)
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"status": capabilityStatusPending, "nonce": p.Nonce, "app_host": host,
 	})
@@ -732,6 +789,22 @@ func (s *Server) serveCapabilityWellKnown(w http.ResponseWriter, r *http.Request
 }
 
 // ---- Push through the control plane -------------------------------------
+
+// startCapabilityPush runs pushCapabilityRequest in the background when a
+// push slot is free, and otherwise skips it: the push is best effort and the
+// ask stays reachable from the app's UI by nonce.
+func (s *Server) startCapabilityPush(container, subject, nonce, host string) {
+	release, ok := s.caps.tryPushSlot()
+	if !ok {
+		s.log.Warn("capability push skipped: too many in flight; the ask stays reachable by nonce",
+			zap.String("container", container))
+		return
+	}
+	go func() {
+		defer release()
+		s.pushCapabilityRequest(container, subject, nonce, host)
+	}()
+}
 
 // pushCapabilityRequest asks the control plane to push the holder's wallet,
 // authenticated with the app's own attested identity (the same triple an
@@ -928,8 +1001,9 @@ func (b *capabilityBroker) pendingFor(container, resource, subject string) (*cap
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.sweepLocked()
+	cut := time.Now().UTC().Add(-capabilityPendingTTL)
 	for _, p := range b.pending {
-		if p.container == container && p.resource == resource && p.subject == subject {
+		if p.container == container && p.resource == resource && p.subject == subject && !p.created.Before(cut) {
 			return p, true
 		}
 	}

@@ -4,10 +4,12 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"go.uber.org/zap"
@@ -267,5 +269,51 @@ func TestCapabilityReasksWhenPermissionsMoveOrOnRetry(t *testing.T) {
 	}
 	if b.granted("app1", "storage", "sub-A").Permissions[0] != "read" {
 		t.Fatal("the approved permissions must persist with the outcome")
+	}
+}
+
+// Pending asks are capped per container, expired ones are never served even
+// between sweeps, and wallet pushes in flight are bounded.
+func TestCapabilityAsksAndPushesAreBounded(t *testing.T) {
+	b := newCapabilityBroker("", nil)
+	for i := 0; i < maxPendingAsksPerContainer; i++ {
+		if _, err := b.create("ctr", "app1", "svc", "sub", testDecl); err != nil {
+			t.Fatalf("ask %d: %v", i, err)
+		}
+	}
+	if _, err := b.create("ctr", "app1", "svc", "sub", testDecl); !errors.Is(err, errTooManyAsks) {
+		t.Fatalf("ask past the cap: err=%v", err)
+	}
+	other, err := b.create("ctr2", "app2", "svc", "sub", testDecl)
+	if err != nil {
+		t.Fatalf("another container has its own budget: %v", err)
+	}
+
+	// An expired ask is not served even when the sweep has not run yet.
+	b.mu.Lock()
+	b.pending[other.Nonce].created = time.Now().UTC().Add(-2 * capabilityPendingTTL)
+	b.lastSweep = time.Now().UTC()
+	b.mu.Unlock()
+	if _, ok := b.get(other.Nonce); ok {
+		t.Fatal("an expired ask was served")
+	}
+	if _, _, err := b.resolve(other.Nonce, "approved", "c", nil); err == nil {
+		t.Fatal("an expired ask was resolved")
+	}
+
+	var releases []func()
+	for i := 0; i < maxCapabilityPushes; i++ {
+		release, ok := b.tryPushSlot()
+		if !ok {
+			t.Fatalf("push slot %d refused", i)
+		}
+		releases = append(releases, release)
+	}
+	if _, ok := b.tryPushSlot(); ok {
+		t.Fatal("a push past the bound was admitted")
+	}
+	releases[0]()
+	if _, ok := b.tryPushSlot(); !ok {
+		t.Fatal("a released slot must be reusable")
 	}
 }
