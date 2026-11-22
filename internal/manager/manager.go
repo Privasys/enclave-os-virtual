@@ -2226,16 +2226,17 @@ func configMethodMatches(want string, r *http.Request) bool {
 	return same(r.URL.Query().Get("_method"))
 }
 
-// configPathKey is the form two spellings of one route share: no
-// ";parameters", backslashes as slashes, dot segments and doubled or
+// configPathKey is the form two spellings of one route share: backslashes as
+// slashes, no ";parameters" on any segment, dot segments and doubled or
 // trailing slashes resolved, lower case.
 func configPathKey(p string) string {
-	if i := strings.IndexByte(p, ';'); i >= 0 {
-		p = p[:i]
+	segs := strings.Split(strings.ReplaceAll(p, `\`, "/"), "/")
+	for i, s := range segs {
+		if j := strings.IndexByte(s, ';'); j >= 0 {
+			segs[i] = s[:j]
+		}
 	}
-	p = strings.ReplaceAll(p, `\`, "/")
-	p = path.Clean("/" + p)
-	return strings.ToLower(p)
+	return strings.ToLower(path.Clean("/" + strings.Join(segs, "/")))
 }
 
 // authorizeConfigure decides whether the caller may hit the container's

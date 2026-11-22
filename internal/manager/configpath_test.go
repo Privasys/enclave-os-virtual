@@ -11,7 +11,7 @@ func TestConfigureGateCoversEverySpellingOfThePath(t *testing.T) {
 	spec := &launcher.ConfigAPISpec{Method: "POST", Path: "/configure"}
 	guarded := []string{
 		"/configure", "/Configure", "/CONFIGURE", "/configure/", "//configure",
-		"/x/../configure", "/./configure", "/configure;jsessionid=1", `/\configure`,
+		"/x/../configure", "/./configure", "/configure;jsessionid=1", `/\configure`, "/x;y/../configure", "/;a/configure;b",
 		"/%63onfigure", "/configure?a=1",
 	}
 	for _, target := range guarded {
