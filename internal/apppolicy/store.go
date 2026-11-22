@@ -96,19 +96,25 @@ func (s *Store) Approver(appID string) string {
 	return s.pins[appID].Approver
 }
 
-// Accept verifies an approved policy document against what the app already
-// knows and, when it holds, records the new pin. It returns the document and
-// the exact bytes that were approved, which is what the certificate advertises.
+// Accept verifies an approved policy document for the app appID against what
+// the app already knows and, when it holds, records the new pin. It returns
+// the document and the exact bytes that were approved, which is what the
+// certificate advertises.
 //
 // The rules are:
+//   - the document must name appID, the app it was delivered to; anything
+//     else is refused before the store is touched;
 //   - the first document pins the subject who approved it, and its seq;
 //   - later documents must be approved by that subject and carry a higher seq;
 //   - a document may name the NEXT approver, which is how an app changes hands,
 //     but it must still be approved by the current one.
-func (s *Store) Accept(raw []byte) (*Document, []byte, error) {
+func (s *Store) Accept(raw []byte, appID string) (*Document, []byte, error) {
 	doc, rawDoc, token, err := Parse(raw)
 	if err != nil {
 		return nil, nil, err
+	}
+	if appID == "" || doc.AppID != appID {
+		return nil, nil, fmt.Errorf("apppolicy: the document is for a different app")
 	}
 	if s.verifier == nil {
 		return nil, nil, fmt.Errorf("apppolicy: no token verifier configured")

@@ -86,14 +86,14 @@ func TestFirstDocumentPinsTheApprover(t *testing.T) {
 		t.Fatal("a fresh app is already pinned")
 	}
 	doc := docJSON(1, "")
-	if _, _, err := s.Accept(envelope(t, doc, idp.approve(t, "owner-1", doc))); err != nil {
+	if _, _, err := s.Accept(envelope(t, doc, idp.approve(t, "owner-1", doc)), testApp); err != nil {
 		t.Fatalf("first document refused: %v", err)
 	}
 	if s.Approver(testApp) != "owner-1" {
 		t.Fatalf("approver = %q", s.Approver(testApp))
 	}
 	next := docJSON(2, "")
-	if _, _, err := s.Accept(envelope(t, next, idp.approve(t, "someone-else", next))); err == nil {
+	if _, _, err := s.Accept(envelope(t, next, idp.approve(t, "someone-else", next)), testApp); err == nil {
 		t.Fatal("another subject's approval was accepted")
 	}
 }
@@ -107,10 +107,10 @@ func TestApprovalDoesNotTransferToAnotherDocument(t *testing.T) {
 	token := idp.approve(t, "owner-1", approved)
 
 	other := docJSON(1, `,"owners":["attacker"]`)
-	if _, _, err := s.Accept(envelope(t, other, token)); err == nil {
+	if _, _, err := s.Accept(envelope(t, other, token), testApp); err == nil {
 		t.Fatal("an approval for one document installed another")
 	}
-	if _, _, err := s.Accept(envelope(t, approved, token)); err != nil {
+	if _, _, err := s.Accept(envelope(t, approved, token), testApp); err != nil {
 		t.Fatalf("the approved document was refused: %v", err)
 	}
 }
@@ -119,17 +119,17 @@ func TestSequenceMustAdvance(t *testing.T) {
 	idp := newIdP()
 	s := newStore(t, idp)
 	five := docJSON(5, "")
-	if _, _, err := s.Accept(envelope(t, five, idp.approve(t, "owner-1", five))); err != nil {
+	if _, _, err := s.Accept(envelope(t, five, idp.approve(t, "owner-1", five)), testApp); err != nil {
 		t.Fatal(err)
 	}
 	for _, seq := range []uint64{4, 5} {
 		d := docJSON(seq, "")
-		if _, _, err := s.Accept(envelope(t, d, idp.approve(t, "owner-1", d))); err == nil {
+		if _, _, err := s.Accept(envelope(t, d, idp.approve(t, "owner-1", d)), testApp); err == nil {
 			t.Errorf("seq %d was accepted after 5", seq)
 		}
 	}
 	six := docJSON(6, "")
-	if _, _, err := s.Accept(envelope(t, six, idp.approve(t, "owner-1", six))); err != nil {
+	if _, _, err := s.Accept(envelope(t, six, idp.approve(t, "owner-1", six)), testApp); err != nil {
 		t.Errorf("seq 6 refused: %v", err)
 	}
 }
@@ -140,25 +140,25 @@ func TestApproverHandover(t *testing.T) {
 	idp := newIdP()
 	s := newStore(t, idp)
 	first := docJSON(1, "")
-	if _, _, err := s.Accept(envelope(t, first, idp.approve(t, "owner-1", first))); err != nil {
+	if _, _, err := s.Accept(envelope(t, first, idp.approve(t, "owner-1", first)), testApp); err != nil {
 		t.Fatal(err)
 	}
 	handover := docJSON(2, `,"approver":"owner-2"`)
 	// The incoming owner cannot hand the app to themselves.
-	if _, _, err := s.Accept(envelope(t, handover, idp.approve(t, "owner-2", handover))); err == nil {
+	if _, _, err := s.Accept(envelope(t, handover, idp.approve(t, "owner-2", handover)), testApp); err == nil {
 		t.Fatal("the incoming approver approved their own handover")
 	}
-	if _, _, err := s.Accept(envelope(t, handover, idp.approve(t, "owner-1", handover))); err != nil {
+	if _, _, err := s.Accept(envelope(t, handover, idp.approve(t, "owner-1", handover)), testApp); err != nil {
 		t.Fatalf("handover refused: %v", err)
 	}
 	if got := s.Approver(testApp); got != "owner-2" {
 		t.Fatalf("approver after handover = %q", got)
 	}
 	after := docJSON(3, "")
-	if _, _, err := s.Accept(envelope(t, after, idp.approve(t, "owner-1", after))); err == nil {
+	if _, _, err := s.Accept(envelope(t, after, idp.approve(t, "owner-1", after)), testApp); err == nil {
 		t.Error("the previous owner still approved policy")
 	}
-	if _, _, err := s.Accept(envelope(t, after, idp.approve(t, "owner-2", after))); err != nil {
+	if _, _, err := s.Accept(envelope(t, after, idp.approve(t, "owner-2", after)), testApp); err != nil {
 		t.Errorf("the new owner was refused: %v", err)
 	}
 }
@@ -171,7 +171,7 @@ func TestApprovalMustBeAStepUp(t *testing.T) {
 	doc := docJSON(1, "")
 	token := idp.approve(t, "owner-1", doc)
 	idp.tokens[token]["amr"] = []interface{}{"pwd"}
-	if _, _, err := s.Accept(envelope(t, doc, token)); err == nil {
+	if _, _, err := s.Accept(envelope(t, doc, token), testApp); err == nil {
 		t.Fatal("a token with no step-up was accepted")
 	}
 }
@@ -182,7 +182,7 @@ func TestUnverifiableTokenIsRefused(t *testing.T) {
 	doc := docJSON(1, "")
 	token := idp.approve(t, "owner-1", doc)
 	idp.fail = true
-	if _, _, err := s.Accept(envelope(t, doc, token)); err == nil {
+	if _, _, err := s.Accept(envelope(t, doc, token), testApp); err == nil {
 		t.Fatal("a token the identity provider rejected was accepted")
 	}
 }
@@ -195,7 +195,7 @@ func TestPinsSurviveReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	doc := docJSON(2, "")
-	if _, _, err := s.Accept(envelope(t, doc, idp.approve(t, "owner-1", doc))); err != nil {
+	if _, _, err := s.Accept(envelope(t, doc, idp.approve(t, "owner-1", doc)), testApp); err != nil {
 		t.Fatal(err)
 	}
 	again, err := NewStore(path, idp)
@@ -205,7 +205,7 @@ func TestPinsSurviveReload(t *testing.T) {
 	if again.Approver(testApp) != "owner-1" {
 		t.Fatal("the pin did not survive a reload")
 	}
-	if _, _, err := again.Accept(envelope(t, doc, idp.approve(t, "owner-1", doc))); err == nil {
+	if _, _, err := again.Accept(envelope(t, doc, idp.approve(t, "owner-1", doc)), testApp); err == nil {
 		t.Error("the reloaded store forgot the sequence")
 	}
 }
@@ -227,7 +227,7 @@ func TestMalformedEnvelopesAreRefused(t *testing.T) {
 		"edited in situ": envelope(t, strings.Replace(doc, `"seq":1`, `"seq":9`, 1), good),
 	}
 	for name, raw := range cases {
-		if _, _, err := s.Accept(raw); err == nil {
+		if _, _, err := s.Accept(raw, testApp); err == nil {
 			t.Errorf("%s was accepted", name)
 		}
 	}
@@ -240,7 +240,7 @@ func TestConstellationIsPinnedAndKept(t *testing.T) {
 	s := newStore(t, idp)
 
 	withVault := docJSON(1, `,"constellation":{"mrenclave":"abc123","endpoints":["v1:8443","v2:8443"]}`)
-	if _, _, err := s.Accept(envelope(t, withVault, idp.approve(t, "owner-1", withVault))); err != nil {
+	if _, _, err := s.Accept(envelope(t, withVault, idp.approve(t, "owner-1", withVault)), testApp); err != nil {
 		t.Fatal(err)
 	}
 	c := s.ConstellationFor(testApp)
@@ -267,7 +267,7 @@ func TestConstellationIsPinnedAndKept(t *testing.T) {
 
 	// A later document about peers alone must not unpin the vault.
 	peers := docJSON(2, `,"dependencies":{"entries":[]}`)
-	if _, _, err := s.Accept(envelope(t, peers, idp.approve(t, "owner-1", peers))); err != nil {
+	if _, _, err := s.Accept(envelope(t, peers, idp.approve(t, "owner-1", peers)), testApp); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.ConstellationFor(testApp); !got.Valid() || got.Mrenclave != "abc123" {
@@ -308,5 +308,25 @@ func TestValidateDomains(t *testing.T) {
 		if err := ValidateDomains(d); err == nil {
 			t.Errorf("ValidateDomains(%v) = nil, want an error", d)
 		}
+	}
+}
+
+// A document delivered to another app is refused before anything is pinned,
+// however validly it was approved.
+func TestDocumentForAnotherAppPinsNothing(t *testing.T) {
+	idp := newIdP()
+	s := newStore(t, idp)
+	doc := docJSON(1, "")
+	raw := envelope(t, doc, idp.approve(t, "owner-1", doc))
+	for _, target := range []string{"99998888777766665555444433332222", ""} {
+		if _, _, err := s.Accept(raw, target); err == nil {
+			t.Fatalf("a document for %s was accepted for %q", testApp, target)
+		}
+	}
+	if s.Pinned(testApp) {
+		t.Fatal("a refused document pinned its app")
+	}
+	if _, _, err := s.Accept(raw, testApp); err != nil {
+		t.Fatalf("the same document for its own app: %v", err)
 	}
 }

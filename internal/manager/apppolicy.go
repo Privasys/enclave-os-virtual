@@ -52,7 +52,7 @@ func (s *Server) handleSetAppPolicy(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadRequest, "could not read the policy document")
 		return
 	}
-	doc, rawDoc, err := s.policy.Accept(raw)
+	doc, rawDoc, err := s.policy.Accept(raw, appID)
 	if err != nil {
 		s.log.Warn("app policy refused", zap.String("container", name), zap.Error(err))
 		s.jsonError(w, http.StatusForbidden, err.Error())
