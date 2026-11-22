@@ -2192,7 +2192,8 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 // container's declared configure endpoint. The app's router decides what a
 // path means, and routers are lenient: many ignore letter case or a trailing
 // slash, resolve dot segments and doubled slashes, drop a ";parameter", or
-// take the method from an override header. So the gate compares canonical
+// take the method from an override header or a `_method` form field, or
+// accept a format suffix (`/configure.json`). So the gate compares canonical
 // forms and errs toward guarding: anything an app might route to its
 // configure handler needs the owner.
 func matchesConfigAPI(spec *launcher.ConfigAPISpec, r *http.Request) bool {
@@ -2202,13 +2203,41 @@ func matchesConfigAPI(spec *launcher.ConfigAPISpec, r *http.Request) bool {
 	if !configMethodMatches(spec.Method, r) {
 		return false
 	}
-	return configPathKey(r.URL.Path) == configPathKey(spec.Path)
+	want := configPathKey(spec.Path)
+	got := configPathKey(r.URL.Path)
+	return got == want || stripFormatSuffix(got) == want
+}
+
+// stripFormatSuffix drops one trailing ".ext" of 1 to 5 letters from the last
+// segment ("/configure.json" -> "/configure"): many routers treat it as a
+// response format and serve the same handler. Used only for comparison.
+func stripFormatSuffix(p string) string {
+	dot := strings.LastIndexByte(p, '.')
+	if dot <= strings.LastIndexByte(p, '/')+1 {
+		return p
+	}
+	ext := p[dot+1:]
+	if len(ext) < 1 || len(ext) > 5 {
+		return p
+	}
+	for i := 0; i < len(ext); i++ {
+		if c := ext[i]; (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
+			return p
+		}
+	}
+	return p[:dot]
 }
 
 // configMethodOverrides are the headers frameworks read the method from.
 var configMethodOverrides = []string{"X-HTTP-Method-Override", "X-HTTP-Method", "X-Method-Override"}
 
 func configMethodMatches(want string, r *http.Request) bool {
+	// Frameworks also read the method from a `_method` field in a POST form
+	// body, which the gate cannot inspect without consuming it. So any POST
+	// to the configure path is guarded, whatever method the app declared.
+	if r.Method == http.MethodPost {
+		return true
+	}
 	same := func(m string) bool {
 		m = strings.TrimSpace(m)
 		return strings.EqualFold(want, m) || (strings.EqualFold(want, http.MethodGet) && strings.EqualFold(m, http.MethodHead))

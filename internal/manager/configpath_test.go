@@ -50,3 +50,34 @@ func TestConfigureGateCoversMethodOverrides(t *testing.T) {
 		t.Error("HEAD skipped a GET configure gate")
 	}
 }
+
+func TestConfigureGateGuardsEveryPost(t *testing.T) {
+	// A POST form body may carry `_method=PUT` (Rails, Laravel, Symfony), so
+	// a POST to the configure path is guarded whatever method is declared.
+	for _, m := range []string{"PUT", "PATCH", "DELETE", "GET"} {
+		spec := &launcher.ConfigAPISpec{Method: m, Path: "/configure"}
+		if !matchesConfigAPI(spec, httptest.NewRequest("POST", "/configure", nil)) {
+			t.Errorf("POST skipped a %s configure gate", m)
+		}
+		if matchesConfigAPI(spec, httptest.NewRequest("POST", "/elsewhere", nil)) {
+			t.Errorf("POST elsewhere was taken for the %s configure path", m)
+		}
+	}
+}
+
+func TestConfigureGateCoversFormatSuffix(t *testing.T) {
+	spec := &launcher.ConfigAPISpec{Method: "POST", Path: "/api/configure"}
+	for _, target := range []string{"/api/configure.json", "/api/configure.XML", "/api/Configure.yaml", "/api/configure.j"} {
+		if !matchesConfigAPI(spec, httptest.NewRequest("POST", target, nil)) {
+			t.Errorf("POST %s skipped the configure gate", target)
+		}
+	}
+	for _, target := range []string{"/api/configure.toolong", "/api/configure.js0n", "/api.json/configure2", "/api/configure.json.bak"} {
+		if matchesConfigAPI(spec, httptest.NewRequest("POST", target, nil)) {
+			t.Errorf("POST %s was taken for the configure path", target)
+		}
+	}
+	if got := stripFormatSuffix("/.json"); got != "/.json" {
+		t.Errorf("a dot file must keep its name, got %q", got)
+	}
+}
