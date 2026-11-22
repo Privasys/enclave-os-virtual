@@ -89,6 +89,32 @@ type ingressVerifier struct {
 	mu       sync.RWMutex
 	policies map[string]*ingressPolicy // lowercase host → allowed callers
 	verdicts map[string]*peerVerdict   // connection id → verdict
+	// lastSweep is when expired verdicts were last dropped (at most once per
+	// verdictSweepInterval, and only once the table is large).
+	lastSweep time.Time
+}
+
+const (
+	// verdictSweepAbove is the table size above which a new verdict sweeps
+	// expired ones; verdictSweepInterval bounds how often that happens.
+	verdictSweepAbove    = 4096
+	verdictSweepInterval = time.Second
+)
+
+// recordVerdictLocked stores a connection's verdict, first dropping expired
+// verdicts when the table is large and the last sweep is older than
+// verdictSweepInterval. Callers hold v.mu.
+func (v *ingressVerifier) recordVerdictLocked(conn string, pv *peerVerdict) {
+	now := time.Now()
+	if len(v.verdicts) > verdictSweepAbove && now.Sub(v.lastSweep) >= verdictSweepInterval {
+		v.lastSweep = now
+		for k, vd := range v.verdicts {
+			if now.Sub(vd.mono) > verdictTTL {
+				delete(v.verdicts, k)
+			}
+		}
+	}
+	v.verdicts[conn] = pv
 }
 
 // anyCallerAppID is the allowed-caller entry that admits ANY attested caller
@@ -348,14 +374,7 @@ func (v *ingressVerifier) verifyPeerEvidence(req *peerEvidenceRequest) error {
 		return fmt.Errorf("cannot record the caller's verdict: %w", err)
 	}
 	v.mu.Lock()
-	if len(v.verdicts) > 4096 {
-		for k, vd := range v.verdicts {
-			if time.Since(vd.mono) > verdictTTL {
-				delete(v.verdicts, k)
-			}
-		}
-	}
-	v.verdicts[req.Conn] = &peerVerdict{certFP: sha256.Sum256(certDER), host: host, info: info, at: at, mono: time.Now()}
+	v.recordVerdictLocked(req.Conn, &peerVerdict{certFP: sha256.Sum256(certDER), host: host, info: info, at: at, mono: time.Now()})
 	v.mu.Unlock()
 	v.log.Debug("ingress caller verified",
 		zap.String("host", host),

@@ -1,8 +1,10 @@
 package manager
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	ratls "enclave-os-mini/clients/go/ratls"
 
@@ -166,5 +168,33 @@ func TestAppIDMatches(t *testing.T) {
 	}
 	if appIDMatches("deadbeef", nil) {
 		t.Fatal("empty caller app-id must not match")
+	}
+}
+
+// A large verdict table sweeps expired verdicts at most once per interval,
+// not on every insert.
+func TestVerdictSweepIsRateLimited(t *testing.T) {
+	v := newTestVerifier()
+	old := time.Now().Add(-2 * verdictTTL)
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for i := 0; i <= verdictSweepAbove; i++ {
+		v.verdicts[fmt.Sprintf("old-%d", i)] = &peerVerdict{mono: old}
+	}
+	v.recordVerdictLocked("a", &peerVerdict{mono: time.Now()})
+	if n := len(v.verdicts); n != 1 {
+		t.Fatalf("after the first sweep the table holds %d, want 1", n)
+	}
+	for i := 0; i <= verdictSweepAbove; i++ {
+		v.verdicts[fmt.Sprintf("old2-%d", i)] = &peerVerdict{mono: old}
+	}
+	v.recordVerdictLocked("b", &peerVerdict{mono: time.Now()})
+	if n := len(v.verdicts); n != verdictSweepAbove+3 {
+		t.Fatalf("a second sweep ran inside the interval: table holds %d", n)
+	}
+	v.lastSweep = time.Now().Add(-2 * verdictSweepInterval)
+	v.recordVerdictLocked("c", &peerVerdict{mono: time.Now()})
+	if n := len(v.verdicts); n != 3 {
+		t.Fatalf("after the interval the table holds %d, want 3", n)
 	}
 }
