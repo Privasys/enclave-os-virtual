@@ -334,3 +334,30 @@ func TestDirectPrivateOptIn(t *testing.T) {
 		t.Fatalf("payer on the direct leg = %q, want none (no wallet, no account: 402)", got)
 	}
 }
+
+// Letter case and a trailing dot on the Host never open a second bucket or a
+// second credential count, and forget clears what the host accumulated.
+func TestServePublicHostSpellingsShareState(t *testing.T) {
+	s := surfServer(t, strings.Replace(webManifest, `"cors":"*"`, `"cors":"*","limits":{"rps":1,"burst":2}`, 1))
+	now := time.Unix(1_700_000_000, 0)
+	s.publicLimiter.now = func() time.Time { return now }
+	spellings := []string{surfHost, strings.ToUpper(surfHost), surfHost + "."}
+	hdr := map[string]string{"X-Forwarded-For": "198.51.100.7", "Authorization": "Bearer x"}
+	for i, h := range spellings {
+		r := clearReq("GET", "/api/v1/public/feed", hdr)
+		r.Host = h
+		rec := httptest.NewRecorder()
+		_, ok := s.servePublic(rec, r)
+		if want := i < 2; ok != want {
+			t.Fatalf("host %q: ok=%v want %v (status %d)", h, ok, want, rec.Code)
+		}
+	}
+	seen := s.PublicCredentialsSeen()
+	if len(seen) != 1 || seen[surfHost] != 2 {
+		t.Fatalf("credentials seen = %v, want one entry for %q", seen, surfHost)
+	}
+	s.publicLimiter.forget(strings.ToUpper(surfHost) + ".")
+	if len(s.PublicCredentialsSeen()) != 0 || len(s.publicLimiter.buckets) != 0 {
+		t.Fatal("forget must clear every spelling of the host")
+	}
+}

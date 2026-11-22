@@ -230,7 +230,10 @@ func clearTransport(r *http.Request) string {
 // through, and returns the writer the rest of the chain must use. ok is
 // false when the request was answered here (preflight, refusal, rate limit).
 func (s *Server) servePublic(w http.ResponseWriter, r *http.Request) (http.ResponseWriter, bool) {
-	host := hostOnly(r.Host)
+	// One spelling of the host for every use below (surface lookup, rate
+	// limit, credential count, metric labels), so letter case or a trailing
+	// dot never opens a second bucket or a second series.
+	host := publicHostKey(hostOnly(r.Host))
 	// Read before the header scrub below removes the leg marker.
 	transport := clearTransport(r)
 	surf := s.surfacesOf(host)
@@ -487,10 +490,17 @@ func (l *publicLimiter) allow(host, client string, rps float64, burst int) bool 
 	return true
 }
 
+// publicHostKey is the one form of a host the public surface keys on: lower
+// case, without a trailing dot.
+func publicHostKey(h string) string {
+	return strings.TrimSuffix(strings.ToLower(h), ".")
+}
+
 func (l *publicLimiter) forget(host string) {
 	if l == nil {
 		return
 	}
+	host = publicHostKey(host)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for k := range l.buckets {
