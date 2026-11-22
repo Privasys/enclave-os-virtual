@@ -183,3 +183,62 @@ func TestDirectDeclaration(t *testing.T) {
 		t.Fatal("an unknown direct mode must be refused")
 	}
 }
+
+// Surface decisions hold for the path as sent and as a router resolves it,
+// and prefixes end on a segment boundary.
+func TestSurfaceDecisionsUseTheCanonicalPath(t *testing.T) {
+	s := &Surfaces{
+		Static: []string{"/", "/assets/", "/static", "/favicon.svg"},
+		Public: []Route{{Method: "GET", Path: "/api/v1/public/"}, {Method: "POST", Path: "/hook"}},
+	}
+	for _, p := range []string{"/", "/assets/app.js", "/static", "/static/x.css", "/favicon.svg"} {
+		if !s.IsStatic(p) {
+			t.Errorf("%s must be static", p)
+		}
+	}
+	for _, p := range []string{
+		"/static/../api/x", "/assets/../api/secret", "/assets/;x/../../api/x",
+		`/assets\..\api\x`, "/staticX", "/static.bak", "/favicon.svgz", "/x/../assets/app.js",
+		"/API/x", "/Api", "/assets/../private", "/;x",
+	} {
+		if s.IsStatic(p) {
+			t.Errorf("%s must not be static", p)
+		}
+	}
+	if _, ok := s.PublicRoute("GET", "/api/v1/public/../private/x"); ok {
+		t.Error("a dot segment left the public subtree")
+	}
+	if _, ok := s.PublicRoute("POST", "/hook;x"); ok {
+		t.Error("a ;parameter matched an exact public route")
+	}
+	if _, ok := s.PublicRoute("GET", "/api/v1/public/feed"); !ok {
+		t.Error("the public subtree must still match")
+	}
+}
+
+func TestCanonicalPathAndUnderPrefix(t *testing.T) {
+	for in, want := range map[string]string{
+		"/a/./b": "/a/b", "/a//b/": "/a/b/", "/a/../b": "/b", "/a;x/b;y": "/a/b",
+		`/a\b`: "/a/b", "": "/", "/..": "/", "/a/.": "/a", "/A/B": "/A/B",
+	} {
+		if got := CanonicalPath(in); got != want {
+			t.Errorf("CanonicalPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for _, c := range []struct {
+		p, prefix string
+		want      bool
+	}{
+		{"/__privasys/v1/capabilities", "/__privasys/v1/capabilities", true},
+		{"/__privasys/v1/capabilities/abc", "/__privasys/v1/capabilities", true},
+		{"/__privasys/v1/capabilitiesX", "/__privasys/v1/capabilities", false},
+		{"/__privasys/v1/capabilities/../../../api", "/__privasys/v1/capabilities", false},
+		{"/.well-known/x", "/.well-known/", true},
+		{"/.well-known/../api/x", "/.well-known/", false},
+		{"/.well-known;x/../api", "/.well-known/", false},
+	} {
+		if got := UnderPrefix(c.p, c.prefix); got != c.want {
+			t.Errorf("UnderPrefix(%q, %q) = %v, want %v", c.p, c.prefix, got, c.want)
+		}
+	}
+}

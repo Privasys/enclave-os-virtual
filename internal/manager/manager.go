@@ -69,6 +69,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/network"
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
+	"github.com/Privasys/enclave-os-virtual/internal/surfaces"
 	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 )
 
@@ -356,45 +357,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 	// marker — TLS terminates here), the platform mux (token-authed
 	// management API, not a user data plane), the bootstrap endpoint
 	// (exempted inside the middleware), and well-known metadata.
-	sr.SetRequireSealed(func(r *http.Request) bool {
-		if !isClearLeg(r) {
-			return false
-		}
-		if _, ok := s.lookupAppHost(hostOnly(r.Host)); !ok {
-			return false
-		}
-		// Liveness/readiness endpoints stay probeable in the clear:
-		// they carry no user data and the chat front-end polls them
-		// through the gateway before any sealed session exists
-		// (reachability probe + model cold-start retry).
-		if r.Method == http.MethodGet &&
-			(r.URL.Path == "/healthz" || r.URL.Path == "/readiness") {
-			return false
-		}
-		if strings.HasPrefix(r.URL.Path, capabilityWellKnown) {
-			return false // the wallet's attested fetch is plain HTTPS by design
-		}
-		if strings.HasPrefix(r.URL.Path, holderCapabilitiesPath) {
-			return false // the wallet's mint, list and revoke: bearer plus wallet proof, no session
-		}
-		if strings.HasPrefix(r.URL.Path, holderFilesPath) {
-			return false // the holder's window onto their folder: bearer, no session
-		}
-		// Declared surfaces (surfaces.go): the app's static browser shell
-		// (GET/HEAD, measured code, so the page can load before a sealed
-		// session exists) and its explicit public routes, from the measured
-		// manifest. Served anonymous by construction further down
-		// (servePublic). Everything undeclared stays sealed.
-		if s.clearAllowed(r) {
-			return false
-		}
-		// A direct adopter name whose app opted in serves its private
-		// routes too (direct.go): nobody but the enclave reads that leg.
-		if isDirectLeg(r) && s.surfacesOf(hostOnly(r.Host)).DirectPrivate() {
-			return false
-		}
-		return !strings.HasPrefix(r.URL.Path, "/.well-known/")
-	})
+	sr.SetRequireSealed(s.requiresSealed)
 	// Sealed WebSocket relay: resolve a request Host to the app container's
 	// plaintext WebSocket endpoint. The relay terminates the sealed WS from
 	// the browser and pumps unsealed frames to this upstream (see
@@ -497,6 +460,58 @@ func (s *Server) lookupAppHost(hostname string) (string, bool) {
 		return "", false
 	}
 	return v.(string), true
+}
+
+// requiresSealed is the session relay's require-sealed predicate: whether a
+// plaintext request must be refused because it reached an app host in the
+// clear outside every exemption.
+func (s *Server) requiresSealed(r *http.Request) bool {
+	if !isClearLeg(r) {
+		return false
+	}
+	if _, ok := s.lookupAppHost(hostOnly(r.Host)); !ok {
+		return false
+	}
+	// Liveness/readiness endpoints stay probeable in the clear:
+	// they carry no user data and the chat front-end polls them
+	// through the gateway before any sealed session exists
+	// (reachability probe + model cold-start retry).
+	if r.Method == http.MethodGet &&
+		(r.URL.Path == "/healthz" || r.URL.Path == "/readiness") {
+		return false
+	}
+	// Path exemptions are decided on segment boundaries and on the path
+	// both as sent and resolved, so a dot segment or a ";parameter"
+	// cannot carry a request out of the exempt subtree.
+	if isCapabilityWellKnown(r.URL.Path) {
+		return false // the wallet's attested fetch is plain HTTPS by design
+	}
+	if surfaces.UnderPrefix(r.URL.Path, holderCapabilitiesPath) {
+		return false // the wallet's mint, list and revoke: bearer plus wallet proof, no session
+	}
+	if surfaces.UnderPrefix(r.URL.Path, holderFilesPath) {
+		return false // the holder's window onto their folder: bearer, no session
+	}
+	// Declared surfaces (surfaces.go): the app's static browser shell
+	// (GET/HEAD, measured code, so the page can load before a sealed
+	// session exists) and its explicit public routes, from the measured
+	// manifest. Served anonymous by construction further down
+	// (servePublic). Everything undeclared stays sealed.
+	if s.clearAllowed(r) {
+		return false
+	}
+	// A direct adopter name whose app opted in serves its private
+	// routes too (direct.go): nobody but the enclave reads that leg.
+	if isDirectLeg(r) && s.surfacesOf(hostOnly(r.Host)).DirectPrivate() {
+		return false
+	}
+	return !surfaces.UnderPrefix(r.URL.Path, "/.well-known/")
+}
+
+// isCapabilityWellKnown reports whether p is exactly one of the wallet-facing
+// capability endpoints.
+func isCapabilityWellKnown(p string) bool {
+	return p == capabilityRequestPath || p == capabilityResultPath
 }
 
 func hostOnly(h string) string {
@@ -696,7 +711,7 @@ func (s *Server) Start(ctx context.Context) error {
 			// Wallet-facing capability endpoints live on the app's hostname but
 			// are answered by the manager for any app that declares resources
 			// (before the ingress gate: the wallet presents no client cert).
-			if strings.HasPrefix(r.URL.Path, capabilityWellKnown) {
+			if isCapabilityWellKnown(r.URL.Path) {
 				if name := s.launcher.AppHostnameToContainer(host); name != "" && len(s.launcher.ContainerResourceDecls(name)) > 0 {
 					s.serveCapabilityWellKnown(w, r, name)
 					return
@@ -705,14 +720,14 @@ func (s *Server) Start(ctx context.Context) error {
 			// The holder-facing pair the wallet speaks to every resource
 			// service, served here for the kinds the enclave OS is the service
 			// of (app_storage) and for the caller-side revoke of every kind.
-			if strings.HasPrefix(r.URL.Path, holderCapabilitiesPath) {
+			if surfaces.UnderPrefix(r.URL.Path, holderCapabilitiesPath) {
 				if name := s.launcher.AppHostnameToContainer(host); name != "" && len(s.launcher.ContainerResourceDecls(name)) > 0 {
 					s.serveHolderCapabilities(w, r, name)
 					return
 				}
 			}
 			// The holder's window onto their folder (holderfiles.go).
-			if strings.HasPrefix(r.URL.Path, holderFilesPath) {
+			if surfaces.UnderPrefix(r.URL.Path, holderFilesPath) {
 				if name := s.launcher.AppHostnameToContainer(host); name != "" && len(s.launcher.ContainerResourceDecls(name)) > 0 {
 					s.serveHolderFiles(w, r, name)
 					return

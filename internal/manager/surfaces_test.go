@@ -448,3 +448,29 @@ func TestBearerToken(t *testing.T) {
 		}
 	}
 }
+
+// The clear-leg exemptions hold only for the exempt subtree itself: a dot
+// segment, a ";parameter" or a longer segment name keeps a request sealed.
+func TestRequiresSealedExemptionsAreSegmentAware(t *testing.T) {
+	s := surfServer(t, webManifest)
+	for _, p := range []string{
+		"/.well-known/../api/secret", "/.well-known;x/../api/secret",
+		holderCapabilitiesPath + "X", holderCapabilitiesPath + "/../../../api/secret",
+		holderFilesPath + "/../../../../api/secret", capabilityRequestPath + "/../../../api/secret",
+		"/.well-known/privasys/capability-other/../../../api/secret",
+		"/assets/../api/secret", "/assetsX",
+	} {
+		if !s.requiresSealed(clearReq("GET", p, nil)) {
+			t.Errorf("GET %s was let through in the clear", p)
+		}
+	}
+	for _, p := range []string{
+		"/.well-known/openid-configuration", capabilityRequestPath, capabilityResultPath,
+		holderCapabilitiesPath, holderCapabilitiesPath + "/abc", holderFilesPath + "/x",
+		"/assets/app.js", "/healthz",
+	} {
+		if s.requiresSealed(clearReq("GET", p, nil)) {
+			t.Errorf("GET %s must stay reachable in the clear", p)
+		}
+	}
+}

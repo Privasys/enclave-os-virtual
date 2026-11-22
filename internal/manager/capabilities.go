@@ -53,7 +53,6 @@ import (
 
 const (
 	capabilityPendingTTL    = 15 * time.Minute
-	capabilityWellKnown     = "/.well-known/privasys/capability-"
 	capabilityRequestPath   = "/.well-known/privasys/capability-request"
 	capabilityResultPath    = "/.well-known/privasys/capability-result"
 	capabilityPushType      = "capability-request"

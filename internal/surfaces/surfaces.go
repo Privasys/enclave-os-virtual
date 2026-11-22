@@ -33,6 +33,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path"
 	"sort"
 	"strings"
 )
@@ -64,11 +65,52 @@ func (r Route) Matches(method, path string) bool {
 	return r.coversPath(path)
 }
 
-func (r Route) coversPath(path string) bool {
+// coversPath reports whether the route covers path, as sent and in its
+// canonical form: a path that only matches once resolved, or only as sent,
+// is not covered.
+func (r Route) coversPath(p string) bool {
+	return r.coversOne(p) && r.coversOne(CanonicalPath(p))
+}
+
+func (r Route) coversOne(p string) bool {
 	if r.Prefix() {
-		return strings.HasPrefix(path, r.Path)
+		return strings.HasPrefix(p, r.Path)
 	}
-	return path == r.Path
+	return p == r.Path
+}
+
+// CanonicalPath is the form a router resolves a request path to: backslashes
+// as slashes, no ";parameters" on any segment, dot segments and doubled
+// slashes resolved. A trailing slash is kept, so a prefix ending in "/" still
+// covers its directory. Letter case is kept.
+func CanonicalPath(p string) string {
+	segs := strings.Split(strings.ReplaceAll(p, `\`, "/"), "/")
+	for i, s := range segs {
+		if j := strings.IndexByte(s, ';'); j >= 0 {
+			segs[i] = s[:j]
+		}
+	}
+	joined := "/" + strings.Join(segs, "/")
+	c := path.Clean(joined)
+	if strings.HasSuffix(joined, "/") && c != "/" {
+		c += "/"
+	}
+	return c
+}
+
+// UnderPrefix reports whether p is prefix itself or below it, on segment
+// boundaries: "/assets" covers "/assets" and "/assets/x" but not
+// "/assetsX"; "/assets/" covers what starts with it. Both p as sent and its
+// canonical form must be under prefix.
+func UnderPrefix(p, prefix string) bool {
+	return underPrefixOne(p, prefix) && underPrefixOne(CanonicalPath(p), prefix)
+}
+
+func underPrefixOne(p, prefix string) bool {
+	if strings.HasSuffix(prefix, "/") {
+		return strings.HasPrefix(p, prefix)
+	}
+	return p == prefix || strings.HasPrefix(p, prefix+"/")
 }
 
 // Limits bounds the clear leg per client address.
@@ -133,10 +175,15 @@ func (s *Surfaces) Burst() int {
 	return s.Limits.Burst
 }
 
-// IsStatic reports whether path is under a declared static prefix. The
-// data plane is never static: /api* is excluded whatever is declared, and a
-// lone "/" matches the root document only.
+// IsStatic reports whether path is under a declared static prefix, on
+// segment boundaries, both as sent and in its canonical form. The data plane
+// is never static: /api* (in any letter case) is excluded whatever is
+// declared, and a lone "/" matches the root document only.
 func (s *Surfaces) IsStatic(path string) bool {
+	return s.isStaticOne(path) && s.isStaticOne(CanonicalPath(path))
+}
+
+func (s *Surfaces) isStaticOne(path string) bool {
 	if s == nil || isAPI(path) {
 		return false
 	}
@@ -150,7 +197,7 @@ func (s *Surfaces) IsStatic(path string) bool {
 			}
 			continue
 		}
-		if path == p || strings.HasPrefix(path, p) {
+		if underPrefixOne(path, p) {
 			return true
 		}
 	}
@@ -235,6 +282,7 @@ func (s *Surfaces) CoversPath(path string) bool {
 }
 
 func isAPI(path string) bool {
+	path = strings.ToLower(path)
 	return path == "/api" || strings.HasPrefix(path, "/api/")
 }
 
