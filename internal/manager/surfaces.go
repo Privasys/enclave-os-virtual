@@ -453,6 +453,22 @@ type bucket struct {
 const limiterGCInterval = time.Minute
 const limiterIdle = 5 * time.Minute
 
+// maxLimiterBuckets caps the bucket table. When it is full a client without
+// a bucket is refused until the periodic sweep frees room, so the table (and
+// the sweep under the lock) stays bounded however many addresses arrive.
+const maxLimiterBuckets = 50_000
+
+// limiterClientKey is the client part of a bucket key: an IPv4 address as
+// is, an IPv6 address by its /64 (one subscriber's allocation), anything
+// unparseable as given.
+func limiterClientKey(client string) string {
+	ip := net.ParseIP(client)
+	if ip == nil || ip.To4() != nil {
+		return client
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
 func newPublicLimiter() *publicLimiter {
 	return &publicLimiter{buckets: map[string]*bucket{}, creds: map[string]uint64{}, now: time.Now}
 }
@@ -472,9 +488,12 @@ func (l *publicLimiter) allow(host, client string, rps float64, burst int) bool 
 		}
 		l.lastGC = now
 	}
-	key := host + "|" + client
+	key := host + "|" + limiterClientKey(client)
 	b := l.buckets[key]
 	if b == nil {
+		if len(l.buckets) >= maxLimiterBuckets {
+			return false
+		}
 		b = &bucket{tokens: float64(burst), last: now}
 		l.buckets[key] = b
 	}

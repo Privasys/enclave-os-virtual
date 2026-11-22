@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -359,5 +360,42 @@ func TestServePublicHostSpellingsShareState(t *testing.T) {
 	s.publicLimiter.forget(strings.ToUpper(surfHost) + ".")
 	if len(s.PublicCredentialsSeen()) != 0 || len(s.publicLimiter.buckets) != 0 {
 		t.Fatal("forget must clear every spelling of the host")
+	}
+}
+
+func TestPublicLimiterBoundsAndIPv6Prefix(t *testing.T) {
+	l := newPublicLimiter()
+	now := time.Unix(1_700_000_000, 0)
+	l.now = func() time.Time { return now }
+
+	// Two addresses in one IPv6 /64 share a bucket; another /64 does not.
+	if !l.allow("h", "2001:db8:1:2::1", 1, 1) {
+		t.Fatal("first request refused")
+	}
+	if l.allow("h", "2001:db8:1:2:ffff::9", 1, 1) {
+		t.Fatal("a second address in the same /64 must share the bucket")
+	}
+	if !l.allow("h", "2001:db8:1:3::1", 1, 1) {
+		t.Fatal("another /64 has its own bucket")
+	}
+
+	// A full table refuses a new client but keeps serving known ones.
+	for i := len(l.buckets); i < maxLimiterBuckets; i++ {
+		l.buckets[fmt.Sprintf("fill|%d", i)] = &bucket{tokens: 1, last: now}
+	}
+	if l.allow("h", "198.51.100.1", 1, 5) {
+		t.Fatal("a full table must refuse a new client")
+	}
+	if len(l.buckets) != maxLimiterBuckets {
+		t.Fatalf("table grew past the cap: %d", len(l.buckets))
+	}
+	now = now.Add(2 * time.Second)
+	if !l.allow("h", "2001:db8:1:3::2", 1, 1) {
+		t.Fatal("a known client keeps its bucket when the table is full")
+	}
+	// Once idle buckets are swept, new clients are admitted again.
+	now = now.Add(limiterIdle + limiterGCInterval)
+	if !l.allow("h", "198.51.100.1", 1, 5) {
+		t.Fatal("the sweep must free room")
 	}
 }
