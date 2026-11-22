@@ -80,6 +80,13 @@ type WalletCallVerifier struct {
 	mu        sync.Mutex
 	keys      map[string]*jwkKey
 	fetchedAt time.Time
+
+	// refreshMu serialises JWKS fetches and guards lastRefresh, the time of
+	// the last attempt, successful or not. Fetches happen at most once per
+	// oidcJWKSMinRefresh, and never under mu, so lookups that hit the cache
+	// are not held behind a network round trip.
+	refreshMu   sync.Mutex
+	lastRefresh time.Time
 }
 
 // NewWalletCallVerifier returns a verifier reading the wallet-provider
@@ -195,30 +202,57 @@ func (v *WalletCallVerifier) verifySigned(token, typ string) (map[string]interfa
 }
 
 // keyFor returns the wallet-provider key with this kid, refreshing the
-// cached JWKS when the kid is unknown or the cache has aged out.
+// cached JWKS when the kid is unknown or the cache has aged out. A refresh
+// happens at most once per oidcJWKSMinRefresh across all callers, whether
+// the previous attempt succeeded or failed.
 func (v *WalletCallVerifier) keyFor(kid string) (*jwkKey, error) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	fresh := time.Since(v.fetchedAt) < jwksTTL
-	if fresh {
-		if k := v.lookupLocked(kid); k != nil {
+	if k, fresh := v.cachedKey(kid); k != nil && fresh {
+		return k, nil
+	}
+
+	v.refreshMu.Lock()
+	defer v.refreshMu.Unlock()
+
+	// Another caller may have refreshed while we waited.
+	k, fresh := v.cachedKey(kid)
+	if k != nil && fresh {
+		return k, nil
+	}
+	if time.Since(v.lastRefresh) < oidcJWKSMinRefresh {
+		// Tried moments ago: answer from what we have (a stale key rather
+		// than losing the exemption on a blip) instead of fetching again.
+		if k != nil {
 			return k, nil
 		}
+		return nil, fmt.Errorf("unknown wallet-provider key %q", kid)
 	}
+	v.lastRefresh = time.Now()
+
 	keys, err := (&Verifier{log: v.log}).fetchJWKS(v.jwksURI)
 	if err != nil {
 		// Serve a stale key rather than losing the exemption on a blip.
-		if k := v.lookupLocked(kid); k != nil {
+		if k != nil {
 			return k, nil
 		}
 		return nil, fmt.Errorf("wallet-provider JWKS: %w", err)
 	}
+	v.mu.Lock()
 	v.keys = keys
 	v.fetchedAt = time.Now()
-	if k := v.lookupLocked(kid); k != nil {
+	k = v.lookupLocked(kid)
+	v.mu.Unlock()
+	if k != nil {
 		return k, nil
 	}
 	return nil, fmt.Errorf("unknown wallet-provider key %q", kid)
+}
+
+// cachedKey looks kid up in the cached JWKS, reporting whether the set is
+// within its TTL.
+func (v *WalletCallVerifier) cachedKey(kid string) (*jwkKey, bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.lookupLocked(kid), time.Since(v.fetchedAt) < jwksTTL
 }
 
 // lookupLocked resolves a kid, tolerating a JWKS with a single unlabelled

@@ -10,8 +10,10 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -249,4 +251,49 @@ func TestWalletCallJWKSUnreachableIsNotWallet(t *testing.T) {
 		t.Fatal("no anchor means no exemption")
 	}
 
+}
+
+// Unknown kids, or a JWKS that fails to load, trigger at most one fetch per
+// oidcJWKSMinRefresh; a known kid is answered from the cache.
+func TestWalletCallJWKSRefreshIsRateLimited(t *testing.T) {
+	provider, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	j := jwkOf(provider)
+	j["kid"] = "test-key"
+	var fetches, failing atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fetches.Add(1)
+		if failing.Load() != 0 {
+			http.Error(w, "down", http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"keys": []interface{}{j, map[string]interface{}{"kid": "other", "kty": "EC", "crv": "P-256", "x": j["x"], "y": j["y"]}}})
+	}))
+	t.Cleanup(srv.Close)
+	v := NewWalletCallVerifier(srv.URL, zap.NewNop())
+
+	if _, err := v.keyFor("test-key"); err != nil {
+		t.Fatalf("known kid: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := v.keyFor(fmt.Sprintf("random-%d", i)); err == nil {
+			t.Fatal("an unknown kid must not resolve")
+		}
+	}
+	if _, err := v.keyFor("test-key"); err != nil {
+		t.Fatalf("known kid after misses: %v", err)
+	}
+	if n := fetches.Load(); n != 1 {
+		t.Fatalf("fetches = %d, want 1", n)
+	}
+
+	failing.Store(1)
+	v2 := NewWalletCallVerifier(srv.URL, zap.NewNop())
+	for i := 0; i < 5; i++ {
+		if _, err := v2.keyFor("test-key"); err == nil {
+			t.Fatal("a failed fetch must not yield a key")
+		}
+	}
+	if n := fetches.Load(); n != 2 {
+		t.Fatalf("a failed fetch must be remembered: fetches = %d, want 2", n)
+	}
 }
