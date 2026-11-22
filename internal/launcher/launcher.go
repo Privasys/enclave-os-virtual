@@ -723,6 +723,9 @@ type Launcher struct {
 	// mintedIdentities maps container name → SPKI hash of each client
 	// identity minted for it → expiry (MintIdentity, ContainerOwnsIdentity).
 	mintedIdentities map[string]map[[32]byte]time.Time
+	// mintedSweptAt is when each container's mintedIdentities was last
+	// swept of expired entries (at most once per mintedSweepInterval).
+	mintedSweptAt map[string]time.Time
 
 	// Loaded container specs (mirrors what is running).
 	specs map[string]manifest.Container
@@ -3166,6 +3169,10 @@ func (l *Launcher) LookupContainerByToken(token string) string {
 // that container. The identity's SPKI hash is remembered for its validity so
 // the manager only mints client evidence (ContainerOwnsIdentity) for keys it
 // issued to that container.
+//
+// A container holds at most maxMintedIdentities live identities; past that a
+// mint is refused until expired ones are swept, which happens at most once
+// per mintedSweepInterval.
 func (l *Launcher) MintIdentity(name string) (certPEM, keyPEM []byte, err error) {
 	l.mu.RLock()
 	digest := l.imageDigests[name]
@@ -3174,25 +3181,57 @@ func (l *Launcher) MintIdentity(name string) (certPEM, keyPEM []byte, err error)
 	if len(digest) == 0 {
 		return nil, nil, fmt.Errorf("launcher: unknown container %q", name)
 	}
+	if !l.mintRoom(name) {
+		return nil, nil, fmt.Errorf("launcher: container %q holds %d live identities; retry later", name, maxMintedIdentities)
+	}
 	id, err := vaultkey.MintIdentity(digest, appID)
 	if err != nil {
 		return nil, nil, err
 	}
-	// MintIdentity succeeded, so trusted time answered a moment ago; if it
-	// fails now, sweeping is simply skipped.
-	now, nowErr := trustedtime.Now()
 	l.mu.Lock()
 	if l.mintedIdentities[name] == nil {
 		l.mintedIdentities[name] = make(map[[32]byte]time.Time)
 	}
-	for h, exp := range l.mintedIdentities[name] {
-		if nowErr == nil && now.After(exp) {
-			delete(l.mintedIdentities[name], h)
-		}
+	if len(l.mintedIdentities[name]) >= maxMintedIdentities {
+		// Another mint took the last slot while this one was signing.
+		l.mu.Unlock()
+		return nil, nil, fmt.Errorf("launcher: container %q holds %d live identities; retry later", name, maxMintedIdentities)
 	}
 	l.mintedIdentities[name][id.SPKIHash] = id.NotAfter
 	l.mu.Unlock()
 	return vaultkey.EncodeIdentityPEM(id.Cert)
+}
+
+const (
+	// maxMintedIdentities bounds the live client identities one container
+	// may hold (each lives an hour; real use is a handful).
+	maxMintedIdentities = 1024
+	// mintedSweepInterval bounds how often a container's identity table is
+	// swept of expired entries.
+	mintedSweepInterval = time.Minute
+)
+
+// mintRoom sweeps the container's expired identities when the last sweep is
+// older than mintedSweepInterval, and reports whether there is room for one
+// more. Without trusted time the sweep is skipped.
+func (l *Launcher) mintRoom(name string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	minted := l.mintedIdentities[name]
+	if now, err := trustedtime.Now(); err == nil && len(minted) > 0 {
+		if l.mintedSweptAt == nil {
+			l.mintedSweptAt = make(map[string]time.Time)
+		}
+		if now.Sub(l.mintedSweptAt[name]) >= mintedSweepInterval {
+			for h, exp := range minted {
+				if now.After(exp) {
+					delete(minted, h)
+				}
+			}
+			l.mintedSweptAt[name] = now
+		}
+	}
+	return len(minted) < maxMintedIdentities
 }
 
 // ContainerOwnsIdentity reports whether spkiHash is the key of an unexpired
