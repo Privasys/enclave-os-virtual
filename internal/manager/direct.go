@@ -173,8 +173,8 @@ func takeWSBearer(h http.Header) (token string, ok bool) {
 			case p == "":
 			case p == wsProtocol:
 				ok = true
-			case strings.HasPrefix(p, wsBearerPrefix):
-				token = strings.TrimPrefix(p, wsBearerPrefix)
+			case len(p) >= len(wsBearerPrefix) && strings.EqualFold(p[:len(wsBearerPrefix)], wsBearerPrefix):
+				token = p[len(wsBearerPrefix):]
 			default:
 				rest = append(rest, p)
 			}
@@ -222,22 +222,22 @@ func isUpgrade(r *http.Request) bool {
 // No token is an anonymous request. A WebSocket opened on a token closes when
 // the token expires, and the client opens it again with a fresh one. ok is
 // false when the request was answered here.
+//
+// Authorization and the runtime's subprotocols are removed whatever they
+// hold, so nothing the runtime did not verify reaches the app as a
+// credential: the app learns the caller only from the asserted headers.
 func (s *Server) serveDirect(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 	r.Header.Del(directSubHeader)
 	r.Header.Del(AttestationLevelHeader)
 	stripAssertedProfile(r.Header)
 	r.Header.Set(TransportHeader, TransportDirect)
 
-	token := ""
-	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
-		token = strings.TrimPrefix(authz, "Bearer ")
-	}
-	if isUpgrade(r) {
-		if t, ok := takeWSBearer(r.Header); ok {
-			r = r.WithContext(context.WithValue(r.Context(), wsProtocolKey{}, true))
-			if token == "" {
-				token = t
-			}
+	token := bearerToken(r.Header.Get("Authorization"))
+	r.Header.Del("Authorization")
+	if t, ok := takeWSBearer(r.Header); ok && isUpgrade(r) {
+		r = r.WithContext(context.WithValue(r.Context(), wsProtocolKey{}, true))
+		if token == "" {
+			token = t
 		}
 	}
 	if token == "" {
@@ -254,7 +254,6 @@ func (s *Server) serveDirect(w http.ResponseWriter, r *http.Request) (*http.Requ
 		s.jsonError(w, http.StatusUnauthorized, "the token is not valid for this app")
 		return r, false
 	}
-	r.Header.Del("Authorization")
 	r.Header.Set(directSubHeader, u.Sub)
 	assertProfile(r.Header, u)
 	level := "unverified"
@@ -276,6 +275,16 @@ func (s *Server) serveDirect(w http.ResponseWriter, r *http.Request) (*http.Requ
 		r = r.WithContext(ctx)
 	}
 	return r, true
+}
+
+// bearerToken returns the credential of a Bearer Authorization value, the
+// scheme matched in any letter case (RFC 9110), or "".
+func bearerToken(authz string) string {
+	scheme, cred, found := strings.Cut(strings.TrimSpace(authz), " ")
+	if !found || !strings.EqualFold(scheme, "Bearer") {
+		return ""
+	}
+	return strings.TrimSpace(cred)
 }
 
 // appAudiences are the audiences an end user's token may carry for the app

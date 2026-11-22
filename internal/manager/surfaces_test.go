@@ -399,3 +399,52 @@ func TestPublicLimiterBoundsAndIPv6Prefix(t *testing.T) {
 		t.Fatal("the sweep must free room")
 	}
 }
+
+// On the direct private leg the bearer scheme is read in any letter case, and
+// no Authorization value or runtime subprotocol reaches the app unverified.
+func TestDirectPrivateNeverPassesAnUnverifiedCredential(t *testing.T) {
+	s := surfServer(t, strings.Replace(webManifest, `"cors":"*"`, `"cors":"*","direct":"private"`, 1))
+	direct := func(hdr map[string]string) (*http.Request, *httptest.ResponseRecorder, bool) {
+		r := clearReq("GET", "/api/v1/me", hdr)
+		r.Header.Set(edgeHeader, "direct")
+		rec := httptest.NewRecorder()
+		out, ok := s.serveDirect(rec, r)
+		return out, rec, ok
+	}
+	for _, authz := range []string{"bearer x.y.z", "BEARER x.y.z", "Bearer  x.y.z"} {
+		if _, rec, ok := direct(map[string]string{"Authorization": authz}); ok || rec.Code != http.StatusUnauthorized {
+			t.Errorf("%q: ok=%v code %d; want refused with 401", authz, ok, rec.Code)
+		}
+	}
+	for _, authz := range []string{"Basic dXNlcjpwYXNz", "Token abc", "x.y.z"} {
+		r, rec, ok := direct(map[string]string{"Authorization": authz})
+		if !ok {
+			t.Fatalf("%q: refused with %d; an unrecognised scheme is an anonymous request", authz, rec.Code)
+		}
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("%q reached the app", authz)
+		}
+	}
+	r, _, ok := direct(map[string]string{wsProtocolHeader: "chat, privasys.bearer.x.y.z"})
+	if !ok {
+		t.Fatal("a plain request with subprotocols was refused")
+	}
+	if got := r.Header.Get(wsProtocolHeader); got != "chat" {
+		t.Errorf("subprotocols reaching the app = %q, want only chat", got)
+	}
+	_, rec, ok := direct(map[string]string{"Connection": "Upgrade", "Upgrade": "websocket", wsProtocolHeader: "Privasys.Bearer.x.y.z"})
+	if ok || rec.Code != http.StatusUnauthorized {
+		t.Errorf("a bearer subprotocol in another case: ok=%v code %d; want refused with 401", ok, rec.Code)
+	}
+}
+
+func TestBearerToken(t *testing.T) {
+	for in, want := range map[string]string{
+		"Bearer abc": "abc", "bearer abc": "abc", " BEARER  abc ": "abc",
+		"Basic abc": "", "Bearer": "", "": "", "Bearerabc": "",
+	} {
+		if got := bearerToken(in); got != want {
+			t.Errorf("bearerToken(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
