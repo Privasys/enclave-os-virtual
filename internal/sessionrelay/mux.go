@@ -95,9 +95,10 @@ const (
 	// queue (so one maximum-size message still flows); beyond that the
 	// queue holds at most this many bytes before the stream is closed.
 	muxStreamQueueBytes = 8 * 1024 * 1024
-	// defaultMaxMuxConns bounds concurrent mux connections. The gateway
-	// keeps a small pool, so this sits well above real use.
-	defaultMaxMuxConns = 64
+	// defaultMaxMuxConns bounds concurrent mux connections. Each gateway
+	// keeps a small pool per app, so a host serving many apps through several
+	// gateways holds a few per app; this sits well above that.
+	defaultMaxMuxConns = 1024
 	// muxReadChunk is the step a frame payload buffer grows by: memory
 	// follows the bytes that actually arrive, never the declared length.
 	muxReadChunk = 64 * 1024
