@@ -198,6 +198,10 @@ type Manager struct {
 	// muxMaxStreamsPerSessionLifetime and cleared on session eviction.
 	// Guarded by mu.
 	muxUsedStreams map[string]map[uint64]struct{}
+	// muxConns counts live mux connections; maxMuxConns caps them (0 means
+	// defaultMaxMuxConns). Guarded by mu.
+	muxConns    int
+	maxMuxConns int
 }
 
 type rebindWindow struct {

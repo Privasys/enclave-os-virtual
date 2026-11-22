@@ -55,6 +55,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -89,6 +90,17 @@ const (
 	// reader must never block on one slow app socket, so overflow closes
 	// that stream instead of stalling the shared connection.
 	muxStreamQueue = 32
+	// muxStreamQueueBytes bounds the payload bytes queued on one stream
+	// waiting for its app socket. A frame is always admitted onto an empty
+	// queue (so one maximum-size message still flows); beyond that the
+	// queue holds at most this many bytes before the stream is closed.
+	muxStreamQueueBytes = 8 * 1024 * 1024
+	// defaultMaxMuxConns bounds concurrent mux connections. The gateway
+	// keeps a small pool, so this sits well above real use.
+	defaultMaxMuxConns = 64
+	// muxReadChunk is the step a frame payload buffer grows by: memory
+	// follows the bytes that actually arrive, never the declared length.
+	muxReadChunk = 64 * 1024
 	// muxReadIdle kills a mux connection with no traffic at all; the
 	// gateway pings well inside this.
 	muxReadIdle = 2 * time.Minute
@@ -154,6 +166,11 @@ func (m *Manager) handleMux(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sealed websocket relay not configured", http.StatusNotImplemented)
 		return
 	}
+	if !m.acquireMuxConn() {
+		http.Error(w, "mux connection limit reached", http.StatusServiceUnavailable)
+		return
+	}
+	defer m.releaseMuxConn()
 	conn, brw, err := http.NewResponseController(w).Hijack()
 	if err != nil {
 		http.Error(w, "mux requires a hijackable connection", http.StatusInternalServerError)
@@ -178,6 +195,28 @@ func (m *Manager) handleMux(w http.ResponseWriter, r *http.Request) {
 	mc.ctx, mc.cancel = context.WithCancel(context.Background())
 	defer mc.teardown()
 	mc.serve()
+}
+
+// acquireMuxConn takes one slot of the mux connection budget; false when
+// the budget is spent.
+func (m *Manager) acquireMuxConn() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	limit := m.maxMuxConns
+	if limit <= 0 {
+		limit = defaultMaxMuxConns
+	}
+	if m.muxConns >= limit {
+		return false
+	}
+	m.muxConns++
+	return true
+}
+
+func (m *Manager) releaseMuxConn() {
+	m.mu.Lock()
+	m.muxConns--
+	m.mu.Unlock()
 }
 
 type muxStreamKey struct {
@@ -218,9 +257,11 @@ type muxStream struct {
 	// one slow app cannot stall the shared connection (overflow closes the
 	// stream). Closed by shutdown.
 	inbound chan []byte
-	ctx     context.Context
-	cancel  context.CancelFunc
-	once    sync.Once
+	// queued is the payload bytes sitting in inbound (muxStreamQueueBytes).
+	queued atomic.Int64
+	ctx    context.Context
+	cancel context.CancelFunc
+	once   sync.Once
 }
 
 // serve is the mux read loop: it demuxes frames to streams and never blocks
@@ -248,6 +289,10 @@ func (mc *muxConn) serve() {
 				// Unknown stream: already closed, or never opened. Tell the
 				// gateway so it can drop its side; not an error for the conn.
 				_ = mc.writeClose(sid, stream, websocket.StatusProtocolError, "unknown stream")
+				continue
+			}
+			if !st.enqueue(payload) {
+				st.shutdown(websocket.StatusPolicyViolation, "stream backpressure overflow", true)
 				continue
 			}
 			select {
@@ -406,6 +451,7 @@ func (st *muxStream) run(openEnv []byte) {
 				return
 			case sealed = <-st.inbound:
 			}
+			st.queued.Add(-int64(len(sealed)))
 			env, err := decodeSealed(sealed)
 			if err != nil || env.Ctr < next {
 				st.shutdown(websocket.StatusProtocolError, "replayed or malformed frame", true)
@@ -440,6 +486,20 @@ func (st *muxStream) run(openEnv []byte) {
 			return
 		}
 	}
+}
+
+// enqueue reserves len(payload) bytes of the stream's queue budget. A frame
+// onto an empty queue is always admitted; otherwise the total stays within
+// muxStreamQueueBytes. Only the mux read loop enqueues, so the check and the
+// add do not race with another producer.
+func (st *muxStream) enqueue(payload []byte) bool {
+	n := int64(len(payload))
+	cur := st.queued.Load()
+	if cur > 0 && cur+n > muxStreamQueueBytes {
+		return false
+	}
+	st.queued.Add(n)
+	return true
 }
 
 // appWSAck is the plaintext of the sealed stream ack (s2c ctr 0).
@@ -597,9 +657,26 @@ func readMuxFrame(br *bufio.Reader) (typ byte, sid string, stream uint64, payloa
 	if plen > muxMaxFrame {
 		return 0, "", 0, nil, errors.New("mux: frame too large")
 	}
-	payload = make([]byte, plen)
-	if _, err = io.ReadFull(br, payload); err != nil {
+	payload, err = readPayload(br, int(plen))
+	if err != nil {
 		return 0, "", 0, nil, err
 	}
 	return typ, sid, stream, payload, nil
+}
+
+// readPayload reads exactly n bytes, growing the buffer in muxReadChunk
+// steps as bytes arrive instead of allocating the declared length up front.
+func readPayload(r io.Reader, n int) ([]byte, error) {
+	buf := make([]byte, 0, min(n, muxReadChunk))
+	for len(buf) < n {
+		off := len(buf)
+		buf = append(buf, make([]byte, min(n-off, muxReadChunk))...)
+		if _, err := io.ReadFull(r, buf[off:]); err != nil {
+			if err == io.EOF && off > 0 {
+				err = io.ErrUnexpectedEOF
+			}
+			return nil, err
+		}
+	}
+	return buf, nil
 }
