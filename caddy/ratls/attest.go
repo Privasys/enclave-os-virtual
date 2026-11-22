@@ -51,6 +51,15 @@ const (
 	clientContextTTL = 2 * time.Minute
 	// connRetention drops connection records not touched for this long.
 	connRetention = 30 * time.Minute
+	// maxConns bounds the connection records. When the table is full a new
+	// connection gets no record, which reads as the least it could claim:
+	// tag "none", the direct leg, no pending client context.
+	maxConns = 65536
+	// connSweepAbove is the size above which expired records are swept, at
+	// most once per connSweepEvery and only when a record is created, so a
+	// request on an existing connection never walks the table.
+	connSweepAbove = 4096
+	connSweepEvery = time.Second
 )
 
 // Attest is the Caddy HTTP handler that serves POST /__privasys/attest and
@@ -75,30 +84,48 @@ type connInfo struct {
 }
 
 var conns = struct {
-	mu sync.Mutex
-	m  map[string]*connInfo
+	mu        sync.Mutex
+	m         map[string]*connInfo
+	lastSweep time.Time
 }{m: map[string]*connInfo{}}
 
+// connFor returns the record of a connection, creating it when asked and
+// there is room; nil when there is none.
 func connFor(remote string, create bool) *connInfo {
 	conns.mu.Lock()
 	defer conns.mu.Unlock()
 	now := time.Now()
-	if len(conns.m) > 4096 {
-		for k, c := range conns.m {
-			if now.Sub(c.touched) > connRetention {
-				delete(conns.m, k)
-			}
-		}
-	}
 	c := conns.m[remote]
 	if c == nil && create {
-		c = &connInfo{tag: "none"}
-		conns.m[remote] = c
+		if len(conns.m) >= connSweepAbove && now.Sub(conns.lastSweep) >= connSweepEvery {
+			conns.lastSweep = now
+			for k, old := range conns.m {
+				if now.Sub(old.touched) > connRetention {
+					delete(conns.m, k)
+				}
+			}
+		}
+		if len(conns.m) < maxConns {
+			c = &connInfo{tag: "none"}
+			conns.m[remote] = c
+		}
 	}
 	if c != nil {
 		c.touched = now
 	}
 	return c
+}
+
+// connTag is the attestation tag of a connection, "none" when it has no
+// record.
+func connTag(remote string) string {
+	c := connFor(remote, false)
+	if c == nil {
+		return "none"
+	}
+	conns.mu.Lock()
+	defer conns.mu.Unlock()
+	return c.tag
 }
 
 // CaddyModule returns the Caddy module information.
@@ -128,11 +155,7 @@ func (h *Attest) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 		h.handle(w, r)
 		return nil
 	}
-	tag := "none"
-	if c := connFor(r.RemoteAddr, false); c != nil {
-		tag = c.tag
-	}
-	r.Header.Set(hdrAttestation, tag)
+	r.Header.Set(hdrAttestation, connTag(r.RemoteAddr))
 	// On a direct name the leg is decided here, from the connection, never
 	// from the request: anything not positively served the RA-TLS leaf is
 	// the direct leg (direct.go).
@@ -239,6 +262,14 @@ func (h *Attest) serveEvidence(w http.ResponseWriter, r *http.Request, g *RATLSC
 		return
 	}
 
+	// The connection's record carries the tag every later request gets; without
+	// room for it the evidence would tag nothing, so none is made.
+	c := connFor(r.RemoteAddr, true)
+	if c == nil {
+		h.fail(w, http.StatusServiceUnavailable, "too many connections to record; retry")
+		return
+	}
+
 	// The quote time comes from the manager's clock, not the host's: a client
 	// judges the quote's freshness by it. Evidence is always served (see
 	// clock.go): a stale quote time is the verifier's to refuse.
@@ -288,8 +319,9 @@ func (h *Attest) serveEvidence(w http.ResponseWriter, r *http.Request, g *RATLSC
 		resp.TEE = g.attester.Name() + "-gpu"
 	}
 
-	c := connFor(r.RemoteAddr, true)
+	conns.mu.Lock()
 	c.tag = req.Mode
+	conns.mu.Unlock()
 	// A caller whose client certificate claims a fleet identity (the workload
 	// app-id extension) must prove it: a mutual leg, and the context is
 	// remembered for the present message. A bare key-holder certificate (a CLI
