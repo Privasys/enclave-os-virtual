@@ -50,6 +50,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -2187,17 +2188,54 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	return s.ResponseWriter.Write(b)
 }
 
-// matchesConfigAPI reports whether the inbound request matches the
-// container's declared configure endpoint. Method match is
-// case-insensitive; path is matched literally (no globs).
+// matchesConfigAPI reports whether the inbound request may reach the
+// container's declared configure endpoint. The app's router decides what a
+// path means, and routers are lenient: many ignore letter case or a trailing
+// slash, resolve dot segments and doubled slashes, drop a ";parameter", or
+// take the method from an override header. So the gate compares canonical
+// forms and errs toward guarding: anything an app might route to its
+// configure handler needs the owner.
 func matchesConfigAPI(spec *launcher.ConfigAPISpec, r *http.Request) bool {
 	if spec == nil {
 		return false
 	}
-	if !strings.EqualFold(spec.Method, r.Method) {
+	if !configMethodMatches(spec.Method, r) {
 		return false
 	}
-	return r.URL.Path == spec.Path
+	return configPathKey(r.URL.Path) == configPathKey(spec.Path)
+}
+
+// configMethodOverrides are the headers frameworks read the method from.
+var configMethodOverrides = []string{"X-HTTP-Method-Override", "X-HTTP-Method", "X-Method-Override"}
+
+func configMethodMatches(want string, r *http.Request) bool {
+	same := func(m string) bool {
+		m = strings.TrimSpace(m)
+		return strings.EqualFold(want, m) || (strings.EqualFold(want, http.MethodGet) && strings.EqualFold(m, http.MethodHead))
+	}
+	if same(r.Method) {
+		return true
+	}
+	for _, h := range configMethodOverrides {
+		for _, v := range r.Header.Values(h) {
+			if same(v) {
+				return true
+			}
+		}
+	}
+	return same(r.URL.Query().Get("_method"))
+}
+
+// configPathKey is the form two spellings of one route share: no
+// ";parameters", backslashes as slashes, dot segments and doubled or
+// trailing slashes resolved, lower case.
+func configPathKey(p string) string {
+	if i := strings.IndexByte(p, ';'); i >= 0 {
+		p = p[:i]
+	}
+	p = strings.ReplaceAll(p, `\`, "/")
+	p = path.Clean("/" + p)
+	return strings.ToLower(p)
 }
 
 // authorizeConfigure decides whether the caller may hit the container's
