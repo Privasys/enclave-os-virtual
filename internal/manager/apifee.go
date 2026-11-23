@@ -50,7 +50,8 @@ func (s *Server) priceForRequest(containerName string, r *http.Request) (apifees
 // lookupPrice matches a request path against a price table on the canonical
 // form both sides share (configPathKey: no ;params, forward slashes, cleaned,
 // lowercase), so every spelling of a priced endpoint that reaches the app as
-// that endpoint is priced. The well-known and platform exemptions are decided
+// that endpoint is priced, a ".format" suffix included (sameRouteAnyFormat).
+// The well-known and platform exemptions are decided
 // on the same canonical path. When two table entries share a canonical key,
 // the higher price applies.
 func lookupPrice(tbl apifees.Table, reqPath string) (apifees.PricedTool, bool) {
@@ -58,19 +59,30 @@ func lookupPrice(tbl apifees.Table, reqPath string) (apifees.PricedTool, bool) {
 	if strings.HasPrefix(key, "/.well-known/") || strings.HasPrefix(key, "/__privasys/") {
 		return apifees.PricedTool{}, false
 	}
+	// An exact match wins over a format match ("/a.b" declared at its own
+	// price is never charged "/a"'s); among matches of the same kind, the
+	// higher price applies.
 	var (
-		best  apifees.PricedTool
-		found bool
+		exact, format       apifees.PricedTool
+		foundExact, foundFm bool
 	)
 	for endpoint, pt := range tbl {
-		if configPathKey(endpoint) != key {
-			continue
-		}
-		if !found || pt.Rule.Credits > best.Rule.Credits {
-			best, found = pt, true
+		ep := configPathKey(endpoint)
+		switch {
+		case key == ep:
+			if !foundExact || pt.Rule.Credits > exact.Rule.Credits {
+				exact, foundExact = pt, true
+			}
+		case sameRouteAnyFormat(key, ep):
+			if !foundFm || pt.Rule.Credits > format.Rule.Credits {
+				format, foundFm = pt, true
+			}
 		}
 	}
-	return best, found
+	if foundExact {
+		return exact, true
+	}
+	return format, foundFm
 }
 
 // callerIdentity resolves who is calling, for charge attribution. A

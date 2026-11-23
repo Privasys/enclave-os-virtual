@@ -128,3 +128,30 @@ func TestLookupPriceCanonicalPath(t *testing.T) {
 		}
 	}
 }
+
+func TestLookupPriceCoversAnyFormat(t *testing.T) {
+	tbl := apifees.Table{"/tools/search": {Tool: "search", Rule: apifees.PriceRule{Credits: 5}}}
+	for _, p := range []string{"/tools/search.json", "/tools/search.turbo_stream", "/TOOLS/search.jsonapi"} {
+		if _, ok := lookupPrice(tbl, p); !ok {
+			t.Errorf("%s was not priced", p)
+		}
+	}
+	for _, p := range []string{"/tools/searchx", "/tools/search2.json"} {
+		if _, ok := lookupPrice(tbl, p); ok {
+			t.Errorf("%s was priced", p)
+		}
+	}
+}
+
+func TestLookupPriceExactBeatsFormat(t *testing.T) {
+	tbl := apifees.Table{
+		"/a":   {Tool: "a", Rule: apifees.PriceRule{Credits: 10}},
+		"/a.b": {Tool: "a.b", Rule: apifees.PriceRule{Credits: 1}},
+	}
+	if pt, ok := lookupPrice(tbl, "/a.b"); !ok || pt.Tool != "a.b" {
+		t.Fatalf("/a.b priced as %q, want its own entry", pt.Tool)
+	}
+	if pt, ok := lookupPrice(tbl, "/a.json"); !ok || pt.Tool != "a" {
+		t.Fatalf("/a.json priced as %q, want /a", pt.Tool)
+	}
+}

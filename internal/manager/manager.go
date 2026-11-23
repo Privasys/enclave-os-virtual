@@ -2218,29 +2218,21 @@ func matchesConfigAPI(spec *launcher.ConfigAPISpec, r *http.Request) bool {
 	if !configMethodMatches(spec.Method, r) {
 		return false
 	}
-	want := configPathKey(spec.Path)
-	got := configPathKey(r.URL.Path)
-	return got == want || stripFormatSuffix(got) == want
+	return sameRouteAnyFormat(configPathKey(r.URL.Path), configPathKey(spec.Path))
 }
 
-// stripFormatSuffix drops one trailing ".ext" of 1 to 5 letters from the last
-// segment ("/configure.json" -> "/configure"): many routers treat it as a
-// response format and serve the same handler. Used only for comparison.
-func stripFormatSuffix(p string) string {
-	dot := strings.LastIndexByte(p, '.')
-	if dot <= strings.LastIndexByte(p, '/')+1 {
-		return p
+// sameRouteAnyFormat reports whether got, a canonical path, is want or want
+// followed by any ".format" ("/configure.json", "/configure.turbo_stream"):
+// routers read such a suffix as a response format and serve the same
+// handler, and the set of formats an app registers is open-ended, so every
+// suffix counts. Whatever follows the dot counts too, slashes included: the
+// gate sees the decoded path, and an encoded slash ("%2F") can reach the
+// app's router as part of the format. Both sides are configPathKey forms.
+func sameRouteAnyFormat(got, want string) bool {
+	if got == want {
+		return true
 	}
-	ext := p[dot+1:]
-	if len(ext) < 1 || len(ext) > 5 {
-		return p
-	}
-	for i := 0; i < len(ext); i++ {
-		if c := ext[i]; (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') {
-			return p
-		}
-	}
-	return p[:dot]
+	return want != "/" && strings.HasPrefix(got, want+".")
 }
 
 // configMethodOverrides are the headers frameworks read the method from.

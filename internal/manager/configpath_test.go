@@ -67,17 +67,22 @@ func TestConfigureGateGuardsEveryPost(t *testing.T) {
 
 func TestConfigureGateCoversFormatSuffix(t *testing.T) {
 	spec := &launcher.ConfigAPISpec{Method: "POST", Path: "/api/configure"}
-	for _, target := range []string{"/api/configure.json", "/api/configure.XML", "/api/Configure.yaml", "/api/configure.j"} {
+	for _, target := range []string{
+		"/api/configure.json", "/api/configure.XML", "/api/Configure.yaml", "/api/configure.j",
+		"/api/configure.turbo_stream", "/api/configure.jsonapi", "/api/configure.toolong",
+		"/api/configure.js0n", "/api/configure.json.bak", "/api/configure.", "/api/configure.x/y", "/api/configure.x%2Fy",
+	} {
 		if !matchesConfigAPI(spec, httptest.NewRequest("POST", target, nil)) {
 			t.Errorf("POST %s skipped the configure gate", target)
 		}
 	}
-	for _, target := range []string{"/api/configure.toolong", "/api/configure.js0n", "/api.json/configure2", "/api/configure.json.bak"} {
+	for _, target := range []string{"/api.json/configure2", "/api/configured", "/api/configure2.json"} {
 		if matchesConfigAPI(spec, httptest.NewRequest("POST", target, nil)) {
 			t.Errorf("POST %s was taken for the configure path", target)
 		}
 	}
-	if got := stripFormatSuffix("/.json"); got != "/.json" {
-		t.Errorf("a dot file must keep its name, got %q", got)
+	root := &launcher.ConfigAPISpec{Method: "POST", Path: "/"}
+	if matchesConfigAPI(root, httptest.NewRequest("POST", "/.well-known/x", nil)) {
+		t.Error("a dot path was taken for a root configure endpoint")
 	}
 }
