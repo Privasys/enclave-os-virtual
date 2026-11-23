@@ -34,6 +34,8 @@
 // PUT    /api/v1/attestation-servers  - update attestation servers and tokens
 // PUT    /api/v1/clock/config        - pin the clock monitor (key, incident URL); manager role
 // POST   /api/v1/clock/poll          - clock monitor floor poll (Ed25519-signed, no bearer)
+// POST   /api/v1/containers/{name}/usage - usage batch, relayed to the control plane (container token, self only)
+// GET    /api/v1/containers/{name}/billable-caller - caller billability, relayed (container token, self only)
 // GET    /metrics                    - Prometheus metrics
 package manager
 
@@ -601,6 +603,15 @@ func (s *Server) Start(ctx context.Context) error {
 	// Container token auth (the caller is the container it names).
 	mux.HandleFunc("GET /api/v1/containers/{name}/tool-spec",
 		s.requireContainerSelf(s.handleToolSpec))
+
+	// Usage relay (usage.go): an app's usage batches and
+	// billability checks go to the control plane with the enclave's own
+	// credential and the app id from the load envelope, so the app holds no
+	// platform credential. Container token auth (self only).
+	mux.HandleFunc("POST /api/v1/containers/{name}/usage",
+		s.requireContainerSelf(s.handleUsage))
+	mux.HandleFunc("GET /api/v1/containers/{name}/billable-caller",
+		s.requireContainerSelf(s.handleBillableCaller))
 
 	// First-class volumes: inventory/usage, online grow, and owner-requested
 	// deletion (refused while the container is loaded). Named by container.
