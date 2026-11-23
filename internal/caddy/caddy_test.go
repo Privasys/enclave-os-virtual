@@ -113,6 +113,42 @@ func TestBuildConfigMutualRouteHasPeerHandler(t *testing.T) {
 	}
 }
 
+// TestBuildConfigMutualAliasRouteHasPeerHandler proves a direct adopter name
+// of a mutual app strips and republishes the peer headers exactly as the
+// platform hostname does. The manager sees the platform hostname on both (the
+// alias rewrites Host), so an alias route without privasys_peer_headers would
+// let a client forge the certificate and connection headers the ingress gate
+// trusts.
+func TestBuildConfigMutualAliasRouteHasPeerHandler(t *testing.T) {
+	c := &Client{cfg: Config{ListenAddr: ":443"}, log: zap.NewNop(), routes: map[string]route{}}
+	c.routes["m.example"] = route{Hostname: "m.example", Upstream: "localhost:9000", MutualAuth: true,
+		Aliases: []string{"api.adopter.example", "www.adopter.example"}}
+	routes := srv0Of(t, c)["routes"].([]map[string]any)
+
+	var found bool
+	for _, r := range routes {
+		m := r["match"].([]map[string]any)
+		hs, _ := m[0]["host"].([]string)
+		if len(hs) == 0 || hs[0] != "api.adopter.example" {
+			continue
+		}
+		found = true
+		if len(hs) != 2 || hs[1] != "www.adopter.example" {
+			t.Fatalf("alias route hosts = %v, want both aliases", hs)
+		}
+		var names []string
+		for _, h := range r["handle"].([]map[string]any) {
+			names = append(names, h["handler"].(string))
+		}
+		if len(names) != 3 || names[0] != "privasys_attest" || names[1] != "privasys_peer_headers" || names[2] != "reverse_proxy" {
+			t.Fatalf("mutual alias route handlers = %v, want [privasys_attest privasys_peer_headers reverse_proxy]", names)
+		}
+	}
+	if !found {
+		t.Fatal("no route for the direct aliases")
+	}
+}
+
 // A direct adopter name rides the app's route with the Host rewritten to the
 // app hostname, gets an ACME issuer policy (so Caddy answers acme-tls/1 from
 // the shared storage) but is never listed for automation, and the storage
