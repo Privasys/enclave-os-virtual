@@ -381,6 +381,10 @@ TCB (dm-verity rootfs + measured boot), terminating the SDK session at
 the manager is no weaker than terminating it at the container — the same
 hardware quote attests both.
 
+Sealed WebSockets from the gateways arrive multiplexed on mux connections.
+The relay holds at most 1,024 mux connections, and each stream has an 8 MiB
+queue budget.
+
 ### Route Lifecycle
 
 When the operator loads a container:
