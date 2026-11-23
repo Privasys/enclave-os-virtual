@@ -145,6 +145,10 @@ func (h *Attest) Provision(ctx caddy.Context) error {
 
 // ServeHTTP answers the evidence endpoint and tags every other request.
 func (h *Attest) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	// Caddy's reverse proxy removes every header the Connection header
+	// names on the way to the manager. A client must not be able to have
+	// the markers set here (or forwarding headers) removed that way.
+	keepRuntimeHeaders(r.Header)
 	r.Header.Del(hdrAttestation)
 	if r.URL.Path == attestPath {
 		if r.Method != http.MethodPost {
@@ -213,7 +217,7 @@ func (h *Attest) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	// The gateway's terminate path serves the public certificate and re-dials
 	// inward; it marks itself, and evidence cannot be bound to the outer leg.
-	if r.Header.Get("X-Privasys-Edge") == "terminate" {
+	if edgeSays(r.Header, "terminate") {
 		h.fail(w, http.StatusNotFound, "no evidence on the gateway terminate path")
 		return
 	}
@@ -475,3 +479,42 @@ var (
 	_ caddyhttp.MiddlewareHandler = (*Attest)(nil)
 	_ caddyfile.Unmarshaler       = (*Attest)(nil)
 )
+
+// keepRuntimeHeaders removes from the Connection header every token that
+// names a header the runtime sets or relies on (X-Privasys-*, X-Forwarded-*,
+// Forwarded), so hop-by-hop removal further down cannot drop it. Other
+// tokens (close, keep-alive, upgrade) stay.
+func keepRuntimeHeaders(h http.Header) {
+	values := h.Values("Connection")
+	if len(values) == 0 {
+		return
+	}
+	var kept []string
+	for _, v := range values {
+		for _, tok := range strings.Split(v, ",") {
+			tok = strings.TrimSpace(tok)
+			n := strings.ToLower(tok)
+			if tok == "" || strings.HasPrefix(n, "x-privasys-") || strings.HasPrefix(n, "x-forwarded-") || n == "forwarded" {
+				continue
+			}
+			kept = append(kept, tok)
+		}
+	}
+	h.Del("Connection")
+	if len(kept) > 0 {
+		h.Set("Connection", strings.Join(kept, ", "))
+	}
+}
+
+// edgeSays reports whether any copy of the edge marker carries value, in any
+// letter case, matching how the manager reads it.
+func edgeSays(h http.Header, value string) bool {
+	for _, line := range h.Values("X-Privasys-Edge") {
+		for _, v := range strings.Split(line, ",") {
+			if strings.EqualFold(strings.TrimSpace(v), value) {
+				return true
+			}
+		}
+	}
+	return false
+}

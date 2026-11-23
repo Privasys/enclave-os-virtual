@@ -200,7 +200,21 @@ func (s *Server) clearAllowed(r *http.Request) bool {
 
 // isEdgeTerminated reports whether the gateway terminated TLS on this leg.
 func isEdgeTerminated(r *http.Request) bool {
-	return r.Header.Get(edgeHeader) == "terminate"
+	return hasEdgeValue(r, "terminate")
+}
+
+// hasEdgeValue reports whether any copy of the edge marker carries value, in
+// any letter case: a marker a client duplicated or re-cased still counts,
+// and only ever makes the request stricter.
+func hasEdgeValue(r *http.Request, value string) bool {
+	for _, line := range r.Header.Values(edgeHeader) {
+		for _, v := range strings.Split(line, ",") {
+			if strings.EqualFold(strings.TrimSpace(v), value) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isDirectLeg reports whether the request arrived on a direct adopter name
@@ -208,7 +222,7 @@ func isEdgeTerminated(r *http.Request) bool {
 // the marker from the connection (and overwrites a client's), so a direct
 // request can never pass as RA-TLS.
 func isDirectLeg(r *http.Request) bool {
-	return r.Header.Get(edgeHeader) == "direct"
+	return hasEdgeValue(r, "direct")
 }
 
 // isClearLeg reports whether the client did not verify the enclave: the

@@ -421,6 +421,12 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 		// a few long-lived connections, so the enclave's transport footprint
 		// stays bounded by the gateway pool instead of the client count.
 		if isMuxUpgrade(r) {
+			// The gateway dials the mux leg itself over RA-TLS, so a mux
+			// upgrade on the terminate or direct leg is a client.
+			if onClearLeg(r) {
+				http.Error(w, "mux upgrade not accepted on this leg", http.StatusForbidden)
+				return
+			}
 			m.handleMux(w, r)
 			return
 		}
