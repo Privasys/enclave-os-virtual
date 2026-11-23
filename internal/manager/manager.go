@@ -807,6 +807,17 @@ func (s *Server) Start(ctx context.Context) error {
 					s.jsonError(w, http.StatusServiceUnavailable, "app paused: "+st.BillingReason)
 					return
 				}
+				// Guarded routes (tools[].x-privasys.auth in the measured
+				// manifest, Enclave OS Mini's @auth grammar): the caller is
+				// checked here, so the app verifies no platform token itself.
+				// The configure endpoint keeps its own gate below.
+				if ra, ok := matchRouteAuth(st.RouteAuth, r); ok && !(st.ConfigAPI != nil && matchesConfigAPI(st.ConfigAPI, r)) {
+					if err := s.authorizeRoute(r, containerName, st, ra); err != nil {
+						s.jsonError(w, http.StatusForbidden,
+							"route "+ra.Path+" requires "+routeAuthLabel(ra)+": "+err.Error())
+						return
+					}
+				}
 				// Configure-authz gate: the config surface is owner/admin
 				// only, on EVERY call (not just while frozen — a
 				// reconfigure of a running app is equally privileged).
@@ -2233,6 +2244,76 @@ func sameRouteAnyFormat(got, want string) bool {
 		return true
 	}
 	return want != "/" && strings.HasPrefix(got, want+".")
+}
+
+// matchRouteAuth reports the guarded route the request may reach, matched
+// like the configure endpoint: every spelling a router reads as the same
+// path, any format suffix. A tool names no method, so every method of the
+// path is guarded.
+func matchRouteAuth(routes []apifees.RouteAuth, r *http.Request) (apifees.RouteAuth, bool) {
+	if len(routes) == 0 {
+		return apifees.RouteAuth{}, false
+	}
+	got := configPathKey(r.URL.Path)
+	for _, ra := range routes {
+		if sameRouteAnyFormat(got, configPathKey(ra.Path)) {
+			return ra, true
+		}
+	}
+	return apifees.RouteAuth{}, false
+}
+
+func routeAuthLabel(ra apifees.RouteAuth) string {
+	switch ra.Policy {
+	case apifees.PolicyOwner:
+		return "the app owner or admin"
+	case apifees.PolicyRole:
+		return "one of the roles " + strings.Join(ra.Roles, ", ")
+	default:
+		return "a signed-in caller"
+	}
+}
+
+// authorizeRoute applies a guarded route's policy, with the semantics of
+// Enclave OS Mini's @auth:
+//   - owner: the configure gate's rule (the app's owner or admin role);
+//   - role(a, b): a verified platform bearer carrying one of the roles, as
+//     written;
+//   - authenticated: a verified platform bearer, or a subject the runtime
+//     itself asserted (a sealed session, or a verified direct-leg token;
+//     the header is stripped from clients on every leg).
+func (s *Server) authorizeRoute(r *http.Request, containerName string, st launcher.FreezeState, ra apifees.RouteAuth) error {
+	if ra.Policy == apifees.PolicyOwner {
+		return s.authorizeConfigure(r, containerName, st)
+	}
+	if ra.Policy == apifees.PolicyAuthenticated && strings.TrimSpace(r.Header.Get("X-Privasys-Sub")) != "" {
+		return nil
+	}
+	if s.verifier == nil {
+		return errors.New("no token verifier configured")
+	}
+	authz := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authz, "Bearer ") {
+		return errors.New("missing bearer token")
+	}
+	sub, roles, err := s.verifier.AuthenticateUser(strings.TrimPrefix(authz, "Bearer "))
+	if err != nil {
+		return fmt.Errorf("invalid token: %w", err)
+	}
+	if ra.Policy == apifees.PolicyAuthenticated {
+		return nil
+	}
+	for _, have := range roles {
+		for _, want := range ra.Roles {
+			if have == want {
+				s.log.Info("guarded route authorized by role",
+					zap.String("container", containerName), zap.String("sub", sub),
+					zap.String("path", ra.Path), zap.String("role", have))
+				return nil
+			}
+		}
+	}
+	return errors.New("token carries none of the required roles")
 }
 
 // configMethodOverrides are the headers frameworks read the method from.

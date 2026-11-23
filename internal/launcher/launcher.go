@@ -671,6 +671,9 @@ type Launcher struct {
 	// is not an attester, which is all but one of them. Guarded by
 	// freezeMu, alongside prices, and read on the same request path.
 	attributeProviders map[string]string
+	// routeAuth is each container's guarded routes: the x-privasys.auth
+	// annotations of its measured manifest tools. Guarded by freezeMu.
+	routeAuth map[string][]apifees.RouteAuth
 	// surfaces is what each container declared it serves in the clear
 	// (manifest "surfaces" plus the legacy static label), for the status
 	// report the control plane reads. Guarded by freezeMu.
@@ -778,6 +781,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		configOwners:       make(map[string][]string),
 		prices:             make(map[string]apifees.Table),
 		attributeProviders: make(map[string]string),
+		routeAuth:          make(map[string][]apifees.RouteAuth),
 		surfaces:           make(map[string]*surfaces.Surfaces),
 		failures:           make(map[string]string),
 		loading:            make(map[string]*pendingLoad),
@@ -1727,6 +1731,9 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// label. Only an app that declares one may consume a disclosure voucher,
 	// so that an ordinary app cannot spend an attester's.
 	var attributeProvider string
+	// The guarded routes: each tool's x-privasys.auth, from the same label.
+	// An annotation that does not parse refuses the load.
+	var routeAuth []apifees.RouteAuth
 	// What the app serves in the clear (surfaces): from the same measured
 	// label, plus the older static-prefixes label as an alias. A malformed
 	// declaration refuses the load (the developer must see it), and so does
@@ -1744,6 +1751,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		surf = surfaces.AddLegacyStatic(parsed, labels[surfaces.StaticLabel])
 	}
 	if raw := labels[apifees.ManifestLabel]; lerr == nil && raw != "" {
+		ra, aerr := apifees.ParseRouteAuth(raw)
+		if aerr != nil {
+			return nil, fmt.Errorf("launcher: %s: %w", req.Name, aerr)
+		}
+		routeAuth = ra
 		if ns := apifees.ParseAttributeProvider(raw); ns != "" {
 			attributeProvider = ns
 			l.log.Info("attribute provider declared",
@@ -1775,6 +1787,13 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		if req.ConfigAPI != nil {
 			if err := surf.CheckConfigAPI(req.ConfigAPI.Method, req.ConfigAPI.Path); err != nil {
 				return nil, fmt.Errorf("launcher: %s: %w", req.Name, err)
+			}
+		}
+		// A guarded route served in the clear could never be checked: the
+		// clear leg is anonymous and strips the bearer.
+		for _, ra := range routeAuth {
+			if surf.CoversPath(ra.Path) {
+				return nil, fmt.Errorf("launcher: %s: surfaces: route %s declares auth %s but is also declared public or static", req.Name, ra.Path, ra.Policy)
 			}
 		}
 	}
@@ -2084,6 +2103,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		l.attributeProviders[req.Name] = attributeProvider
 	} else {
 		delete(l.attributeProviders, req.Name)
+	}
+	if len(routeAuth) > 0 {
+		l.routeAuth[req.Name] = routeAuth
+	} else {
+		delete(l.routeAuth, req.Name)
 	}
 	if !surf.Empty() {
 		l.surfaces[req.Name] = surf
@@ -3033,6 +3057,9 @@ type FreezeState struct {
 	// fallback. Both come from the persisted LoadRequest.
 	AppID  string
 	Owners []string
+	// RouteAuth is the container's guarded routes (tools[].x-privasys.auth
+	// in the measured manifest): the manager checks each before the app.
+	RouteAuth []apifees.RouteAuth
 }
 
 // ContainerPrices returns the API-fee table for a container (path →
@@ -3081,6 +3108,7 @@ func (l *Launcher) ContainerFreezeState(name string) FreezeState {
 		BillingReason: reason,
 		AppID:         appID,
 		Owners:        l.configOwners[name],
+		RouteAuth:     l.routeAuth[name],
 	}
 }
 

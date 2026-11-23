@@ -91,6 +91,9 @@ type manifestDoc struct {
 		Endpoint  string `json:"endpoint"`
 		XPrivasys struct {
 			Price *PriceRule `json:"price"`
+			// Auth is the route's access policy, in the grammar of Enclave
+			// OS Mini's WIT @auth: public, authenticated, owner or role(a, b).
+			Auth string `json:"auth"`
 		} `json:"x-privasys"`
 	} `json:"tools"`
 	Configure struct {
