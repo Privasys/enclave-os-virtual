@@ -47,6 +47,8 @@ Part of the [Privasys](https://privasys.org) Confidential Computing platform, al
 
 2. **Dynamic Loading** — The manager starts with zero containers. Operators call `POST /api/v1/containers` (authenticated via OIDC bearer token) to load containers at runtime. Each request specifies a digest-pinned OCI image reference, the optional `config_api` declaration, volumes, and ports. Environment variables are not accepted on the public API; per-deployment configuration is delivered in-process to the container's `config_api` endpoint after start.
 
+   Every request to the configure endpoint needs a bearer carrying the app's owner or admin role. The endpoint is matched on the canonical path: letter case is ignored, `;parameters` on any segment are dropped, backslashes count as slashes, dot segments and doubled or trailing slashes are resolved, and one trailing format suffix such as `.json` is ignored. The method may also come from `X-HTTP-Method-Override`, `X-HTTP-Method`, `X-Method-Override` or a `_method` query parameter, `HEAD` counts for a `GET` endpoint, and any `POST` to the configure path is gated whatever method is declared. Priced routes (API fees) are matched on the same canonical path, case-insensitively, and the `/.well-known/` and `/__privasys/` exemptions apply to the canonical path.
+
 3. **Pull & Verify** — OCI images are pulled via containerd. Each image digest is verified against the pinned `@sha256:...` reference in the load request.
 
 4. **Merkle Tree** — A platform Merkle tree and per-container Merkle trees are recomputed after every load/unload from the CA cert, image digests, and container configs.

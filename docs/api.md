@@ -439,6 +439,7 @@ container uid that will own the folder.
 | 200 | `{"status":"open","path":"/data/holders/<holder>","capability_id":..., "used_bytes":...,"unattended":...}` |
 | 409 | `{"status":"needs_holder","nonce":...,"app_host":...}`: no approval yet, or no key kept here; the holder's wallet has been asked |
 | 403 | `{"status":"declined"}` or `{"status":"revoked"}` |
+| 429 | the container already has 256 asks pending; `Retry-After: 60` |
 | 501 | the app has no vault-backed volume, or declares no such resource |
 
 ### POST /api/v1/resources/{resource}/close

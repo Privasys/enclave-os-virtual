@@ -110,13 +110,20 @@ private routes on direct names too, by declaring in its measured manifest:
 }
 ```
 
+A static prefix ends on a segment boundary: `/static` covers `/static` and
+`/static/x`, never `/static.css` or `/staticX`, so declare a prefix with a
+trailing slash (`/assets/`). A request is served from a static or public
+surface only when both the path as sent and the path as resolved (dot
+segments, doubled slashes, `;parameters` and backslashes resolved) fall
+under the declaration.
+
 Then a request to a private path on a direct name reaches the app with
-transport `direct`. If it carries `Authorization: Bearer <token>`, the
-runtime verifies the token against the identity provider configured with
-`--oidc-issuer` and requires its audience to be this app: `app:<app id hex>`,
-the app's platform hostname, or one of its direct names (never the platform
-audience, so a token minted for one app is refused by every other). On
-success the token is removed and replaced by:
+transport `direct`. If it carries `Authorization: Bearer <token>` (the
+scheme in any letter case), the runtime verifies the token against the
+identity provider configured with `--oidc-issuer` and requires its audience
+to be this app: `app:<app id hex>`, the app's platform hostname, or one of
+its direct names (never the platform audience, so a token minted for one app
+is refused by every other). On success the runtime adds:
 
 | Header | Value |
 |---|---|
@@ -130,7 +137,10 @@ exchange, right after the sign-in, carries `email` and `name`; a token minted
 by refresh does not. An app stores them on first sight, keyed by the subject.
 
 A token that cannot be verified is refused with 401. No token is an anonymous
-request. The direct leg never makes an end user a payer: a priced route
+request. Either way, the runtime removes the `Authorization` header and its
+own WebSocket subprotocols before the request reaches the app, so the app
+never sees an `Authorization` header on a direct private name: it learns the
+caller only from `X-Privasys-Sub` and the profile headers above. The direct leg never makes an end user a payer: a priced route
 answers 402 unless a spend token names one.
 
 ## Client addresses
