@@ -94,6 +94,12 @@ type Config struct {
 	// it). Must be dekSize bytes. Ignored when the handle already exists: the
 	// caller compares what comes back.
 	Material []byte
+	// V1Issuer and V1Audience are the OIDC issuer and audience of a v1
+	// constellation (one that cannot name its billing), from the control
+	// plane's constellation entry. Used only when a key leaves it for a v2
+	// constellation, to derive the source's interim billing id.
+	V1Issuer   string
+	V1Audience string
 }
 
 func (c Config) threshold() int {
@@ -247,6 +253,14 @@ func bestGroup(byGen map[string][]*vault.Share, threshold int) []*vault.Share {
 // existing key on the constellation (so an on-disk volume MUST exist), false
 // when the key was freshly created (first deploy — a fresh volume is correct).
 func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle, grant string, imageDigest, appID []byte) (string, string, bool, error) {
+	return resolveOrProvision(ctx, log, cfg, handle, grant, imageDigest, appID, nil)
+}
+
+// renewalFor builds what a v2 create carries besides the share, from the whole
+// key about to be split. nil means a v1 create: the grant alone.
+type renewalFor func(key []byte) (*vault.Renewal, error)
+
+func resolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle, grant string, imageDigest, appID []byte, renewal renewalFor) (string, string, bool, error) {
 	if err := cfg.validate(); err != nil {
 		return "", "", false, err
 	}
@@ -357,6 +371,12 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 	if err != nil {
 		return "", "", false, fmt.Errorf("vaultkey: shamir split: %w", err)
 	}
+	var carried *vault.Renewal
+	if renewal != nil {
+		if carried, err = renewal(dek); err != nil {
+			return "", "", false, fmt.Errorf("vaultkey: %w", err)
+		}
+	}
 
 	acks := 0
 	for i, ep := range cfg.Endpoints {
@@ -366,7 +386,7 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 		// can never split generations.
 		var cerr error
 		for attempt := 0; attempt < 2; attempt++ {
-			cerr = createOn(ctx, ep, opts, handle, payload, grant)
+			cerr = createOn(ctx, ep, opts, handle, payload, grant, carried)
 			if cerr == nil {
 				acks++
 				break
@@ -461,8 +481,26 @@ func Export(ctx context.Context, log *zap.Logger, cfg Config, handle string, ima
 	return nil, fmt.Errorf("vaultkey: only %d of %d usable shares (threshold %d); last error: %v", len(shares), len(cfg.Endpoints), cfg.threshold(), lastErr)
 }
 
+// vaultConn is the part of a vault session this package uses; tests fake it.
+type vaultConn interface {
+	ExportKey(ctx context.Context, handle string, approvals ...vault.ApprovalToken) ([]byte, error)
+	CreateKey(ctx context.Context, handle string, material []byte, grant string) (uint64, error)
+	CreateKeyRenewal(ctx context.Context, handle string, material []byte, grant string, r vault.Renewal) (uint64, error)
+	GetPolicyRaw(ctx context.Context, handle string) (json.RawMessage, uint32, error)
+	GetVaultIdentity(ctx context.Context) (vault.VaultIdentity, error)
+	GetKeyInfo(ctx context.Context, handle string) (vault.KeyInfo, error)
+	RetireKey(ctx context.Context, handle, successor string, successorMembers []string) (bool, error)
+	Close() error
+}
+
+// dial opens an attested session to one vault (opts pins and verifies it). A
+// variable so tests can replace it.
+var dial = func(ctx context.Context, endpoint string, opts vault.DialOptions) (vaultConn, error) {
+	return vault.Dial(ctx, vault.VaultRegistration{ID: endpoint, Endpoint: endpoint, Status: "static"}, opts)
+}
+
 func exportFrom(ctx context.Context, endpoint string, opts vault.DialOptions, handle string) ([]byte, error) {
-	c, err := vault.Dial(ctx, vault.VaultRegistration{ID: endpoint, Endpoint: endpoint, Status: "static"}, opts)
+	c, err := dial(ctx, endpoint, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -470,12 +508,18 @@ func exportFrom(ctx context.Context, endpoint string, opts vault.DialOptions, ha
 	return c.ExportKey(ctx, handle)
 }
 
-func createOn(ctx context.Context, endpoint string, opts vault.DialOptions, handle string, material []byte, grant string) error {
-	c, err := vault.Dial(ctx, vault.VaultRegistration{ID: endpoint, Endpoint: endpoint, Status: "static"}, opts)
+// createOn creates this vault's share. With renewal set it is a v2 create
+// (formats §9): in place with a predecessor, or with the carried policy.
+func createOn(ctx context.Context, endpoint string, opts vault.DialOptions, handle string, material []byte, grant string, renewal *vault.Renewal) error {
+	c, err := dial(ctx, endpoint, opts)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
-	_, err = c.CreateKey(ctx, handle, material, grant)
+	if renewal != nil {
+		_, err = c.CreateKeyRenewal(ctx, handle, material, grant, *renewal)
+	} else {
+		_, err = c.CreateKey(ctx, handle, material, grant)
+	}
 	return err
 }

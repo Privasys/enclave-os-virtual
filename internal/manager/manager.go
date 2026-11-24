@@ -73,6 +73,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
 	"github.com/Privasys/enclave-os-virtual/internal/surfaces"
 	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
+	"github.com/Privasys/enclave-os-virtual/internal/vaultkey"
 )
 
 const (
@@ -1657,6 +1658,10 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Name = name // the path is authoritative
+	if req.Phase == launcher.RotatePhaseRenewRetire {
+		s.retirePreviousKey(w, r, req)
+		return
+	}
 	if err := s.launcher.RotateVolumeKey(r.Context(), req); err != nil {
 		s.log.Error("volume key rotation failed",
 			zap.String("name", name), zap.String("phase", string(req.Phase)), zap.Error(err))
@@ -1684,6 +1689,37 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "phase": req.Phase})
+}
+
+// retirePreviousKey runs the renew-retire phase: after a renewal the control
+// plane has recorded, the previous generation is deleted from its vaults, with
+// no owner approval. Only when the replay (what a restart loads) and the
+// running app are both on the new handle, and every target vault holds it;
+// otherwise it answers retired=false and the old key expires on its own.
+func (s *Server) retirePreviousKey(w http.ResponseWriter, r *http.Request, req launcher.RotateRequest) {
+	reply := func(retired bool, reason string) {
+		s.writeJSON(w, http.StatusOK, map[string]any{"name": req.Name, "phase": req.Phase, "retired": retired, "reason": reason})
+	}
+	handle, err := s.registry.KeyHandle(req.Name)
+	if err != nil {
+		s.jsonError(w, http.StatusInternalServerError, "replay registry unreadable: "+err.Error())
+		return
+	}
+	if s.registry != nil && handle != req.NewHandle {
+		reply(false, "the replay is not on the new handle")
+		return
+	}
+	err = s.launcher.RotateVolumeKey(r.Context(), req)
+	switch {
+	case err == nil:
+		reply(true, "")
+	case errors.Is(err, vaultkey.ErrNotRetired):
+		s.log.Warn("previous key generation left to expire", zap.String("name", req.Name), zap.Error(err))
+		reply(false, err.Error())
+	default:
+		s.log.Error("renew-retire failed", zap.String("name", req.Name), zap.Error(err))
+		s.jsonError(w, http.StatusBadGateway, err.Error())
+	}
 }
 
 // tlsUpdateRequest is the request body for PUT /api/v1/tls.

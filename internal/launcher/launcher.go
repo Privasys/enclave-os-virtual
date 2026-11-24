@@ -2343,6 +2343,12 @@ const (
 	// LUKS slot, the backup repository and the owner's copy of a BYOK key all
 	// stay valid; there is nothing to retire (the old handle expires).
 	RotatePhaseRenew RotatePhase = "renew"
+	// RotatePhaseRenewRetire deletes the previous generation after a renew,
+	// with no owner approval. The control plane calls it once it has recorded
+	// the new handle, so a lost renew answer never leaves it pointing at a
+	// deleted key. Skipped (the old key then expires) unless the app runs on
+	// the new handle and every target vault holds it.
+	RotatePhaseRenewRetire RotatePhase = "renew-retire"
 )
 
 // RotateRequest drives one phase of an online volume-key rotation. The vault
@@ -2360,6 +2366,11 @@ type RotateRequest struct {
 	VaultEndpoints         []string `json:"vault_endpoints,omitempty"`
 	VaultMrenclave         string   `json:"vault_mrenclave,omitempty"`
 	VaultAttestationServer string   `json:"vault_attestation_server,omitempty"`
+	// The OLD constellation's OIDC issuer and audience, from the control
+	// plane's constellation entry. Needed only when it is v1 and the key moves
+	// to a v2 constellation (vaultkey.Config.V1Issuer).
+	VaultOIDCIssuer   string `json:"vault_oidc_issuer,omitempty"`
+	VaultOIDCAudience string `json:"vault_oidc_audience,omitempty"`
 
 	// Vault addressing for the NEW handle. Empty = same constellation as the old
 	// (intra-constellation KEK rotation). Set to a DIFFERENT constellation to
@@ -2408,7 +2419,7 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 	if req.OldHandle == "" {
 		return fmt.Errorf("launcher: rotate: old_handle is required")
 	}
-	if (req.Phase == RotatePhaseAdd || req.Phase == RotatePhaseRenew) && req.NewHandle == "" {
+	if (req.Phase == RotatePhaseAdd || req.Phase == RotatePhaseRenew || req.Phase == RotatePhaseRenewRetire) && req.NewHandle == "" {
 		return fmt.Errorf("launcher: rotate: new_handle is required for the %s phase", req.Phase)
 	}
 
@@ -2434,6 +2445,7 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 		}
 	}
 	oldCfg := mkCfg(req.VaultEndpoints, req.VaultMrenclave, req.VaultAttestationServer)
+	oldCfg.V1Issuer, oldCfg.V1Audience = req.VaultOIDCIssuer, req.VaultOIDCAudience
 	// The new handle's constellation: distinct fields when migrating across
 	// constellations, else the same set as the old (intra-constellation rotate).
 	newEndpoints, newMre, newAtt := req.NewVaultEndpoints, req.NewVaultMrenclave, req.NewVaultAttestationServer
@@ -2448,7 +2460,9 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 		if err != nil {
 			return fmt.Errorf("launcher: rotate add: reconstruct old key: %w", err)
 		}
-		newDEK, newOrigin, _, err := vaultkey.ResolveOrProvision(ctx, l.log, newCfg, req.NewHandle, req.NewKeyCreationGrant, digest, appID)
+		// A new value under the key's current policy, read now from the
+		// vaults that hold the old key and carried to the new one.
+		newDEK, newOrigin, _, err := vaultkey.Rotate(ctx, l.log, oldCfg, newCfg, req.OldHandle, req.NewHandle, req.NewKeyCreationGrant, digest, appID)
 		if err != nil {
 			return fmt.Errorf("launcher: rotate add: provision new key: %w", err)
 		}
@@ -2513,10 +2527,11 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 		if err != nil {
 			return fmt.Errorf("launcher: renew: %w", err)
 		}
-		newCfg.Material = oldDEK
-		// A retried renew finds the new handle already created: it must hold
-		// the same value, which the comparison below checks either way.
-		newHex, newOrigin, _, err := vaultkey.ResolveOrProvision(ctx, l.log, newCfg, req.NewHandle, req.NewKeyCreationGrant, digest, appID)
+		// The next generation keeps the key's policy: copied by the vault in
+		// place, read now and carried on a move. A retried renew finds the new
+		// handle already created: it must hold the same value, which the
+		// comparison below checks either way.
+		newHex, newOrigin, err := vaultkey.Renew(ctx, l.log, oldCfg, newCfg, req.OldHandle, req.NewHandle, req.NewKeyCreationGrant, oldDEK, digest, appID)
 		if err != nil {
 			return fmt.Errorf("launcher: renew: create the new generation: %w", err)
 		}
@@ -2534,6 +2549,13 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 		l.rearmWorkloadDigest(req.Name)
 		l.log.Info("volume key renewed under a new generation", zap.String("name", req.Name), zap.String("new_handle", req.NewHandle))
 		return nil
+
+	case RotatePhaseRenewRetire:
+		// The running app must already use the new generation.
+		if l.volumeEncryption[req.Name] != "vault:"+req.NewHandle {
+			return fmt.Errorf("%w: %s does not run on %s", vaultkey.ErrNotRetired, req.Name, req.NewHandle)
+		}
+		return vaultkey.RetirePredecessor(ctx, l.log, oldCfg, newCfg, req.OldHandle, req.NewHandle, digest, appID)
 
 	default:
 		return fmt.Errorf("launcher: rotate: unknown phase %q", req.Phase)

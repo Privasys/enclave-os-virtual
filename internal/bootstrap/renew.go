@@ -98,16 +98,22 @@ func RenewDataDEK(ctx context.Context, log *zap.Logger, cfg Config, device strin
 	if threshold <= 0 {
 		threshold = 2
 	}
-	// A retried renew finds the new handle created already: it must hold the
+	src, err := sourceConfig(ctx, cfg, loc, b)
+	if err != nil {
+		return "", "", fmt.Errorf("renew: %w", err)
+	}
+	// The next generation keeps the key's policy: copied by the vault in place,
+	// read now from the header's constellation and carried on a move. A
+	// retried renew finds the new handle created already: it must hold the
 	// same key, which the comparison below checks either way.
-	newHex, origin, _, err := vaultkey.ResolveOrProvision(ctx, log, vaultkey.Config{
+	dst := vaultkey.Config{
 		Endpoints:            b.Endpoints,
 		Threshold:            threshold,
 		MrenclaveHex:         b.Mrenclave,
 		AttestationServerURL: b.AttestationServer,
 		AttestationToken:     b.AttestationToken,
-		Material:             oldDEK,
-	}, b.Handle, b.Grant, nil, appID)
+	}
+	newHex, origin, err := vaultkey.Renew(ctx, log, src, dst, loc.Handle, b.Handle, b.Grant, oldDEK, nil, appID)
 	if err != nil {
 		return "", "", fmt.Errorf("renew: create the new generation: %w", err)
 	}
@@ -127,7 +133,31 @@ func RenewDataDEK(ctx context.Context, log *zap.Logger, cfg Config, device strin
 		log.Warn("renew: could not record the DEK origin", zap.Error(err))
 	}
 	log.Info("data key renewed", zap.String("from", loc.Handle), zap.String("to", b.Handle), zap.String("mrenclave", b.Mrenclave))
+	// The header names the new handle, and a boot reads only the header, so
+	// the previous generation can go now, with no owner approval. Not done
+	// (it expires on its own) unless every target vault holds the new one.
+	if err := vaultkey.RetirePredecessor(ctx, log, src, dst, loc.Handle, b.Handle, nil, appID); err != nil {
+		log.Warn("renew: previous generation left to expire", zap.String("handle", loc.Handle), zap.Error(err))
+	}
 	return loc.Handle, b.Handle, nil
+}
+
+// sourceConfig addresses the constellation the header names, with a fresh
+// boot bearer, for reading the key's policy at renewal or rotation time.
+func sourceConfig(ctx context.Context, cfg Config, loc *vaultLocator, b *RotateBundle) (vaultkey.Config, error) {
+	bearer, err := FetchBootAttestationToken(ctx, cfg, loc.MgmtURL, loc.EnclaveID)
+	if err != nil {
+		return vaultkey.Config{}, fmt.Errorf("boot bearer: %w", err)
+	}
+	return vaultkey.Config{
+		Endpoints:            loc.Endpoints,
+		Threshold:            loc.Threshold,
+		MrenclaveHex:         loc.Mrenclave,
+		AttestationServerURL: loc.AttestationServer,
+		AttestationToken:     bearer,
+		V1Issuer:             b.SourceOIDCIssuer,
+		V1Audience:           b.SourceOIDCAudience,
+	}, nil
 }
 
 // replaceLocator swaps the header's locator for loc without ever leaving the

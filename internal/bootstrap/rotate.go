@@ -58,6 +58,12 @@ type RotateBundle struct {
 	AttestationToken  string   `json:"attestation_token"`
 	MgmtURL           string   `json:"mgmt_url"`
 	EnclaveID         string   `json:"enclave_id"`
+	// SourceOIDCIssuer and SourceOIDCAudience are the OIDC issuer and audience
+	// of the constellation the header names, from the control plane's
+	// constellation entry. Needed only when it is v1 and the key moves to a
+	// v2 one (vaultkey.Config.V1Issuer).
+	SourceOIDCIssuer   string `json:"source_oidc_issuer,omitempty"`
+	SourceOIDCAudience string `json:"source_oidc_audience,omitempty"`
 }
 
 func (b *RotateBundle) validate(loc *vaultLocator) error {
@@ -140,13 +146,19 @@ func RotateDataDEK(ctx context.Context, log *zap.Logger, cfg Config, device stri
 	if threshold <= 0 {
 		threshold = 2
 	}
-	newDEK, origin, reconstructed, err := vaultkey.ResolveOrProvision(ctx, log, vaultkey.Config{
+	//    It takes the key's current policy, read now from the header's
+	//    constellation and carried.
+	src, err := sourceConfig(ctx, cfg, loc, b)
+	if err != nil {
+		return fmt.Errorf("rotate: %w", err)
+	}
+	newDEK, origin, reconstructed, err := vaultkey.Rotate(ctx, log, src, vaultkey.Config{
 		Endpoints:            b.Endpoints,
 		Threshold:            threshold,
 		MrenclaveHex:         b.Mrenclave,
 		AttestationServerURL: b.AttestationServer,
 		AttestationToken:     b.AttestationToken,
-	}, loc.Handle, b.Grant, nil, appID)
+	}, loc.Handle, loc.Handle, b.Grant, nil, appID)
 	if err != nil {
 		return fmt.Errorf("rotate: create the new DEK: %w", err)
 	}

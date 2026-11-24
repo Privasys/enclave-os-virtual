@@ -113,6 +113,26 @@ func (r *registry) RebindKey(name string, rot launcher.RotateRequest) (bool, err
 	return false, nil
 }
 
+// KeyHandle returns the volume key handle the replay holds for name, "" when
+// there is no entry.
+func (r *registry) KeyHandle(name string) (string, error) {
+	if r == nil {
+		return "", nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entries, err := r.loadLocked()
+	if err != nil {
+		return "", err
+	}
+	for _, e := range entries {
+		if e.Name == name {
+			return e.KeyHandle, nil
+		}
+	}
+	return "", nil
+}
+
 // SetBackupPolicy replaces the backup schedule persisted with name's entry, so
 // a live policy change survives a manager restart. Reports whether an entry
 // was found.
