@@ -399,3 +399,43 @@ func TestRetireLeavesAV1ConstellationAlone(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// Security review: k agreeing answers are not enough when another source vault
+// does not answer; it could hold the owner's newer policy.
+func TestMoveRefusesWhenAnySourceVaultDoesNotAnswer(t *testing.T) {
+	down := source("m3")
+	down.policyErr = errors.New("timeout")
+	vs := map[string]*fakeVault{"a": source("m1"), "b": source("m2"), "c": down, "x": {member: "n1", billing: "b1"}, "y": {member: "n2", billing: "b1"}}
+	fleet(t, vs)
+	if _, _, err := Renew(context.Background(), zap.NewNop(), cfgOf("a", "b", "c"), cfgOf("x", "y"), "k/v1", "k/v2", "g", material, nil, nil); err == nil {
+		t.Fatal("carried a policy with one source vault silent")
+	}
+	if len(vs["x"].created) != 0 {
+		t.Fatal("created on the target")
+	}
+}
+
+// Security review: a retire never creates anything, even when the successor
+// is absent everywhere.
+func TestRetireNeverCreates(t *testing.T) {
+	vs := map[string]*fakeVault{"a": source("m1"), "b": source("m2")}
+	fleet(t, vs)
+	seed(t, "k/v1", material, vs["a"], vs["b"])
+	vs["a"].created["k/v2"], vs["b"].created["k/v2"] = &vault.Renewal{}, &vault.Renewal{} // GetKeyInfo answers, but no shares
+	c := cfgOf("a", "b")
+	if err := RetirePredecessor(context.Background(), zap.NewNop(), c, c, "k/v1", "k/v2", nil, nil); !errors.Is(err, ErrNotRetired) || !noneDeleted(vs) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, ok := vs["a"].shares["k/v2"]; ok {
+		t.Fatal("retire created a share")
+	}
+}
+
+func TestRetireTreatsAPredecessorGoneEverywhereAsDone(t *testing.T) {
+	vs, c := inPlace(t)
+	delete(vs["a"].shares, "k/v1")
+	delete(vs["b"].shares, "k/v1")
+	if err := RetirePredecessor(context.Background(), zap.NewNop(), c, c, "k/v1", "k/v2", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+}

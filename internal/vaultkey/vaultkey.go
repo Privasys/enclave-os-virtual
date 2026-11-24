@@ -256,6 +256,76 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 	return resolveOrProvision(ctx, log, cfg, handle, grant, imageDigest, appID, nil)
 }
 
+// collected is what phase 1 found for one handle across a constellation.
+type collected struct {
+	byGen    map[string][]*vault.Share
+	notFound int // vaults that report the handle absent
+	denied   int // vaults that hold it but refuse this measurement
+	lastErr  error
+}
+
+// collect exports this vault's share of handle from every endpoint. Never
+// creates anything.
+func collect(ctx context.Context, log *zap.Logger, cfg Config, opts vault.DialOptions, handle string) collected {
+	c := collected{byGen: make(map[string][]*vault.Share)}
+	for _, ep := range cfg.Endpoints {
+		material, err := exportFrom(ctx, ep, opts, handle)
+		switch {
+		case err == nil:
+			gen, share, derr := decodeShare(material)
+			if derr != nil {
+				log.Warn("undecodable share", zap.String("vault", ep), zap.Error(derr))
+				continue
+			}
+			c.byGen[gen] = append(c.byGen[gen], share)
+		case strings.Contains(err.Error(), "key not found"):
+			c.notFound++
+		case strings.Contains(err.Error(), "policy.principals"):
+			// The key EXISTS on this vault but our TEE is not in its policy
+			// (the upgrade gate). The vault holds material we are simply not
+			// authorised to export.
+			c.denied++
+		default:
+			c.lastErr = err
+			log.Warn("vault unavailable", zap.String("vault", ep), zap.Error(err))
+		}
+	}
+	return c
+}
+
+// reconstruct rebuilds the DEK from the largest same-generation group meeting
+// threshold. ok is false when no group does.
+func (c collected) reconstruct(threshold int) (string, bool, error) {
+	best := bestGroup(c.byGen, threshold)
+	if best == nil {
+		return "", false, nil
+	}
+	dek, err := vault.ShamirReconstruct(best)
+	if err != nil {
+		return "", false, fmt.Errorf("vaultkey: reconstruct: %w", err)
+	}
+	if len(dek) != dekSize {
+		return "", false, fmt.Errorf("vaultkey: reconstructed DEK has %d bytes, want %d", len(dek), dekSize)
+	}
+	return hex.EncodeToString(dek), true, nil
+}
+
+// rebuild reconstructs handle's DEK, export only: it can never create a key.
+// absent is true only when every vault reports the handle absent.
+func rebuild(ctx context.Context, log *zap.Logger, cfg Config, opts vault.DialOptions, handle string) (dekHex string, absent bool, err error) {
+	got := collect(ctx, log, cfg, opts, handle)
+	dekHex, ok, err := got.reconstruct(cfg.threshold())
+	switch {
+	case err != nil:
+		return "", false, err
+	case ok:
+		return dekHex, false, nil
+	case got.notFound == len(cfg.Endpoints):
+		return "", true, nil
+	}
+	return "", false, fmt.Errorf("vaultkey: cannot rebuild %q (%d absent, %d denied of %d; last error: %v)", handle, got.notFound, got.denied, len(cfg.Endpoints), got.lastErr)
+}
+
 // renewalFor builds what a v2 create carries besides the share, from the whole
 // key about to be split. nil means a v1 create: the grant alone.
 type renewalFor func(key []byte) (*vault.Renewal, error)
@@ -279,44 +349,13 @@ func resolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 	}
 
 	// ---- Phase 1: try to collect existing shares -----------------------
-	byGen := make(map[string][]*vault.Share)
-	notFound := 0
-	denied := 0
-	var lastErr error
-	for _, ep := range cfg.Endpoints {
-		material, err := exportFrom(ctx, ep, opts, handle)
-		switch {
-		case err == nil:
-			gen, share, derr := decodeShare(material)
-			if derr != nil {
-				log.Warn("undecodable share", zap.String("vault", ep), zap.Error(derr))
-				continue
-			}
-			byGen[gen] = append(byGen[gen], share)
-		case strings.Contains(err.Error(), "key not found"):
-			notFound++
-		case strings.Contains(err.Error(), "policy.principals"):
-			// The key EXISTS on this vault but our TEE is not in its policy
-			// (the upgrade gate). The vault holds material we are simply not
-			// authorised to export.
-			denied++
-		default:
-			lastErr = err
-			log.Warn("vault unavailable", zap.String("vault", ep), zap.Error(err))
-		}
-	}
-
-	if best := bestGroup(byGen, cfg.threshold()); best != nil {
-		dek, err := vault.ShamirReconstruct(best)
-		if err != nil {
-			return "", "", false, fmt.Errorf("vaultkey: reconstruct: %w", err)
-		}
-		if len(dek) != dekSize {
-			return "", "", false, fmt.Errorf("vaultkey: reconstructed DEK has %d bytes, want %d", len(dek), dekSize)
-		}
-		log.Info("volume DEK reconstructed from constellation",
-			zap.Int("shares", len(best)))
-		return hex.EncodeToString(dek), "vault:" + handle, true, nil
+	got := collect(ctx, log, cfg, opts, handle)
+	byGen, notFound, denied, lastErr := got.byGen, got.notFound, got.denied, got.lastErr
+	if dekHex, ok, err := got.reconstruct(cfg.threshold()); err != nil {
+		return "", "", false, err
+	} else if ok {
+		log.Info("volume DEK reconstructed from constellation")
+		return dekHex, "vault:" + handle, true, nil
 	}
 
 	// The key EXISTS (some vault denied our export on policy grounds) but we

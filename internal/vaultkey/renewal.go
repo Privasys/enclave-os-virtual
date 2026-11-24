@@ -97,10 +97,12 @@ type carried struct {
 	billingID     string
 }
 
-// readCarried reads handle's policy, version and the billing id from every
-// reachable source vault. At least k must answer and all answers must agree
-// (by the policy's JCS digest, as vault builds may serialise differently);
-// otherwise the renewal fails closed and is retried later.
+// readCarried reads handle's policy, version and the billing id from EVERY
+// source vault, and all must agree (by the policy's JCS digest, as vault
+// builds may serialise differently). An owner's policy update lands vault by
+// vault, so k agreeing answers could still be the version before it; carrying
+// that would undo the update. Any vault that does not answer, or disagrees,
+// fails the renewal closed, and it is retried later.
 //
 // v1Billing, set for a v1 source (which cannot name its billing), is the
 // interim billing id derived from the source's issuer and audience.
@@ -110,7 +112,6 @@ func readCarried(ctx context.Context, log *zap.Logger, cfg Config, opts vault.Di
 		digest string
 	}
 	var answers []answer
-	var lastErr error
 	for _, ep := range cfg.Endpoints {
 		a, err := func() (answer, error) {
 			c, err := dial(ctx, ep, opts)
@@ -137,14 +138,12 @@ func readCarried(ctx context.Context, log *zap.Logger, cfg Config, opts vault.Di
 			return answer{carried{policy, version, billing}, digest}, nil
 		}()
 		if err != nil {
-			lastErr = err
-			log.Warn("source vault did not give the policy", zap.String("vault", ep), zap.Error(err))
-			continue
+			return carried{}, fmt.Errorf("vaultkey: source vault %s did not give the policy of %q (every source vault must): %w", ep, handle, err)
 		}
 		answers = append(answers, a)
 	}
-	if len(answers) < cfg.threshold() {
-		return carried{}, fmt.Errorf("vaultkey: only %d of %d source vaults gave the policy of %q (need %d); last error: %v", len(answers), len(cfg.Endpoints), handle, cfg.threshold(), lastErr)
+	if len(answers) == 0 {
+		return carried{}, errors.New("vaultkey: no source vaults")
 	}
 	first := answers[0]
 	for _, a := range answers[1:] {
@@ -308,17 +307,21 @@ func RetirePredecessor(ctx context.Context, log *zap.Logger, src, dst Config, ol
 	// Existing is not enough: the successor must hold the predecessor's value.
 	// Both are rebuilt now, each from a threshold of its own vaults over their
 	// attested connections. A predecessor gone everywhere was already retired.
-	newHex, _, _, err := resolveOrProvision(ctx, log, dst, newHandle, "", imageDigest, appID, nil)
-	if err != nil {
-		return fmt.Errorf("%w: rebuild %q: %v", ErrNotRetired, newHandle, err)
-	}
-	oldHex, _, _, err := resolveOrProvision(ctx, log, src, oldHandle, "", imageDigest, appID, nil)
+	// Export only: a retire can never create a key.
+	newHex, absent, err := rebuild(ctx, log, dst, dstOpts, newHandle)
 	switch {
-	case err != nil && strings.Contains(err.Error(), "does not exist"):
-		log.Info("previous generation already retired", zap.String("handle", oldHandle))
-		return nil
+	case err != nil:
+		return fmt.Errorf("%w: rebuild %q: %v", ErrNotRetired, newHandle, err)
+	case absent:
+		return fmt.Errorf("%w: %q is on no vault", ErrNotRetired, newHandle)
+	}
+	oldHex, absent, err := rebuild(ctx, log, src, srcOpts, oldHandle)
+	switch {
 	case err != nil:
 		return fmt.Errorf("%w: rebuild %q: %v", ErrNotRetired, oldHandle, err)
+	case absent:
+		log.Info("previous generation already retired", zap.String("handle", oldHandle))
+		return nil
 	case subtle.ConstantTimeCompare([]byte(newHex), []byte(oldHex)) != 1:
 		return fmt.Errorf("%w: %q does not hold the value of %q", ErrNotRetired, newHandle, oldHandle)
 	}

@@ -1700,12 +1700,18 @@ func (s *Server) retirePreviousKey(w http.ResponseWriter, r *http.Request, req l
 	reply := func(retired bool, reason string) {
 		s.writeJSON(w, http.StatusOK, map[string]any{"name": req.Name, "phase": req.Phase, "retired": retired, "reason": reason})
 	}
+	// Fail closed: no registry, or no entry, means the replay cannot be shown
+	// to be on the new handle.
+	if s.registry == nil {
+		reply(false, "no replay registry")
+		return
+	}
 	handle, err := s.registry.KeyHandle(req.Name)
 	if err != nil {
 		s.jsonError(w, http.StatusInternalServerError, "replay registry unreadable: "+err.Error())
 		return
 	}
-	if s.registry != nil && handle != req.NewHandle {
+	if handle == "" || handle != req.NewHandle {
 		reply(false, "the replay is not on the new handle")
 		return
 	}
