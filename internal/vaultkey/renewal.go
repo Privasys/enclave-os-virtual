@@ -95,6 +95,9 @@ type carried struct {
 	policy        json.RawMessage
 	policyVersion uint32
 	billingID     string
+	// The source key's shape, which the target keeps (formats §9.1).
+	keyType    vault.KeyType
+	exportable bool
 }
 
 // readCarried reads handle's policy, version and the billing id from EVERY
@@ -131,11 +134,15 @@ func readCarried(ctx context.Context, log *zap.Logger, cfg Config, opts vault.Di
 				}
 				billing = id.BillingID
 			}
+			info, err := c.GetKeyInfo(ctx, handle)
+			if err != nil {
+				return answer{}, err
+			}
 			digest, err := vault.PolicyDigestJSON(policy)
 			if err != nil {
 				return answer{}, err
 			}
-			return answer{carried{policy, version, billing}, digest}, nil
+			return answer{carried{policy, version, billing, info.KeyType, info.Exportable}, digest}, nil
 		}()
 		if err != nil {
 			return carried{}, fmt.Errorf("vaultkey: source vault %s did not give the policy of %q (every source vault must): %w", ep, handle, err)
@@ -150,6 +157,12 @@ func readCarried(ctx context.Context, log *zap.Logger, cfg Config, opts vault.Di
 		if a.digest != first.digest || a.c.policyVersion != first.c.policyVersion || a.c.billingID != first.c.billingID {
 			return carried{}, fmt.Errorf("vaultkey: the source vaults disagree on the policy of %q (versions %d and %d); retry once they converge", handle, first.c.policyVersion, a.c.policyVersion)
 		}
+		if a.c.keyType != first.c.keyType || a.c.exportable != first.c.exportable {
+			return carried{}, fmt.Errorf("vaultkey: the source vaults disagree on the type or exportability of %q", handle)
+		}
+	}
+	if first.c.keyType == "" {
+		return carried{}, fmt.Errorf("vaultkey: the source vaults report no key type for %q", handle)
 	}
 	return first.c, nil
 }
@@ -236,11 +249,14 @@ func planCarry(ctx context.Context, log *zap.Logger, src, dst Config, oldHandle 
 		if err != nil {
 			return nil, fmt.Errorf("key check: %w", err)
 		}
+		exportable := got.exportable
 		return &vault.Renewal{
-			Policy:          got.policy,
-			PolicyVersion:   got.policyVersion,
-			SourceBillingID: got.billingID,
-			KeyCheck:        &check,
+			Policy:            got.policy,
+			PolicyVersion:     got.policyVersion,
+			SourceBillingID:   got.billingID,
+			KeyCheck:          &check,
+			CarriedExportable: &exportable,
+			CarriedKeyType:    got.keyType,
 		}, nil
 	}, nil
 }

@@ -30,6 +30,7 @@ type fakeVault struct {
 	deleted         map[string]bool
 	deleteErr       error
 	shares          map[string][]byte // handle → share payload
+	keyType         vault.KeyType     // reported by GetKeyInfo; RawShare when empty
 }
 
 type fakeConn struct{ v *fakeVault }
@@ -70,10 +71,16 @@ func (c fakeConn) GetVaultIdentity(context.Context) (vault.VaultIdentity, error)
 	return vault.VaultIdentity{MemberID: c.v.member, BillingID: c.v.billing, MRENCLAVE: testMre}, nil
 }
 func (c fakeConn) GetKeyInfo(_ context.Context, handle string) (vault.KeyInfo, error) {
-	if _, ok := c.v.created[handle]; !ok {
+	_, made := c.v.created[handle]
+	_, held := c.v.policies[handle]
+	if !made && !held {
 		return vault.KeyInfo{}, errors.New("key not found")
 	}
-	return vault.KeyInfo{Handle: handle}, nil
+	kt := c.v.keyType
+	if kt == "" {
+		kt = vault.RawShare
+	}
+	return vault.KeyInfo{Handle: handle, KeyType: kt, Exportable: true}, nil
 }
 // RetireKey applies the vault's member rule: in place (successor held here)
 // this vault must be among the successor's members, on a move it must not.
@@ -437,5 +444,29 @@ func TestRetireTreatsAPredecessorGoneEverywhereAsDone(t *testing.T) {
 	delete(vs["b"].shares, "k/v1")
 	if err := RetirePredecessor(context.Background(), zap.NewNop(), c, c, "k/v1", "k/v2", nil, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The next vault build keeps a carried key's shape: the runtime names it,
+// read from every source vault.
+func TestMoveCarriesTheSourceKeyShape(t *testing.T) {
+	vs := map[string]*fakeVault{"a": source("m1"), "b": source("m2"), "x": {member: "n1", billing: "b1"}, "y": {member: "n2", billing: "b1"}}
+	fleet(t, vs)
+	if _, _, err := Renew(context.Background(), zap.NewNop(), cfgOf("a", "b"), cfgOf("x", "y"), "k/v1", "k/v2", "g", material, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	r := vs["x"].created["k/v2"]
+	if r == nil || r.CarriedKeyType != vault.RawShare || r.CarriedExportable == nil || !*r.CarriedExportable {
+		t.Fatalf("carried shape = %+v", r)
+	}
+}
+
+func TestMoveRefusesSourcesDisagreeingOnTheShape(t *testing.T) {
+	odd := source("m2")
+	odd.keyType = vault.Aes256GcmKey
+	vs := map[string]*fakeVault{"a": source("m1"), "b": odd, "x": {member: "n1", billing: "b1"}, "y": {member: "n2", billing: "b1"}}
+	fleet(t, vs)
+	if _, _, err := Renew(context.Background(), zap.NewNop(), cfgOf("a", "b"), cfgOf("x", "y"), "k/v1", "k/v2", "g", material, nil, nil); err == nil || len(vs["x"].created) != 0 {
+		t.Fatalf("err = %v", err)
 	}
 }
