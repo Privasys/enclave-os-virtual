@@ -97,6 +97,10 @@ func withholdToken(tok, roleClaim, appID string) bool {
 	if !ok {
 		return false
 	}
+	// A step-up approval (vault_op) is for one vault operation, never an app.
+	if p.Approval {
+		return true
+	}
 	// A tool token (act.client_id, for an app) is the runtime's to consume:
 	// the app learns the person from X-Privasys-Sub and never holds a token
 	// it could replay to bill them.

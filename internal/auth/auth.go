@@ -202,7 +202,20 @@ func (v *Verifier) Authenticate(tokenStr string) (*AuthResult, error) {
 // returns the parsed claims. Shared by verifyOIDCToken (which additionally
 // requires a platform tier role) and AuthenticateUser (which does not).
 func (v *Verifier) verifyClaims(tokenStr string) (map[string]interface{}, error) {
-	return v.verifyClaimsFor(tokenStr, func(claims map[string]interface{}) error {
+	claims, err := v.verifyPlatformClaims(tokenStr)
+	if err != nil {
+		return nil, err
+	}
+	if err := refuseApproval(claims); err != nil {
+		return nil, err
+	}
+	return claims, nil
+}
+
+// verifyPlatformClaims is the platform-audience check shared by an ordinary
+// bearer (verifyClaims) and a step-up approval (VerifyApprovalToken).
+func (v *Verifier) verifyPlatformClaims(tokenStr string) (map[string]interface{}, error) {
+	return v.verifyClaimsCore(tokenStr, func(claims map[string]interface{}) error {
 		if v.oidc.Audience != "" && !checkAudience(claims, v.oidc.Audience) {
 			return fmt.Errorf("auth: OIDC audience missing %q", v.oidc.Audience)
 		}
@@ -210,10 +223,35 @@ func (v *Verifier) verifyClaims(tokenStr string) (map[string]interface{}, error)
 	})
 }
 
+// ApprovalClaim marks a step-up approval: the identity provider mints it for
+// ONE vault operation, and only VerifyApprovalToken takes it. As an ordinary
+// bearer it would let whoever holds an approval act as its owner.
+const ApprovalClaim = "vault_op"
+
+// refuseApproval rejects a token that is a step-up approval.
+func refuseApproval(claims map[string]interface{}) error {
+	if _, ok := claims[ApprovalClaim]; ok {
+		return errors.New("auth: a vault approval is not a bearer")
+	}
+	return nil
+}
+
 // verifyClaimsFor is verifyClaims with the audience rule supplied by the
-// caller: everything else (signature, issuer, expiry against trusted time)
-// is checked exactly the same way.
+// caller: everything else (signature, issuer, expiry against trusted time,
+// and the refusal of a step-up approval) is checked exactly the same way.
 func (v *Verifier) verifyClaimsFor(tokenStr string, audience func(map[string]interface{}) error) (map[string]interface{}, error) {
+	claims, err := v.verifyClaimsCore(tokenStr, audience)
+	if err != nil {
+		return nil, err
+	}
+	if err := refuseApproval(claims); err != nil {
+		return nil, err
+	}
+	return claims, nil
+}
+
+// verifyClaimsCore checks signature, issuer, the audience rule and expiry.
+func (v *Verifier) verifyClaimsCore(tokenStr string, audience func(map[string]interface{}) error) (map[string]interface{}, error) {
 	parts := strings.SplitN(tokenStr, ".", 3)
 	if len(parts) != 3 {
 		return nil, errors.New("auth: malformed OIDC token")
@@ -846,5 +884,5 @@ func jwkVerifyEC(alg string, key *jwkKey, signingInput, sig []byte) error {
 // Signature, issuer, audience and expiry are checked here exactly as for any
 // other token, expiry against trusted time.
 func (v *Verifier) VerifyApprovalToken(tokenStr string) (map[string]interface{}, error) {
-	return v.verifyClaims(tokenStr)
+	return v.verifyPlatformClaims(tokenStr)
 }

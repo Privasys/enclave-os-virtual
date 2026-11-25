@@ -16,6 +16,9 @@ type PeekedToken struct {
 	Roles     []string
 	// ActClientID is act.client_id (RFC 8693): the tool acting for the person.
 	ActClientID string
+	// Approval: the token carries vault_op, a step-up approval for one vault
+	// operation, which never reaches an app.
+	Approval bool
 }
 
 // Peek reads the audiences and roles a JWT claims, unverified. ok is false
@@ -49,6 +52,7 @@ func Peek(tokenStr, roleClaim string) (PeekedToken, bool) {
 	}
 	p.Roles = collectRoles(claims, roleClaim)
 	p.ActClientID = actClientID(claims)
+	_, p.Approval = claims[ApprovalClaim]
 	return p, true
 }
 
