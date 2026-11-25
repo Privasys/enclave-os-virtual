@@ -180,3 +180,41 @@ func TestRelaySubInjection(t *testing.T) {
 		t.Fatalf("passthrough leaked %s = %q", relaySubHeader, gotSub)
 	}
 }
+
+// X-Privasys-Sub-Via is the runtime's alone: a client copy never reaches the
+// app, sealed or plaintext.
+func TestRelayStripsSubVia(t *testing.T) {
+	m := NewManager()
+	var saw bool
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, saw = r.Header[http.CanonicalHeaderKey(relaySubViaHeader)]
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := httptest.NewServer(m.Middleware(inner))
+	defer srv.Close()
+
+	sess, seal := testSession(t, m, "user-123")
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/x", strings.NewReader(string(seal("POST", "/x", []byte(`{}`), 0))))
+	req.Header.Set("Content-Type", sealedContentType)
+	req.Header.Set("Authorization", authScheme+" "+sess.ID)
+	req.Header.Set(relaySubViaHeader, "forged-tool")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if saw {
+		t.Fatal("sealed: a client's X-Privasys-Sub-Via reached the app")
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/plain", nil)
+	req.Header.Set(relaySubViaHeader, "forged-tool")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if saw {
+		t.Fatal("plaintext: a client's X-Privasys-Sub-Via reached the app")
+	}
+}

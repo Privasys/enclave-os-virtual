@@ -27,6 +27,9 @@ func TestToolTokenPaysForItsAppOnly(t *testing.T) {
 	if got := s.callerIdentity(call(tool)); got != "p1" {
 		t.Fatalf("tool token for this app: payer %q", got)
 	}
+	if sub, via := s.toolCaller(call(tool)); sub != "p1" || via != "privasys-wallet" {
+		t.Fatalf("toolCaller = %q via %q", sub, via)
+	}
 	if !withholdToken(tool, "roles", toolAppID) {
 		t.Fatal("a tool token reached the app")
 	}

@@ -230,9 +230,9 @@ func setConfigureGrant(pr *httputil.ProxyRequest) {
 // toolCaller is the person a verified TOOL token presents for the app on
 // host (auth.AuthenticateToolCaller), or "". Only Authorization and
 // X-App-Auth are read.
-func (s *Server) toolCaller(r *http.Request) string {
+func (s *Server) toolCaller(r *http.Request) (sub, via string) {
 	if s.verifier == nil {
-		return ""
+		return "", ""
 	}
 	host := hostOnly(r.Host)
 	appID := ""
@@ -243,15 +243,21 @@ func (s *Server) toolCaller(r *http.Request) string {
 	}
 	appHex := launcher.AppIDHex(appID)
 	if appHex == "" {
-		return ""
+		return "", ""
 	}
 	for _, tok := range []string{bearerToken(r.Header.Get("Authorization")), strings.TrimSpace(r.Header.Get("X-App-Auth"))} {
 		if tok == "" {
 			continue
 		}
-		if sub, err := s.verifier.AuthenticateToolCaller(tok, appHex); err == nil {
-			return sub
+		if sub, via, err := s.verifier.AuthenticateToolCaller(tok, appHex); err == nil {
+			return sub, via
 		}
 	}
-	return ""
+	return "", ""
 }
+
+// SubViaHeader names the tool through which X-Privasys-Sub was asserted
+// (the tool token's act.client_id). Absent when the person signed in to the
+// app itself. Only the runtime sets it; the session relay strips any inbound
+// copy on every path.
+const SubViaHeader = "X-Privasys-Sub-Via"

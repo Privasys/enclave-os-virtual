@@ -53,6 +53,9 @@ const (
 	// inbound request so neither gateway-leg nor RA-TLS-direct clients can
 	// assert an identity.
 	relaySubHeader = "X-Privasys-Sub"
+	// relaySubViaHeader names the tool behind a runtime-asserted subject;
+	// the manager sets it, never a client.
+	relaySubViaHeader = "X-Privasys-Sub-Via"
 	// TransportHeader tells the app which leg a request arrived on; only the
 	// runtime sets it, and every inbound value is stripped. This middleware
 	// stamps "sealed" on the inner request it unsealed; the manager stamps
@@ -411,6 +414,7 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 		// inbound value on EVERY path — passthrough (RA-TLS direct clients
 		// could otherwise spoof it) and sealed alike.
 		r.Header.Del(relaySubHeader)
+		r.Header.Del(relaySubViaHeader)
 		r.Header.Del(TransportHeader)
 		if r.URL.Path == initPath && r.Method == http.MethodPost {
 			m.handleInit(w, r)

@@ -123,7 +123,7 @@ func (s *Server) callerIdentity(r *http.Request) string {
 	// A tool token for THIS app pays as the person that app knows
 	// (platformtoken.go): the runtime consumes it and the app never holds it,
 	// so the app cannot replay it. The app's own tokens never pay.
-	if sub := s.toolCaller(r); sub != "" {
+	if sub, _ := s.toolCaller(r); sub != "" {
 		return sub
 	}
 	// A verified spend token names the paying user outright (spendgate.go

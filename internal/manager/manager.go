@@ -790,8 +790,9 @@ func (s *Server) Start(ctx context.Context) error {
 			// the session relay on every path.
 			if t := r.Header.Get(TransportHeader); (t == TransportAttested || t == TransportSealed) &&
 				strings.TrimSpace(r.Header.Get("X-Privasys-Sub")) == "" {
-				if sub := s.toolCaller(r); sub != "" {
+				if sub, via := s.toolCaller(r); sub != "" && headerSafeASCII(via) {
 					r.Header.Set("X-Privasys-Sub", sub)
+					r.Header.Set(SubViaHeader, via)
 				}
 			}
 			// Freeze gate: if the container declared a config_api at

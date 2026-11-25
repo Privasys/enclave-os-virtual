@@ -75,14 +75,14 @@ func actClientID(claims map[string]interface{}) string {
 // claim "at+jwt"; an act.client_id naming the tool (the identity provider
 // writes act only when a tool mints for an app, never for the app's own
 // client); and no roles. It returns the subject, which is the person as that
-// app knows them.
-func (v *Verifier) AuthenticateToolCaller(tokenStr, appHex string) (string, error) {
+// app knows them, and the acting tool (act.client_id).
+func (v *Verifier) AuthenticateToolCaller(tokenStr, appHex string) (sub, via string, err error) {
 	if v == nil {
-		return "", errors.New("auth: no verifier")
+		return "", "", errors.New("auth: no verifier")
 	}
 	appHex = strings.ToLower(strings.TrimSpace(appHex))
 	if appHex == "" {
-		return "", errors.New("auth: no app to address")
+		return "", "", errors.New("auth: no app to address")
 	}
 	want := "app:" + appHex
 	claims, err := v.verifyClaimsFor(tokenStr, func(claims map[string]interface{}) error {
@@ -101,20 +101,21 @@ func (v *Verifier) AuthenticateToolCaller(tokenStr, appHex string) (string, erro
 		return fmt.Errorf("auth: tool token not addressed to %s alone", want)
 	})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if typ, _ := claims["typ"].(string); typ != "at+jwt" {
-		return "", errors.New("auth: tool token is not an access token (typ)")
+		return "", "", errors.New("auth: tool token is not an access token (typ)")
 	}
-	if actClientID(claims) == "" {
-		return "", errors.New("auth: tool token names no acting tool (act.client_id)")
+	via = actClientID(claims)
+	if via == "" {
+		return "", "", errors.New("auth: tool token names no acting tool (act.client_id)")
 	}
 	if roles := collectRoles(claims, v.oidc.RoleClaim); len(roles) > 0 {
-		return "", errors.New("auth: tool token carries roles")
+		return "", "", errors.New("auth: tool token carries roles")
 	}
-	sub, _ := claims["sub"].(string)
+	sub, _ = claims["sub"].(string)
 	if strings.TrimSpace(sub) == "" {
-		return "", errors.New("auth: tool token has no subject")
+		return "", "", errors.New("auth: tool token has no subject")
 	}
-	return sub, nil
+	return sub, via, nil
 }
