@@ -59,6 +59,8 @@ func TestWithholdToken(t *testing.T) {
 		{"role in map claim", jwt(t, map[string]any{"aud": "privasys-platform",
 			"roles": []any{}, "realm_access": map[string]any{"roles": []any{"privasys-platform:monitoring"}}}), firstPartyApp, true},
 		{"platform among several audiences", jwt(t, map[string]any{"aud": []any{"app:x", "privasys-platform"}}), thirdPartyApp, true},
+		{"user to prod mail connector", userToken(t), "50721673-d154-4c9f-9845-8942368fedd6", false},
+		{"staff to prod mail connector", staffToken(t), "50721673-d154-4c9f-9845-8942368fedd6", true},
 		{"staff to monitoring", staffToken(t), "e9de5530-41c3-471e-9566-c5c9a6d963bc", false},
 		{"user to monitoring", userToken(t), "218bc492-9ac5-4e3e-b8c2-692ab93e046a", false},
 		{"app id not normalised", userToken(t), strings.ToUpper(strings.ReplaceAll(firstPartyApp, "-", "")), false},

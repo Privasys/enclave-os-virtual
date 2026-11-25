@@ -72,6 +72,14 @@ var platformTokenApps = func() map[string]bool {
 		"2425f347-ebdc-4e80-b0b1-328757f34fc8", // globaml-coordinator (dev)
 		"c907ba31-0fe6-4e29-8627-51f3a153dd7f", // globaml-bwbagb (dev)
 		"dd4dcd8a-c94f-4d9d-8eef-68879a9c5969", // globaml-hcbggb (dev)
+		// The connectors verify the wallet's platform bearer on their
+		// capability routes until the runtime asserts X-Privasys-Sub on
+		// "authenticated" routes and they declare them.
+		"50721673-d154-4c9f-9845-8942368fedd6", // mail-connector (prod)
+		"7958ba28-a8d4-40f1-873a-925c15b87aa8", // mail-connector (dev)
+		"07a002a2-a136-4746-b5a5-b540b604d6ee", // calendar-connector (dev)
+		"91abe6f1-2fc9-4527-84ac-4987aa0ac65c", // files-connector (dev)
+		"20a788c0-2691-4879-b566-1ab109ab2323", // meetings-connector (dev)
 	} {
 		m[normalizeAppID(id)] = true
 	}
