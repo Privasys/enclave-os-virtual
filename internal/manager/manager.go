@@ -784,6 +784,16 @@ func (s *Server) Start(ctx context.Context) error {
 			} else if r.Header.Get(TransportHeader) == TransportSealed {
 				r = s.assertSealedIdentity(r)
 			}
+			// A tool token for this app names the person as the app knows
+			// them; the token itself is withheld from the app
+			// (platformtoken.go). The inbound X-Privasys-Sub was stripped by
+			// the session relay on every path.
+			if t := r.Header.Get(TransportHeader); (t == TransportAttested || t == TransportSealed) &&
+				strings.TrimSpace(r.Header.Get("X-Privasys-Sub")) == "" {
+				if sub := s.toolCaller(r); sub != "" {
+					r.Header.Set("X-Privasys-Sub", sub)
+				}
+			}
 			// Freeze gate: if the container declared a config_api at
 			// load time and has not yet been configured, serve only
 			// requests matching that endpoint and return 503 for

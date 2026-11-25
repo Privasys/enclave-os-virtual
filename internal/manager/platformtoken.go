@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
+	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 )
 
 // A caller's platform bearer is the runtime's to consume (the API-fee payer,
@@ -95,6 +96,16 @@ func withholdToken(tok, roleClaim, appID string) bool {
 	p, ok := auth.Peek(tok, roleClaim)
 	if !ok {
 		return false
+	}
+	// A tool token (act.client_id, for an app) is the runtime's to consume:
+	// the app learns the person from X-Privasys-Sub and never holds a token
+	// it could replay to bill them.
+	if p.ActClientID != "" {
+		for _, a := range p.Audiences {
+			if strings.HasPrefix(a, "app:") {
+				return true
+			}
+		}
 	}
 	platform := false
 	for _, a := range p.Audiences {
@@ -214,4 +225,33 @@ func setConfigureGrant(pr *httputil.ProxyRequest) {
 		return
 	}
 	pr.Out.Header.Set(ConfigureAuthorizedHeader, "role="+g.role+"; sub="+g.sub)
+}
+
+// toolCaller is the person a verified TOOL token presents for the app on
+// host (auth.AuthenticateToolCaller), or "". Only Authorization and
+// X-App-Auth are read.
+func (s *Server) toolCaller(r *http.Request) string {
+	if s.verifier == nil {
+		return ""
+	}
+	host := hostOnly(r.Host)
+	appID := ""
+	if s.appIDOf != nil {
+		appID = s.appIDOf(host)
+	} else {
+		appID = s.appIDForHost(host)
+	}
+	appHex := launcher.AppIDHex(appID)
+	if appHex == "" {
+		return ""
+	}
+	for _, tok := range []string{bearerToken(r.Header.Get("Authorization")), strings.TrimSpace(r.Header.Get("X-App-Auth"))} {
+		if tok == "" {
+			continue
+		}
+		if sub, err := s.verifier.AuthenticateToolCaller(tok, appHex); err == nil {
+			return sub
+		}
+	}
+	return ""
 }
