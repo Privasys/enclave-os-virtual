@@ -1956,16 +1956,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	if req.AppId != "" {
 		runtimeEnv["PRIVASYS_APP_ID"] = req.AppId
 	}
-	// The identity provider this fleet trusts, for spend tokens (the app
-	// fetches one per signed-in user from <issuer>/spend/token).
-	if l.cfg.Issuer != "" {
-		runtimeEnv["PRIVASYS_ISSUER"] = strings.TrimRight(l.cfg.Issuer, "/")
-	}
-	// The audience the fleet's tokens carry, for an app that verifies tokens
-	// itself (one per deployment: the test platform's on dev).
-	if l.cfg.Audience != "" {
-		runtimeEnv["PRIVASYS_AUDIENCE"] = l.cfg.Audience
-	}
+	l.stampPlatformEnv(runtimeEnv)
 	// The verified image digest (hex SHA-256) — the same value attested at
 	// OID 3.2. Lets an app stamp its own measurement into artifacts it signs
 	// (e.g. the identity verifier's IVR) without a self-attestation
