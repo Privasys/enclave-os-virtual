@@ -28,6 +28,7 @@ type fakeVault struct {
 	policyErr       error
 	created         map[string]*vault.Renewal // handle → renewal (nil: v1 create)
 	deleted         map[string]bool
+	tombstones      bool // a deleted handle answers "key deleted" (vault-v0.42.0+)
 	deleteErr       error
 	shares          map[string][]byte // handle → share payload
 	keyType         vault.KeyType     // reported by GetKeyInfo; RawShare when empty
@@ -38,6 +39,9 @@ type fakeConn struct{ v *fakeVault }
 func (c fakeConn) ExportKey(_ context.Context, handle string, _ ...vault.ApprovalToken) ([]byte, error) {
 	if s, ok := c.v.shares[handle]; ok && !c.v.deleted[handle] {
 		return s, nil
+	}
+	if c.v.tombstones && c.v.deleted[handle] {
+		return nil, errors.New("key deleted at 2026-11-25T00:00:00Z; the handle is reserved until expiry")
 	}
 	return nil, errors.New("key not found")
 }
@@ -444,6 +448,42 @@ func TestRetireTreatsAPredecessorGoneEverywhereAsDone(t *testing.T) {
 	delete(vs["b"].shares, "k/v1")
 	if err := RetirePredecessor(context.Background(), zap.NewNop(), c, c, "k/v1", "k/v2", nil, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A vault with tombstones answers "key deleted" for a retired predecessor: a
+// repeated retire still counts it as done, also beside a vault that forgot it.
+func TestRetireRepeatedOnTombstonesIsDone(t *testing.T) {
+	vs, c := inPlace(t)
+	vs["a"].tombstones, vs["b"].tombstones = true, true
+	ctx := context.Background()
+	if err := RetirePredecessor(ctx, zap.NewNop(), c, c, "k/v1", "k/v2", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := RetirePredecessor(ctx, zap.NewNop(), c, c, "k/v1", "k/v2", nil, nil); err != nil {
+		t.Fatalf("retry on tombstones: %v", err)
+	}
+	vs["b"].tombstones = false // "key not found" here, "key deleted" there
+	if err := RetirePredecessor(ctx, zap.NewNop(), c, c, "k/v1", "k/v2", nil, nil); err != nil {
+		t.Fatalf("retry on mixed answers: %v", err)
+	}
+}
+
+// A deleted handle is never absent for a create: it stays reserved until its
+// expiry, even when every other vault has forgotten it.
+func TestATombstoneIsNeverRecreated(t *testing.T) {
+	vs := map[string]*fakeVault{"a": source("m1"), "b": source("m2")}
+	fleet(t, vs)
+	vs["a"].tombstones = true
+	vs["a"].deleted = map[string]bool{"k/v3": true}
+	_, _, _, err := ResolveOrProvision(context.Background(), zap.NewNop(), cfgOf("a", "b"), "k/v3", "grant", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "cannot be created again") {
+		t.Fatalf("err = %v", err)
+	}
+	for _, v := range vs {
+		if _, ok := v.created["k/v3"]; ok {
+			t.Fatal("a deleted handle was created again")
+		}
 	}
 }
 

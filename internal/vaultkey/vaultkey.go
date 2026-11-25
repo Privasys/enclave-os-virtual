@@ -260,6 +260,7 @@ func ResolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 type collected struct {
 	byGen    map[string][]*vault.Share
 	notFound int // vaults that report the handle absent
+	deleted  int // vaults that report it deleted (a tombstone until expiry)
 	denied   int // vaults that hold it but refuse this measurement
 	lastErr  error
 }
@@ -280,6 +281,10 @@ func collect(ctx context.Context, log *zap.Logger, cfg Config, opts vault.DialOp
 			c.byGen[gen] = append(c.byGen[gen], share)
 		case strings.Contains(err.Error(), "key not found"):
 			c.notFound++
+		case strings.Contains(err.Error(), "key deleted"):
+			// A deleted handle stays a tombstone until its expiry: it is gone
+			// for a retire, but it can never be created again (never absent).
+			c.deleted++
 		case strings.Contains(err.Error(), "policy.principals"):
 			// The key EXISTS on this vault but our TEE is not in its policy
 			// (the upgrade gate). The vault holds material we are simply not
@@ -311,7 +316,8 @@ func (c collected) reconstruct(threshold int) (string, bool, error) {
 }
 
 // rebuild reconstructs handle's DEK, export only: it can never create a key.
-// absent is true only when every vault reports the handle absent.
+// absent is true only when every vault reports the handle absent or deleted
+// (a retire that already ran). Never use absent to decide a create.
 func rebuild(ctx context.Context, log *zap.Logger, cfg Config, opts vault.DialOptions, handle string) (dekHex string, absent bool, err error) {
 	got := collect(ctx, log, cfg, opts, handle)
 	dekHex, ok, err := got.reconstruct(cfg.threshold())
@@ -320,10 +326,10 @@ func rebuild(ctx context.Context, log *zap.Logger, cfg Config, opts vault.DialOp
 		return "", false, err
 	case ok:
 		return dekHex, false, nil
-	case got.notFound == len(cfg.Endpoints):
+	case got.notFound+got.deleted == len(cfg.Endpoints):
 		return "", true, nil
 	}
-	return "", false, fmt.Errorf("vaultkey: cannot rebuild %q (%d absent, %d denied of %d; last error: %v)", handle, got.notFound, got.denied, len(cfg.Endpoints), got.lastErr)
+	return "", false, fmt.Errorf("vaultkey: cannot rebuild %q (%d absent, %d deleted, %d denied of %d; last error: %v)", handle, got.notFound, got.deleted, got.denied, len(cfg.Endpoints), got.lastErr)
 }
 
 // renewalFor builds what a v2 create carries besides the share, from the whole
@@ -372,6 +378,9 @@ func resolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 	// absent. A partial set (some shares present below quorum, or an unreachable
 	// vault) is NOT a first boot — creating a fresh generation could split the
 	// key — so fail and let the reconciler retry.
+	if got.deleted > 0 {
+		return "", "", false, fmt.Errorf("vaultkey: key %q was deleted on %d of %d vaults; it cannot be created again until it expires", handle, got.deleted, len(cfg.Endpoints))
+	}
 	if notFound != len(cfg.Endpoints) {
 		if len(byGen) > 0 {
 			return "", "", false, fmt.Errorf("vaultkey: key %q exists on some vaults but no share group meets threshold %d — refusing to create a new generation", handle, cfg.threshold())
