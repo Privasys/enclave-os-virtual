@@ -206,7 +206,9 @@ type Server struct {
 	log      *zap.Logger
 	launcher *launcher.Launcher
 	verifier *auth.Verifier
-	server   *http.Server
+	// appIDOf overrides the host → platform app id lookup (tests only).
+	appIDOf func(host string) string
+	server  *http.Server
 	// registry persists every successful Load so the manager can replay
 	// them on restart. nil when Config.RegistryPath is empty.
 	registry *registry
@@ -369,15 +371,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 		return s.lookupAppHost(host)
 	})
 	s.appProxy = &httputil.ReverseProxy{
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			host := hostOnly(pr.In.Host)
-			upstream, _ := s.lookupAppHost(host)
-			pr.Out.URL.Scheme = "http"
-			pr.Out.URL.Host = upstream
-			pr.Out.Host = pr.In.Host
-			pr.SetXForwarded()
-			restoreDirectForwardedHost(pr)
-		},
+		Rewrite: s.rewriteAppRequest,
 		// Billing headers are runtime-asserted, never app-asserted: scrub
 		// whatever the container set so an app cannot forge a charge or a
 		// price. The billed writer re-stamps the runtime's own
