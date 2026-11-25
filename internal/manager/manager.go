@@ -818,10 +818,15 @@ func (s *Server) Start(ctx context.Context) error {
 				// checked here, so the app verifies no platform token itself.
 				// The configure endpoint keeps its own gate below.
 				if ra, ok := matchRouteAuth(st.RouteAuth, r); ok && !(st.ConfigAPI != nil && matchesConfigAPI(st.ConfigAPI, r)) {
-					if err := s.authorizeRoute(r, containerName, st, ra); err != nil {
+					sub, role, err := s.routeGrant(r, containerName, st, ra)
+					if err != nil {
 						s.jsonError(w, http.StatusForbidden,
 							"route "+ra.Path+" requires "+routeAuthLabel(ra)+": "+err.Error())
 						return
+					}
+					// An owner route tells the app who passed, like configure.
+					if role != "" {
+						r = withConfigureGrant(r, sub, role)
 					}
 				}
 				// Configure-authz gate: the config surface is owner/admin
@@ -2334,9 +2339,20 @@ func routeAuthLabel(ra apifees.RouteAuth) string {
 //     itself asserted (a sealed session, or a verified direct-leg token;
 //     the header is stripped from clients on every leg).
 func (s *Server) authorizeRoute(r *http.Request, containerName string, st launcher.FreezeState, ra apifees.RouteAuth) error {
+	_, _, err := s.routeGrant(r, containerName, st, ra)
+	return err
+}
+
+// routeGrant is authorizeRoute returning, for an owner route, who passed it
+// (as configureGrant); other policies return no subject or role.
+func (s *Server) routeGrant(r *http.Request, containerName string, st launcher.FreezeState, ra apifees.RouteAuth) (string, string, error) {
 	if ra.Policy == apifees.PolicyOwner {
-		return s.authorizeConfigure(r, containerName, st)
+		return s.configureGrant(r, containerName, st)
 	}
+	return "", "", s.authorizeOtherRoute(r, containerName, ra)
+}
+
+func (s *Server) authorizeOtherRoute(r *http.Request, containerName string, ra apifees.RouteAuth) error {
 	if ra.Policy == apifees.PolicyAuthenticated && strings.TrimSpace(r.Header.Get("X-Privasys-Sub")) != "" {
 		return nil
 	}

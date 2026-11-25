@@ -102,3 +102,21 @@ func TestAuthorizeRoute(t *testing.T) {
 	asserted.Header.Set("X-Privasys-Sub", "sealed-user")
 	check("sealed subject on owner route", unload, asserted, false)
 }
+
+// An owner route names who passed (the app gets it as the configure grant
+// header); a role or authenticated route names no one.
+func TestRouteGrantNamesTheOwner(t *testing.T) {
+	s, iss := newIdentityServer(t)
+	st := launcher.FreezeState{AppID: routeAppHex}
+	aud := "enclave-os-virtual"
+	admin := iss.token(t, "bob", aud, map[string]any{"roles": []string{aud + ":app:" + routeAppHex + ":admin"}})
+	manager := iss.token(t, "mgmt", aud, map[string]any{"roles": []string{"privasys-platform:manager"}})
+	unload, billing := guarded[0], guarded[1]
+
+	if sub, role, err := s.routeGrant(routeReq(unload.Path, admin), "app", st, unload); err != nil || sub != "bob" || role != "admin" {
+		t.Fatalf("owner route: %q %q %v", sub, role, err)
+	}
+	if sub, role, err := s.routeGrant(routeReq(billing.Path, manager), "app", st, billing); err != nil || sub != "" || role != "" {
+		t.Fatalf("role route: %q %q %v", sub, role, err)
+	}
+}
