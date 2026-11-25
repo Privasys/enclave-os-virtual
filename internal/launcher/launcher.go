@@ -154,6 +154,12 @@ type Config struct {
 	// from the IdP this fleet trusts without per-app configuration.
 	Issuer string
 
+	// Audience is the platform audience this fleet's tokens carry (the
+	// manager's OIDC audience), injected as PRIVASYS_AUDIENCE so an app that
+	// verifies user or owner tokens itself accepts exactly this one, from host
+	// configuration rather than anything a caller sends. Empty: not injected.
+	Audience string
+
 	// IsolationUserns enables per-container user-namespace remapping (see
 	// container.Manager.usernsRemap). Set ONLY on shared, multi-tenant VMs;
 	// dedicated VMs (incl. all GPU) leave it off. Sourced from the manager's
@@ -1954,6 +1960,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// fetches one per signed-in user from <issuer>/spend/token).
 	if l.cfg.Issuer != "" {
 		runtimeEnv["PRIVASYS_ISSUER"] = strings.TrimRight(l.cfg.Issuer, "/")
+	}
+	// The audience the fleet's tokens carry, for an app that verifies tokens
+	// itself (one per deployment: the test platform's on dev).
+	if l.cfg.Audience != "" {
+		runtimeEnv["PRIVASYS_AUDIENCE"] = l.cfg.Audience
 	}
 	// The verified image digest (hex SHA-256) — the same value attested at
 	// OID 3.2. Lets an app stamp its own measurement into artifacts it signs

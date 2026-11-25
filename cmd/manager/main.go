@@ -115,7 +115,7 @@ func runServe(args []string) error {
 	// OIDC flags (required).
 	oidcIssuer := fs.String("oidc-issuer", "",
 		"OIDC issuer URL for bearer token verification (required, e.g. https://auth.example.com)")
-	oidcAudience := fs.String("oidc-audience", "enclave-os-virtual",
+	oidcAudience := fs.String("oidc-audience", defaultOIDCAudience,
 		"Expected OIDC audience claim")
 	walletProviderJWKS := fs.String("wallet-provider-jwks", os.Getenv("WALLET_PROVIDER_JWKS"),
 		"Wallet-provider JWKS URL used to verify wallet-originated call proofs "+
@@ -277,6 +277,7 @@ func runServe(args []string) error {
 		ToolSpecEnclaveToken: *rsEnclaveToken,
 		IsolationUserns:      *isolationUserns,
 		Issuer:               *oidcIssuer,
+		Audience:             appAudience(*oidcAudience),
 	}
 	// Bring up the container bridge + egress NAT + manager-port guard before
 	// any container is loaded or the management API binds (#45). Fatal on
@@ -474,6 +475,19 @@ func newLogger(level string) (*zap.Logger, error) {
 	}
 
 	return cfg.Build()
+}
+
+// defaultOIDCAudience is the --oidc-audience default: a host that never set
+// the flag. It is no platform audience, so apps are not given it.
+const defaultOIDCAudience = "enclave-os-virtual"
+
+// appAudience is the audience passed to apps as PRIVASYS_AUDIENCE: the one the
+// host was configured with, or none when the flag kept its default.
+func appAudience(flag string) string {
+	if a := strings.TrimSpace(flag); a != defaultOIDCAudience {
+		return a
+	}
+	return ""
 }
 
 // walletJWKSURL resolves the wallet-provider JWKS endpoint used to verify
