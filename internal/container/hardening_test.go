@@ -2,6 +2,9 @@ package container
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"slices"
 	"testing"
 
@@ -31,4 +34,35 @@ func TestAppHardeningDropsNetRaw(t *testing.T) {
 			t.Errorf("%s set lost an unrelated capability: %v", name, set)
 		}
 	}
+}
+
+// Manager.Create must apply appHardening: a container spec built without it
+// keeps CAP_NET_RAW (0f85595 shipped the options unapplied). Building the real
+// spec needs a containerd image, so this checks the call in Create's body.
+func TestCreateAppliesAppHardening(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "container.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range f.Decls {
+		fn, ok := d.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "Create" || fn.Recv == nil {
+			continue
+		}
+		found := false
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "appHardening" {
+					found = true
+				}
+			}
+			return !found
+		})
+		if !found {
+			t.Fatal("Manager.Create does not apply appHardening()")
+		}
+		return
+	}
+	t.Fatal("Manager.Create not found in container.go")
 }
