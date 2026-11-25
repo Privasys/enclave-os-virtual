@@ -34,6 +34,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/manager"
 	"github.com/Privasys/enclave-os-virtual/internal/network"
+	"github.com/Privasys/enclave-os-virtual/internal/pinned"
 	"github.com/Privasys/enclave-os-virtual/internal/runtimestatus"
 	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 	"github.com/Privasys/enclave-os-virtual/internal/tunnel"
@@ -115,16 +116,16 @@ func runServe(args []string) error {
 	// OIDC flags (required).
 	oidcIssuer := fs.String("oidc-issuer", "",
 		"OIDC issuer URL for bearer token verification (required, e.g. https://auth.example.com)")
-	oidcAudience := fs.String("oidc-audience", defaultOIDCAudience,
-		"Expected OIDC audience claim")
+	oidcAudience := fs.String("oidc-audience", "",
+		"Expected OIDC audience claim (default: the image's pinned audience; off an image, "+defaultOIDCAudience+")")
 	walletProviderJWKS := fs.String("wallet-provider-jwks", os.Getenv("WALLET_PROVIDER_JWKS"),
 		"Wallet-provider JWKS URL used to verify wallet-originated call proofs "+
 			"(the free_for:[\"wallet\"] API-fee exemption). Defaults to "+
 			"<oidc-issuer>/wallet-provider/jwks. Empty disables the exemption.")
-	oidcManagerRole := fs.String("oidc-manager-role", "privasys-platform:manager",
-		"OIDC role required for mutating operations (load/unload)")
-	oidcMonitoringRole := fs.String("oidc-monitoring-role", "privasys-platform:monitoring",
-		"OIDC role for read-only access (healthz, readyz, status, metrics)")
+	oidcManagerRole := fs.String("oidc-manager-role", "",
+		"OIDC role required for mutating operations (load/unload); default: the image's pinned role, off an image "+defaultManagerRole)
+	oidcMonitoringRole := fs.String("oidc-monitoring-role", "",
+		"OIDC role for read-only access (healthz, readyz, status, metrics); default: the image's pinned role, off an image "+defaultMonitoringRole)
 	oidcRoleClaim := fs.String("oidc-role-claim", "roles",
 		"JWT claim key containing roles (supports map or array formats)")
 
@@ -175,10 +176,33 @@ func runServe(args []string) error {
 		"TLS server name presented to the gateways (env: TUNNEL_SERVER_NAME). Default: tunnel.<hostname>")
 	isolationUserns := fs.Bool("isolation-userns", os.Getenv("PRIVASYS_ISOLATION_USERNS") == "true",
 		"Run each container in a user namespace (container-root -> unprivileged host uid). SHARED multi-tenant VMs only; leave off on dedicated/GPU VMs. EXPERIMENTAL/UNVALIDATED — validate on m2-dev before prod (env: PRIVASYS_ISOLATION_USERNS)")
+	unpinned := fs.Bool("unpinned", false,
+		"Run OFF an Enclave OS image (a developer machine, a test): no image profile, so the trust settings are taken as given. "+
+			"Never set on an image: its launch wrapper does not pass it, and without it a missing profile refuses the start")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+
+	// An Enclave OS image runs only with the trust settings compiled for its
+	// measured profile: these flags come from /data/manager.env, which is
+	// outside the measurement. Empty ones take the pinned values.
+	eff, err := resolvePinned(pinned.ProfileFile, *unpinned, pinned.Given{
+		Issuer:             *oidcIssuer,
+		Audience:           *oidcAudience,
+		ManagerRole:        *oidcManagerRole,
+		MonitoringRole:     *oidcMonitoringRole,
+		AttestationServers: []string(attestationServers),
+		MgmtURL:            *rsMgmtURL,
+		WalletProviderJWKS: *walletProviderJWKS,
+	}, *rsEnclaveToken != "")
+	if err != nil {
+		return err
+	}
+	*oidcIssuer, *oidcAudience = eff.Issuer, eff.Audience
+	*oidcManagerRole, *oidcMonitoringRole = eff.ManagerRole, eff.MonitoringRole
+	attestationServers = stringSliceFlag(eff.AttestationServers)
+	*rsMgmtURL = eff.MgmtURL
 
 	// Validate required flags.
 	if *oidcIssuer == "" {
@@ -493,6 +517,41 @@ func appAudience(flag string) string {
 // walletJWKSURL resolves the wallet-provider JWKS endpoint used to verify
 // wallet-originated call proofs. An explicit override wins; otherwise it is
 // derived from the OIDC issuer, which is also the wallet provider.
+const (
+	defaultManagerRole    = "privasys-platform:manager"
+	defaultMonitoringRole = "privasys-platform:monitoring"
+)
+
+// resolvePinned gives the trust settings the manager runs with. By default
+// the manager is an Enclave OS image's: the profile file must exist, and the
+// settings are its pinned values (an empty one is filled, a different one
+// refuses the start). Only an explicit unpinned run (off an image) takes them
+// as given, with the historical defaults.
+func resolvePinned(profileFile string, unpinned bool, g pinned.Given, registered bool) (pinned.Given, error) {
+	if unpinned {
+		if g.Audience == "" {
+			g.Audience = defaultOIDCAudience
+		}
+		if g.ManagerRole == "" {
+			g.ManagerRole = defaultManagerRole
+		}
+		if g.MonitoringRole == "" {
+			g.MonitoringRole = defaultMonitoringRole
+		}
+		return g, nil
+	}
+	profile, err := pinned.Profile(profileFile)
+	if err != nil {
+		return g, err
+	}
+	s, _ := pinned.For(profile)
+	eff, err := s.Resolve(g, registered)
+	if err != nil {
+		return g, fmt.Errorf("refusing to start on a %s image: %w", profile, err)
+	}
+	return eff, nil
+}
+
 func walletJWKSURL(override, issuer string) string {
 	if override != "" {
 		return override

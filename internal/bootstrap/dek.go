@@ -185,6 +185,10 @@ func firstBootDEK(ctx context.Context, log *zap.Logger, cfg Config, token string
 	if mgmtURL == "" {
 		mgmtURL = cfg.ManagementURL
 	}
+	mgmtURL, err = pinnedMgmtURL(mgmtURL)
+	if err != nil {
+		return "", fmt.Errorf("dek: %w", err)
+	}
 	locator, _ := json.Marshal(vaultLocator{
 		Type:              "privasys-vault",
 		Keyslots:          []string{},

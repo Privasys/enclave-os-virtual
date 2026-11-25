@@ -102,6 +102,10 @@ func RunRegistration(ctx context.Context, cfg Config) error {
 	if mgmtURL == "" {
 		mgmtURL = gceMetadata("instance/attributes/management-url")
 	}
+	mgmtURL, err := pinnedMgmtURL(mgmtURL)
+	if err != nil {
+		return fmt.Errorf("registration: %w", err)
+	}
 	if mgmtURL == "" {
 		return errors.New("registration: MGMT_URL not set and no management-url instance metadata")
 	}

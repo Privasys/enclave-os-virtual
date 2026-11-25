@@ -96,6 +96,10 @@ func Redeem(ctx context.Context, cfg Config, token string) (*RedeemedEnclave, er
 	if mgmtURL == "" {
 		mgmtURL = gceMetadata("instance/attributes/management-url")
 	}
+	mgmtURL, err := pinnedMgmtURL(mgmtURL)
+	if err != nil {
+		return nil, fmt.Errorf("redeem: %w", err)
+	}
 	if mgmtURL == "" {
 		return nil, errors.New("redeem: MGMT_URL not set and no management-url instance metadata")
 	}

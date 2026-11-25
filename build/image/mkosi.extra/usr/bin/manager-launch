@@ -30,9 +30,9 @@ exec /usr/bin/manager serve \
     --proxy-url "${PROXY_URL:-http://localhost:8080}" \
     --dek-origin-file /run/luks/dek-origin \
     --oidc-issuer "${OIDC_ISSUER:-}" \
-    --oidc-audience "${OIDC_AUDIENCE:-enclave-os-virtual}" \
-    --oidc-manager-role "${OIDC_MANAGER_ROLE:-privasys-platform:manager}" \
-    --oidc-monitoring-role "${OIDC_MONITORING_ROLE:-privasys-platform:monitoring}" \
+    --oidc-audience "${OIDC_AUDIENCE:-}" \
+    --oidc-manager-role "${OIDC_MANAGER_ROLE:-}" \
+    --oidc-monitoring-role "${OIDC_MONITORING_ROLE:-}" \
     --mgmt-url "${MGMT_URL:-}" \
     --enclave-id "${ENCLAVE_ID:-}" \
     --enclave-token "${ENCLAVE_TOKEN:-}" \
