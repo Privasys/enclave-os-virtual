@@ -32,4 +32,8 @@ func TestTheManagerNeverRunsUnpinnedByAccident(t *testing.T) {
 	if _, err := resolvePinned(prod, false, pinned.Given{Issuer: "https://evil.example"}, true); err == nil {
 		t.Fatal("a foreign issuer was accepted on a production image")
 	}
+	// On an image (profile present), --unpinned is itself refused.
+	if _, err := resolvePinned(prod, true, pinned.Given{Issuer: "https://evil.example"}, true); err == nil {
+		t.Fatal("--unpinned was honoured on an image")
+	}
 }

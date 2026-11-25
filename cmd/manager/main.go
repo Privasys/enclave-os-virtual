@@ -529,6 +529,11 @@ const (
 // as given, with the historical defaults.
 func resolvePinned(profileFile string, unpinned bool, g pinned.Given, registered bool) (pinned.Given, error) {
 	if unpinned {
+		// On an image the profile file exists: --unpinned is then refused,
+		// so no launcher bug or unit override can run an image unpinned.
+		if _, err := os.Stat(profileFile); err == nil {
+			return g, fmt.Errorf("--unpinned refused: %s exists, this is an Enclave OS image", profileFile)
+		}
 		if g.Audience == "" {
 			g.Audience = defaultOIDCAudience
 		}
