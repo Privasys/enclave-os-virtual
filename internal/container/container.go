@@ -648,6 +648,8 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 			},
 		}, userns)),
 	}
+	// No raw sockets in app containers (hardening.go).
+	opts = append(opts, appHardening()...)
 
 	// User-namespace remap: map container ids [0, size) to an unprivileged
 	// host range so a container escape lands as a non-root host uid rather than
