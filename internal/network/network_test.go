@@ -64,3 +64,22 @@ func TestResolvConfFrom(t *testing.T) {
 		})
 	}
 }
+
+// Containers reach neither the metadata plane nor each other through the host.
+func TestForwardDropsIsolateContainers(t *testing.T) {
+	want := map[string]bool{
+		strings.Join([]string{"-s", Subnet, "-d", linkLocalCIDR, "-j", "DROP"}, " "):  false,
+		strings.Join([]string{"-i", BridgeName, "-o", BridgeName, "-j", "DROP"}, " "): false,
+	}
+	for _, r := range forwardDrops() {
+		k := strings.Join(r, " ")
+		if _, ok := want[k]; ok {
+			want[k] = true
+		}
+	}
+	for k, seen := range want {
+		if !seen {
+			t.Errorf("missing FORWARD rule: %s", k)
+		}
+	}
+}

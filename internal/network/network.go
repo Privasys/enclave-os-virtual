@@ -143,10 +143,11 @@ func Setup(log *zap.Logger) error {
 	// this FORWARD drop leaves platform access untouched. Inserted at the head
 	// of FORWARD so it wins over any later accept rule; check-then-insert keeps
 	// it idempotent across manager reboots.
-	block := []string{"FORWARD", "-s", Subnet, "-d", linkLocalCIDR, "-j", "DROP"}
-	if exec.Command("iptables", append([]string{"-C"}, block...)...).Run() != nil {
-		if err := run("iptables", "-I", "FORWARD", "1", "-s", Subnet, "-d", linkLocalCIDR, "-j", "DROP"); err != nil {
-			return fmt.Errorf("network: metadata guard: %w", err)
+	for _, rule := range forwardDrops() {
+		if exec.Command("iptables", append([]string{"-C", "FORWARD"}, rule...)...).Run() != nil {
+			if err := run("iptables", append([]string{"-I", "FORWARD", "1"}, rule...)...); err != nil {
+				return fmt.Errorf("network: forward guard %v: %w", rule, err)
+			}
 		}
 	}
 	// The management API binds on all interfaces so BOTH the host (Caddy,
@@ -347,4 +348,18 @@ func Attach(log *zap.Logger, pid int, port int) (string, error) {
 // call on a container that was never attached.
 func Detach(port int) {
 	quiet("ip", "link", "del", hostVeth(port))
+}
+
+// forwardDrops are the FORWARD rules (without the chain name) inserted at the
+// head of FORWARD:
+//   - containers never reach the cloud metadata plane (see Setup);
+//   - containers never reach each other through the host: bridge ports are
+//     isolated at layer 2, and this closes the routed path through the
+//     gateway too, so an app reaches another only through the manager
+//     (Caddy, the gateway), which strips and asserts identity headers.
+func forwardDrops() [][]string {
+	return [][]string{
+		{"-s", Subnet, "-d", linkLocalCIDR, "-j", "DROP"},
+		{"-i", BridgeName, "-o", BridgeName, "-j", "DROP"},
+	}
 }
