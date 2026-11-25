@@ -208,6 +208,9 @@ type Server struct {
 	verifier *auth.Verifier
 	// appIDOf overrides the host → platform app id lookup (tests only).
 	appIDOf func(host string) string
+	// holderResourcesOf overrides the host → (container, declared resource
+	// count) lookup for the holder paths (tests only).
+	holderResourcesOf func(host string) (string, int)
 	server  *http.Server
 	// registry persists every successful Load so the manager can replay
 	// them on restart. nil when Config.RegistryPath is empty.
@@ -726,18 +729,10 @@ func (s *Server) Start(ctx context.Context) error {
 			// The holder-facing pair the wallet speaks to every resource
 			// service, served here for the kinds the enclave OS is the service
 			// of (app_storage) and for the caller-side revoke of every kind.
-			if surfaces.UnderPrefix(r.URL.Path, holderCapabilitiesPath) {
-				if name := s.launcher.AppHostnameToContainer(host); name != "" && len(s.launcher.ContainerResourceDecls(name)) > 0 {
-					s.serveHolderCapabilities(w, r, name)
-					return
-				}
-			}
-			// The holder's window onto their folder (holderfiles.go).
-			if surfaces.UnderPrefix(r.URL.Path, holderFilesPath) {
-				if name := s.launcher.AppHostnameToContainer(host); name != "" && len(s.launcher.ContainerResourceDecls(name)) > 0 {
-					s.serveHolderFiles(w, r, name)
-					return
-				}
+			// The holder's capabilities and window onto their folder: the
+			// enclave OS's own paths, never the app's (holderpaths.go).
+			if s.serveEnclaveHolderPaths(w, r, host) {
+				return
 			}
 			// Ingress mutual RA-TLS gate: for a host that declares an
 			// allowed-caller set, verify the attested caller certificate Caddy
