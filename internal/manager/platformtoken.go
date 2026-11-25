@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"net/http"
 	"net/http/httputil"
 	"strings"
@@ -18,7 +19,10 @@ import (
 //   - always, when it carries a platform-tier role (staff tokens);
 //   - otherwise, unless the app is a first-party app still verifying platform
 //     tokens itself (platformTokenApps), until those apps verify their own
-//     app audience instead.
+//     app audience instead;
+//   - never, for the platform's own monitoring app (staffTokenApps, temporary).
+//
+// The configure gate's result reaches the app as ConfigureAuthorizedHeader.
 //
 // A token for any other audience (the app's own) passes unchanged. The token
 // is read unverified: the result only ever removes a credential.
@@ -37,6 +41,21 @@ var platformTierRoles = func() map[string]bool {
 		for _, r := range []string{"admin", "manager", "monitoring"} {
 			m[aud+":"+r] = true
 		}
+	}
+	return m
+}()
+
+// staffTokenApps receive every platform token, staff roles included.
+// TEMPORARY: platform-monitoring is first-party and staff-facing by purpose,
+// and checks platform roles itself until it verifies app:<id> with role
+// mapping. Nothing else joins this list without a security review.
+var staffTokenApps = func() map[string]bool {
+	m := map[string]bool{}
+	for _, id := range []string{
+		"e9de5530-41c3-471e-9566-c5c9a6d963bc", // platform-monitoring (prod)
+		"218bc492-9ac5-4e3e-b8c2-692ab93e046a", // platform-monitoring (dev)
+	} {
+		m[normalizeAppID(id)] = true
 	}
 	return m
 }()
@@ -77,6 +96,9 @@ func withholdToken(tok, roleClaim, appID string) bool {
 		}
 	}
 	if !platform {
+		return false
+	}
+	if appID != "" && staffTokenApps[normalizeAppID(appID)] {
 		return false
 	}
 	for _, r := range p.Roles {
@@ -157,4 +179,31 @@ func (s *Server) rewriteAppRequest(pr *httputil.ProxyRequest) {
 		appID = s.appIDForHost(host)
 	}
 	stripPlatformTokens(pr.Out.Header, s.verifier.RoleClaim(), appID)
+	setConfigureGrant(pr)
+}
+
+// ConfigureAuthorizedHeader tells the app that the runtime's configure gate
+// passed, and for whom: "role=<owner|admin>; sub=<subject>". Only the runtime
+// sets it, on a request that passed the gate; any copy a client sent is
+// removed on every leg.
+const ConfigureAuthorizedHeader = "X-Privasys-Configure-Authorized"
+
+type configureGrantKey struct{}
+
+type configureGrantValue struct{ sub, role string }
+
+// withConfigureGrant records on r that the configure gate passed.
+func withConfigureGrant(r *http.Request, sub, role string) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), configureGrantKey{}, configureGrantValue{sub, role}))
+}
+
+// setConfigureGrant writes ConfigureAuthorizedHeader on the outbound request
+// from the gate's record alone: an inbound copy never survives.
+func setConfigureGrant(pr *httputil.ProxyRequest) {
+	pr.Out.Header.Del(ConfigureAuthorizedHeader)
+	g, ok := pr.In.Context().Value(configureGrantKey{}).(configureGrantValue)
+	if !ok || g.sub == "" || !headerSafeASCII(g.sub) || strings.ContainsAny(g.sub, ";= ") {
+		return
+	}
+	pr.Out.Header.Set(ConfigureAuthorizedHeader, "role="+g.role+"; sub="+g.sub)
 }

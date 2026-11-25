@@ -59,6 +59,8 @@ func TestWithholdToken(t *testing.T) {
 		{"role in map claim", jwt(t, map[string]any{"aud": "privasys-platform",
 			"roles": []any{}, "realm_access": map[string]any{"roles": []any{"privasys-platform:monitoring"}}}), firstPartyApp, true},
 		{"platform among several audiences", jwt(t, map[string]any{"aud": []any{"app:x", "privasys-platform"}}), thirdPartyApp, true},
+		{"staff to monitoring", staffToken(t), "e9de5530-41c3-471e-9566-c5c9a6d963bc", false},
+		{"user to monitoring", userToken(t), "218bc492-9ac5-4e3e-b8c2-692ab93e046a", false},
 		{"app id not normalised", userToken(t), strings.ToUpper(strings.ReplaceAll(firstPartyApp, "-", "")), false},
 	} {
 		if got := withholdToken(tc.tok, "roles", tc.app); got != tc.withhold {
@@ -133,5 +135,52 @@ func TestPlatformTokensNeverReachTheContainer(t *testing.T) {
 				t.Errorf("%s %s: the app's own token was withheld (auth %v, x-app-auth %v, ws %v)", leg, host, a, x, w)
 			}
 		}
+	}
+}
+
+// The configure gate's result reaches the app only as the runtime wrote it: a
+// client-sent X-Privasys-Configure-Authorized never survives, with or without
+// a passed gate.
+func TestConfigureGrantHeaderIsRuntimeOnly(t *testing.T) {
+	var got http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+	}))
+	defer upstream.Close()
+	s := &Server{appIDOf: func(string) string { return firstPartyApp }}
+	s.appHosts.Store("first.example", strings.TrimPrefix(upstream.URL, "http://"))
+	proxy := &httputil.ReverseProxy{Rewrite: s.rewriteAppRequest}
+
+	send := func(r *http.Request) string {
+		got = nil
+		proxy.ServeHTTP(httptest.NewRecorder(), r)
+		if got == nil {
+			t.Fatal("request did not reach the app")
+		}
+		return got.Get(ConfigureAuthorizedHeader)
+	}
+	forged := "role=admin; sub=attacker"
+
+	r := httptest.NewRequest(http.MethodPost, "http://first.example/configure", nil)
+	r.Header.Set(ConfigureAuthorizedHeader, forged)
+	if h := send(r); h != "" {
+		t.Fatalf("a client-sent grant reached the app: %q", h)
+	}
+
+	r = httptest.NewRequest(http.MethodPost, "http://first.example/configure", nil)
+	r.Header.Set(ConfigureAuthorizedHeader, forged)
+	r.Header.Set("Authorization", "Bearer "+staffToken(t))
+	r = withConfigureGrant(r, "owner-sub", "owner")
+	if h := send(r); h != "role=owner; sub=owner-sub" {
+		t.Fatalf("grant header = %q", h)
+	}
+	if got.Get("Authorization") != "" {
+		t.Fatal("the staff token reached the app on the configure path")
+	}
+
+	// A subject that could smuggle a field is not written at all.
+	r = withConfigureGrant(httptest.NewRequest(http.MethodPost, "http://first.example/configure", nil), "x; role=admin", "owner")
+	if h := send(r); h != "" {
+		t.Fatalf("unsafe subject written: %q", h)
 	}
 }

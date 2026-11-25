@@ -828,11 +828,15 @@ func (s *Server) Start(ctx context.Context) error {
 				// only, on EVERY call (not just while frozen — a
 				// reconfigure of a running app is equally privileged).
 				if st.ConfigAPI != nil && matchesConfigAPI(st.ConfigAPI, r) {
-					if err := s.authorizeConfigure(r, containerName, st); err != nil {
+					sub, role, err := s.configureGrant(r, containerName, st)
+					if err != nil {
 						s.jsonError(w, http.StatusForbidden,
 							"configure requires the app owner or admin: "+err.Error())
 						return
 					}
+					// The app learns who passed the gate from the runtime
+					// (platformtoken.go), never from the platform token.
+					r = withConfigureGrant(r, sub, role)
 					if !st.Configured {
 						// Wrap the writer so we can flip the flag on 2xx.
 						rw := &statusRecorder{ResponseWriter: w}
@@ -2433,22 +2437,30 @@ func configPathKey(p string) string {
 // runs, so the inner request must still carry the user's platform bearer. The
 // authority is the bearer's role, never the relay's assertion.
 func (s *Server) authorizeConfigure(r *http.Request, containerName string, st launcher.FreezeState) error {
+	_, _, err := s.configureGrant(r, containerName, st)
+	return err
+}
+
+// configureGrant is authorizeConfigure returning who passed it: the verified
+// subject and the matched role ("owner" or "admin"; the owners-list fallback
+// is "owner").
+func (s *Server) configureGrant(r *http.Request, containerName string, st launcher.FreezeState) (string, string, error) {
 	if st.AppID == "" && len(st.Owners) == 0 {
 		s.log.Warn("configure gate: refusing a load that carries neither an app id nor an owners team",
 			zap.String("container", containerName))
-		return errors.New("this container was loaded without an app id or an owners team, " +
+		return "", "", errors.New("this container was loaded without an app id or an owners team, " +
 			"so no caller can be authorised for its configure surface; redeploy it from the platform")
 	}
 	if s.verifier == nil {
-		return errors.New("no token verifier configured")
+		return "", "", errors.New("no token verifier configured")
 	}
 	authz := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authz, "Bearer ") {
-		return errors.New("missing bearer token")
+		return "", "", errors.New("missing bearer token")
 	}
 	sub, roles, err := s.verifier.AuthenticateUser(strings.TrimPrefix(authz, "Bearer "))
 	if err != nil {
-		return fmt.Errorf("invalid token: %w", err)
+		return "", "", fmt.Errorf("invalid token: %w", err)
 	}
 	// The role is keyed on the canonical hex app id, not the hyphenated UUID the
 	// control plane sends in the load envelope: the IdP pins app roles to
@@ -2464,7 +2476,10 @@ func (s *Server) authorizeConfigure(r *http.Request, containerName string, st la
 					zap.String("container", containerName),
 					zap.String("sub", sub),
 					zap.String("role", role))
-				return nil
+				if role == adminRole {
+					return sub, "admin", nil
+				}
+				return sub, "owner", nil
 			}
 		}
 	}
@@ -2473,10 +2488,10 @@ func (s *Server) authorizeConfigure(r *http.Request, containerName string, st la
 			s.log.Warn("configure authorized by owners-list fallback (token carries no app config role yet — run the config-role backfill)",
 				zap.String("container", containerName),
 				zap.String("sub", sub))
-			return nil
+			return sub, "owner", nil
 		}
 	}
-	return errors.New("token carries no owner/admin role for this app")
+	return "", "", errors.New("token carries no owner/admin role for this app")
 }
 
 // replayRegistry re-issues launcher.Load for every entry persisted in
