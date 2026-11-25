@@ -356,10 +356,18 @@ func Detach(port int) {
 //   - containers never reach each other through the host: bridge ports are
 //     isolated at layer 2, and this closes the routed path through the
 //     gateway too, so an app reaches another only through the manager
-//     (Caddy, the gateway), which strips and asserts identity headers.
+//     (Caddy, the gateway), which strips and asserts identity headers;
+//   - nothing outside the guest opens a connection INTO the bridge. The host
+//     owns the guest's NIC and is outside the trust boundary: with forwarding
+//     on, a packet it addresses to 10.88.x.y would be routed straight to an
+//     app's port, past Caddy, RA-TLS and the manager, and could forge every
+//     identity header. Apps are reached only from the guest itself (the
+//     manager's proxy, a local path that never crosses FORWARD); replies to
+//     an app's own egress are ESTABLISHED and still pass.
 func forwardDrops() [][]string {
 	return [][]string{
 		{"-s", Subnet, "-d", linkLocalCIDR, "-j", "DROP"},
 		{"-i", BridgeName, "-o", BridgeName, "-j", "DROP"},
+		{"-o", BridgeName, "!", "-i", BridgeName, "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"},
 	}
 }

@@ -70,6 +70,8 @@ func TestForwardDropsIsolateContainers(t *testing.T) {
 	want := map[string]bool{
 		strings.Join([]string{"-s", Subnet, "-d", linkLocalCIDR, "-j", "DROP"}, " "):  false,
 		strings.Join([]string{"-i", BridgeName, "-o", BridgeName, "-j", "DROP"}, " "): false,
+		// Nothing from outside the guest opens a connection into the bridge.
+		strings.Join([]string{"-o", BridgeName, "!", "-i", BridgeName, "-m", "conntrack", "--ctstate", "NEW", "-j", "DROP"}, " "): false,
 	}
 	for _, r := range forwardDrops() {
 		k := strings.Join(r, " ")
