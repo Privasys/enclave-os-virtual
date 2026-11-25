@@ -1,0 +1,15 @@
+[Unit]
+Description=Enclave OS — tell the control plane this enclave's address after boot
+Documentation=https://github.com/Privasys/enclave-os-virtual
+After=manager.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /usr/lib/enclave-os/instance-config checkin
+TimeoutStartSec=8min
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,74 @@
+#!/bin/bash
+# instance-config — the measured replacement for the metadata startup-script.
+#
+#   instance-config hostname   before the manager: the machine name
+#   instance-config checkin    once the manager answers: tell the control
+#                              plane this enclave's address (it then
+#                              reconciles the apps a reboot lost)
+#
+# Instance metadata is read as DATA only, a fixed key at a time, and each
+# value must match a strict pattern; nothing from it is executed, sourced or
+# used as a URL. The control plane comes from /data/manager.env and the
+# manager refuses any that is not pinned for the image, so a check-in only
+# ever goes where the manager itself would talk.
+set -euo pipefail
+
+MD=http://metadata.google.internal/computeMetadata/v1/instance
+
+md() { curl -sf --connect-timeout 2 --max-time 5 -H "Metadata-Flavor: Google" "$MD/$1" 2>/dev/null || true; }
+
+env_get() { # a value from /data/manager.env, never sourced
+	[ -r /data/manager.env ] || return 0
+	grep -E "^$1=" /data/manager.env | tail -1 | cut -d= -f2- | tr -d '\r'
+}
+
+case "${1:-}" in
+hostname)
+	name=$(md attributes/machine-name)
+	if [[ "$name" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+		hostname "$name"
+		echo "hostname: $name"
+	else
+		echo "machine-name metadata absent or not a DNS label; hostname left as $(hostname)"
+	fi
+	;;
+checkin)
+	id=$(env_get ENCLAVE_ID)
+	token=$(env_get ENCLAVE_TOKEN)
+	mgmt=$(env_get MGMT_URL)
+	if [ -z "$token" ] || [ -z "$mgmt" ]; then
+		echo "not registered yet: no check-in"
+		exit 0
+	fi
+	# The manager refuses an unpinned MGMT_URL and exits, so waiting for it
+	# to answer also proves the URL is one this image allows.
+	for _ in $(seq 1 60); do
+		curl -sf --max-time 3 http://127.0.0.1:9443/healthz >/dev/null 2>&1 && break
+		sleep 5
+	done
+	if ! curl -sf --max-time 3 http://127.0.0.1:9443/healthz >/dev/null 2>&1; then
+		echo "manager not answering: no check-in"
+		exit 0
+	fi
+	ip=$(md network-interfaces/0/access-configs/0/external-ip)
+	if ! [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+		echo "no public IPv4 in metadata: no check-in (a tunnelled enclave needs none)"
+		exit 0
+	fi
+	if ! [[ "$id" =~ ^[0-9a-f-]{36}$ ]]; then
+		echo "ENCLAVE_ID missing or malformed: no check-in"
+		exit 0
+	fi
+	body=$(printf '{"enclave_id":"%s","name":"%s","gateway_host":"%s"}' "$id" "$(hostname)" "$ip")
+	if curl -sf --max-time 20 -X POST -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+		-d "$body" "${mgmt%/}/api/v1/enclave/checkin" >/dev/null; then
+		echo "check-in OK: $id -> $ip"
+	else
+		echo "WARNING: check-in failed"
+	fi
+	;;
+*)
+	echo "usage: instance-config hostname|checkin" >&2
+	exit 2
+	;;
+esac

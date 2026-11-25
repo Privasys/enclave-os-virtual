@@ -1,0 +1,16 @@
+[Unit]
+Description=Enclave OS — machine name from instance metadata (data only)
+Documentation=https://github.com/Privasys/enclave-os-virtual
+After=network-online.target
+Wants=network-online.target
+Before=manager-bootstrap.service manager.service caddy.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /usr/lib/enclave-os/instance-config hostname
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

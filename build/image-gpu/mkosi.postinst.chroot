@@ -43,6 +43,12 @@ if [ "$profile" = "production" ]; then
     fi
 fi
 
+# No instance metadata runs as code, on every profile (see
+# build/image/mkosi.postinst.chroot). On bare metal the host answers
+# 169.254.169.254 itself.
+. /usr/lib/enclave-os/strip-metadata-exec.sh
+systemctl enable instance-hostname.service enclave-checkin.service gpu-cc-ready.service
+
 # First-boot dm-integrity format budget for the data PD. Same drop-in the
 # base image installs (build/image/mkosi.postinst.chroot): the What= device
 # of data.mount appears only after luks-data.service finishes, which on a

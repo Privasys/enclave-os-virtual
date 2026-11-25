@@ -1,0 +1,17 @@
+#!/bin/bash
+# Set the NVIDIA confidential-computing GPUs-ready state when it is not set
+# (see gpu-cc-ready.service). The measured replacement for step 3a of the old
+# metadata startup-script.
+set -uo pipefail
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+	echo "no nvidia-smi: nothing to do"
+	exit 0
+fi
+state=$(nvidia-smi conf-compute --get-gpus-ready-state 2>/dev/null | awk '/Ready state/ {print $NF}')
+if [ "$state" = "ready" ]; then
+	echo "NVIDIA CC already ready"
+	exit 0
+fi
+echo "forcing NVIDIA conf-compute GPUs-ready-state = 1"
+nvidia-smi -pm 1 2>&1 | head -2 || true
+nvidia-smi conf-compute -srs 1 2>&1 | head -2 || true

@@ -18,6 +18,15 @@ if [ "$profile" = "production" ]; then
     fi
 fi
 
+# No instance metadata runs as code, on every profile (2026-11-25). The guest
+# agent's script runner executed the metadata startup-script as root at every
+# boot: input from outside the measurement, set by whoever controls the VM,
+# that could rewrite the manager's trust settings or exec another binary.
+# Its duties live in the measured instance-config.service. Every profile, so a
+# dev roll proves the boot without it.
+. /usr/lib/enclave-os/strip-metadata-exec.sh
+systemctl enable instance-hostname.service enclave-checkin.service
+
 # Extend the start-job wait for the LUKS data device. The first-boot
 # LUKS2 + dm-integrity format (~1min per 13GB of PD) and the vault-backed
 # DEK resolution both run inside luks-data.service BEFORE
