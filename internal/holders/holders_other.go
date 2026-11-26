@@ -76,3 +76,8 @@ func NewRawKey() ([]byte, error) {
 	}
 	return k, nil
 }
+
+// EnsureView, BindReadOnly and Unbind are Linux-only (see mounts_linux.go).
+func EnsureView(src, view string) error { return errors.New("holders: not supported on this OS") }
+func BindReadOnly(dir string) error     { return errors.New("holders: not supported on this OS") }
+func Unbind(dir string) error           { return nil }

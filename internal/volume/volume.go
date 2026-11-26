@@ -52,6 +52,11 @@ const (
 
 	// MountBase is the directory under which container volumes are mounted.
 	MountBase = "/run/containers"
+	// HolderViewBase holds the runtime's private, writable views of app
+	// volumes (one per container), never propagated into a container: a
+	// holder folder the container sees read-only stays writable for the
+	// runtime's own work. Released by Close before the volume is unmounted.
+	HolderViewBase = "/run/manager/holders-rw"
 
 	// DefaultSize is the default LV size when none is specified.
 	DefaultSize = "1G"
@@ -538,8 +543,15 @@ func (m *Manager) Close(name string) error {
 		zap.String("container", name),
 	)
 
-	// Unmount.
-	if err := run("umount", mountPath); err != nil {
+	// The runtime's private view of the volume and any read-only holder
+	// binds keep the filesystem busy: release them first, or luksClose
+	// fails and the volume can never be closed.
+	viewPath := HolderViewBase + "/" + name
+	if err := run("umount", "-l", viewPath); err == nil {
+		_ = os.Remove(viewPath)
+	}
+	// Unmount, submounts (read-only holder binds) included.
+	if err := run("umount", "-R", mountPath); err != nil {
 		m.log.Warn("umount failed (may already be unmounted)", zap.Error(err))
 	}
 	_ = os.Remove(mountPath)

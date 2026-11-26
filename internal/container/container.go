@@ -832,7 +832,11 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 				Destination: parts[1],
 				Source:      parts[0],
 				Type:        "bind",
-				Options:     []string{"rbind", mountOpts},
+				// rslave: a mount the runtime makes under the volume on the
+				// host (a holder folder bound read-only) reaches the
+				// running container, and nothing the container mounts
+				// reaches the host.
+				Options: []string{"rbind", "rslave", mountOpts},
 			})
 		}
 		opts = append(opts, oci.WithMounts(idmapMounts(mounts, userns)))

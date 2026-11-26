@@ -56,10 +56,13 @@ func deriveHolderBranch(keyHex string) []byte {
 // HolderFolders describes what the manager needs to serve holder folders
 // for a loaded container.
 type HolderFolders struct {
-	// Mount is the volume's host mount point; folders live under
-	// Mount/holders. Device is the decrypted block device (for the ext4
-	// feature check).
-	Mount, Device string
+	// Mount is the runtime's PRIVATE writable view of the volume (folders
+	// live under Mount/holders): every key, ownership and file operation of
+	// the runtime goes through it. Exposed is the volume's own mount point,
+	// which the container sees at /data (rslave): a read-only grant's bind is
+	// made there. Device is the decrypted block device (for the ext4 feature
+	// check).
+	Mount, Exposed, Device string
 	// WrapKey is the key that wraps holder keys for this app (32 bytes),
 	// derived from the DEK branch. Never the DEK.
 	WrapKey []byte
@@ -96,8 +99,14 @@ func (l *Launcher) HolderFolders(name string) (HolderFolders, error) {
 	if err != nil {
 		return HolderFolders{}, fmt.Errorf("launcher: derive wrap key: %w", err)
 	}
+	exposed := volume.MountBase + "/" + name
+	view := volume.HolderViewBase + "/" + name
+	if err := holders.EnsureView(exposed, view); err != nil {
+		return HolderFolders{}, fmt.Errorf("launcher: holder view for %q: %w", name, err)
+	}
 	return HolderFolders{
-		Mount:   volume.MountBase + "/" + name,
+		Mount:   view,
+		Exposed: exposed,
 		Device:  "/dev/mapper/container-" + name,
 		WrapKey: wrap,
 		AppID:   appID,

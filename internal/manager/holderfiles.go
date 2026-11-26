@@ -118,12 +118,17 @@ func (s *Server) ensureHolderOpen(container, appID, resource, sub string, g *cap
 	if err != nil {
 		return errors.New("the stored key could not be unwrapped")
 	}
-	keyID, err := holders.Open(hf.Mount, g.HolderKey, raw, -1)
+	// The same open as the app's: the folder is exposed to the container in
+	// the mode its grant allows (read-only bound first), whoever opens it.
+	keyID, readOnly, err := s.openHolderFolder(hf, g, raw, -1)
 	zeroBytes(raw)
+	if errors.Is(err, errHolderAccess) {
+		return err
+	}
 	if err != nil {
 		return errors.New("the folder could not be opened")
 	}
-	s.holdersOpen.set(key, holderOpenState{KeyID: keyID, HostUID: -1, OpenedAt: time.Now().UTC()})
+	s.holdersOpen.set(key, holderOpenState{KeyID: keyID, HostUID: -1, OpenedAt: time.Now().UTC(), ReadOnly: readOnly})
 	s.events.emit(container, resourceEvent{Type: "holder.opened", Resource: resource, Subject: sub, CapabilityID: g.CapabilityID})
 	return nil
 }

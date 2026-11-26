@@ -120,6 +120,8 @@ type holderOpenState struct {
 	KeyID    string
 	HostUID  int
 	OpenedAt time.Time
+	// ReadOnly: the folder is open read-only (its grant is [read]).
+	ReadOnly bool
 }
 
 // holderState is what the manager knows about open folders: nothing
@@ -497,6 +499,7 @@ func (s *Server) closeHolderVerified(container, key string, g *capabilityGrant) 
 		status, pids, err := holders.Close(hf.Mount, g.HolderKey, keyID)
 		if err == nil && status == holders.Absent {
 			s.holdersOpen.drop(key)
+			s.releaseHolderBind(hf, g.HolderKey)
 			return true, nil
 		}
 		if err != nil && !errors.Is(err, holders.ErrBusy) {
@@ -571,6 +574,27 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 			open = false
 		}
 		if open {
+			readOnly, aerr := holderReadOnly(g.Permissions)
+			if aerr != nil {
+				s.jsonError(w, http.StatusForbidden, aerr.Error())
+				return
+			}
+			// A writable open cannot become read-only in place: a writable
+			// fd the app already holds would survive a read-only bind. The
+			// folder must be closed (which ends whatever holds its files)
+			// before it opens read-only.
+			if readOnly && !st.ReadOnly {
+				s.jsonError(w, http.StatusConflict, "the folder is open writable; close it before it can open read-only")
+				return
+			}
+			if !readOnly && st.ReadOnly {
+				if err := s.unbindHolder(holders.FolderPath(hf.Exposed, g.HolderKey)); err != nil {
+					s.jsonError(w, http.StatusInternalServerError, "the folder could not be made writable")
+					return
+				}
+				st.ReadOnly = false
+				s.holdersOpen.set(key, st)
+			}
 			if hostUID >= 0 && hostUID != st.HostUID {
 				if err := holders.Chown(hf.Mount, g.HolderKey, hostUID); err != nil {
 					s.log.Warn("holder chown", zap.Error(err))
@@ -595,14 +619,18 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusInternalServerError, "the stored key could not be unwrapped")
 		return
 	}
-	keyID, err := holders.Open(hf.Mount, g.HolderKey, raw, hostUID)
+	keyID, readOnly, err := s.openHolderFolder(hf, g, raw, hostUID)
 	zeroBytes(raw)
+	if errors.Is(err, errHolderAccess) {
+		s.jsonError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	if err != nil {
 		s.log.Error("holder open", zap.String("container", name), zap.String("holder", g.HolderKey), zap.Error(err))
 		s.jsonError(w, http.StatusInternalServerError, "the folder could not be opened")
 		return
 	}
-	s.holdersOpen.set(key, holderOpenState{KeyID: keyID, HostUID: hostUID, OpenedAt: time.Now().UTC()})
+	s.holdersOpen.set(key, holderOpenState{KeyID: keyID, HostUID: hostUID, OpenedAt: time.Now().UTC(), ReadOnly: readOnly})
 	s.events.emit(name, resourceEvent{Type: "holder.opened", Resource: resource, Subject: body.Subject, CapabilityID: g.CapabilityID})
 	s.answerOpen(w, name, hf.Mount, g, containerPath)
 }
@@ -680,6 +708,7 @@ func (s *Server) handleResourceClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.holdersOpen.drop(key)
+	s.releaseHolderBind(hf, g.HolderKey)
 	s.events.emit(name, resourceEvent{Type: "holder.closed", Resource: resource, Subject: body.Subject, CapabilityID: g.CapabilityID})
 	s.writeJSON(w, http.StatusOK, map[string]any{"status": "closed"})
 }
