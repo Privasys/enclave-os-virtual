@@ -62,7 +62,14 @@ func isAllowedImageDevice(path string) bool {
 //
 // Follows the containment pattern of diskRefDir: reject traversal early, clean
 // the path, then assert the cleaned result is still under the root.
-func checkImageMountSource(source string) error {
+//
+// And within the root, an image may mount only a disk its DEPLOYMENT was
+// assigned (assigned: disk names, "model-<x>" mounted by disk-mounter at
+// ImageMountRoot/<x>): never the root itself (every disk on the VM), never a
+// sibling deployment's disk. With nothing assigned, which is every
+// deployment until the load request carries the assignment, every
+// image-declared mount is refused.
+func checkImageMountSource(source string, assigned []string) error {
 	if source == "" {
 		return fmt.Errorf("empty mount source")
 	}
@@ -74,13 +81,22 @@ func checkImageMountSource(source string) error {
 		return fmt.Errorf("mount source must be absolute: %s", source)
 	}
 	root := filepath.Clean(ImageMountRoot)
-	if clean == root {
-		return nil
-	}
 	if !strings.HasPrefix(clean+string(filepath.Separator), root+string(filepath.Separator)) {
 		return fmt.Errorf(
 			"mount source %s is outside %s; a mount from anywhere else must be granted by the deploy request",
 			source, ImageMountRoot)
 	}
-	return nil
+	for _, disk := range assigned {
+		name := strings.TrimPrefix(disk, "model-")
+		if name == "" || name == disk || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
+			continue
+		}
+		dir := filepath.Join(root, name)
+		if clean == dir || strings.HasPrefix(clean, dir+string(filepath.Separator)) {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"mount source %s is not a model disk assigned to this deployment; an image may mount only its assigned disk",
+		source)
 }

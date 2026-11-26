@@ -43,22 +43,22 @@ func TestIsAllowedImageDevice(t *testing.T) {
 }
 
 func TestCheckImageMountSource(t *testing.T) {
-	// The real producers: the prod image mounts /mnt itself, per-model images
-	// mount a subdirectory.
-	allowed := []string{
-		"/mnt",
-		"/mnt/",
-		"/mnt/model-gemma4-31b",
-		"/mnt/model-qwen25-32b",
-	}
-	for _, s := range allowed {
-		if err := checkImageMountSource(s); err != nil {
-			t.Errorf("checkImageMountSource(%q) = %v, want nil", s, err)
+	// Only the deployment's own assigned disk (model-<x> at /mnt/<x>), or a
+	// path under it.
+	assigned := []string{"model-gemma4-31b"}
+	for _, s := range []string{"/mnt/gemma4-31b", "/mnt/gemma4-31b/", "/mnt/gemma4-31b/weights"} {
+		if err := checkImageMountSource(s, assigned); err != nil {
+			t.Errorf("checkImageMountSource(%q, assigned) = %v, want nil", s, err)
 		}
 	}
 
-	// "/:/host:rw" was the reported case: the whole host filesystem, writable.
+	// Never /mnt itself (every disk on the VM), never a sibling disk, never
+	// anything outside; "/:/host:rw" was the original case.
 	refused := []string{
+		"/mnt",
+		"/mnt/",
+		"/mnt/qwen25-32b",
+		"/mnt/gemma4-31b-other",
 		"/",
 		"/etc",
 		"/data",
@@ -68,8 +68,21 @@ func TestCheckImageMountSource(t *testing.T) {
 		"",
 	}
 	for _, s := range refused {
-		if err := checkImageMountSource(s); err == nil {
-			t.Errorf("checkImageMountSource(%q) = nil, want error", s)
+		if err := checkImageMountSource(s, assigned); err == nil {
+			t.Errorf("checkImageMountSource(%q, assigned) = nil, want error", s)
+		}
+	}
+	// Nothing assigned (every deployment today): every image-declared mount
+	// is refused, including the former /mnt label.
+	for _, s := range []string{"/mnt", "/mnt/gemma4-31b", "/mnt/model-gemma4-31b"} {
+		if err := checkImageMountSource(s, nil); err == nil {
+			t.Errorf("checkImageMountSource(%q, nil) = nil, want error", s)
+		}
+	}
+	// A malformed assignment grants nothing.
+	for _, bad := range [][]string{{"gemma4-31b"}, {"model-"}, {"model-.."}, {"model-a/b"}} {
+		if err := checkImageMountSource("/mnt/gemma4-31b", bad); err == nil {
+			t.Errorf("assignment %v granted a mount", bad)
 		}
 	}
 }

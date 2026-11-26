@@ -784,7 +784,9 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 					"an image-declared mount is read-only, use the deploy request for anything else",
 				spec.Name, mountOpts)
 		}
-		if err := checkImageMountSource(parts[0]); err != nil {
+		// No model disk is assigned to any deployment yet (the load request
+		// will carry the assignment), so every image-declared mount is refused.
+		if err := checkImageMountSource(parts[0], nil); err != nil {
 			return nil, fmt.Errorf("container: %s image label ai.privasys.volume: %w", spec.Name, err)
 		}
 		opts = append(opts, oci.WithMounts(idmapMounts([]specs.Mount{{
