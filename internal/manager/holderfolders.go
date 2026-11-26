@@ -130,6 +130,11 @@ type holderOpenState struct {
 	Resource     string
 	Subject      string
 	CapabilityID string
+	// Mount and Exposed are the volume's paths (launcher.HolderFolders) at
+	// open time, so the re-check can close the folder without asking the
+	// launcher, whose lock its caller holds.
+	Mount   string
+	Exposed string
 }
 
 // readOnlyOf lists the open read-only folders of container, by grant key.
@@ -424,7 +429,8 @@ func (s *Server) mintHolderCapability(w http.ResponseWriter, r *http.Request, co
 	// The mint loaded the key: the folder is open, owned by root until the
 	// app's first open names a uid.
 	s.holdersOpen.set(grantKey(appID, p.resource, sub), holderOpenState{KeyID: keyID, HostUID: -1, OpenedAt: time.Now().UTC(), ReadOnly: readOnly,
-		Container: container, HolderKey: holderKey, Resource: p.resource, Subject: sub, CapabilityID: capID})
+		Container: container, HolderKey: holderKey, Resource: p.resource, Subject: sub, CapabilityID: capID,
+		Mount: hf.Mount, Exposed: hf.Exposed})
 	s.log.Info("holder folder minted", zap.String("container", container), zap.String("resource", p.resource),
 		zap.String("holder", holderKey), zap.Bool("unattended", unattended), zap.Bool("read_only", readOnly),
 		zap.String("capability_id", capID))
@@ -674,7 +680,8 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.holdersOpen.set(key, holderOpenState{KeyID: keyID, HostUID: hostUID, OpenedAt: time.Now().UTC(), ReadOnly: readOnly,
-		Container: name, HolderKey: g.HolderKey, Resource: resource, Subject: body.Subject, CapabilityID: g.CapabilityID})
+		Container: name, HolderKey: g.HolderKey, Resource: resource, Subject: body.Subject, CapabilityID: g.CapabilityID,
+		Mount: hf.Mount, Exposed: hf.Exposed})
 	s.events.emit(name, resourceEvent{Type: "holder.opened", Resource: resource, Subject: body.Subject, CapabilityID: g.CapabilityID})
 	s.answerOpen(w, name, hf.Mount, g, containerPath)
 }

@@ -514,7 +514,7 @@ type Launcher struct {
 	// taskPreStart is the hook for every new container task
 	// (SetTaskPreStart). Kept here because the manager installs it before
 	// Run creates the container manager.
-	taskPreStart func(name string, pid int)
+	taskPreStart func(name string, pid int) error
 
 	// caddyClient manages Caddy routes via the admin API.  Nil when
 	// Caddy integration is disabled (no ExtensionsDir configured).

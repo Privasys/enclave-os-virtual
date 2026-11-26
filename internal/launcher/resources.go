@@ -45,15 +45,17 @@ func (l *Launcher) ContainerResourceDecls(name string) []ResourceDecl {
 	return append([]ResourceDecl(nil), decls...)
 }
 
-// ContainerHostname returns the public hostname a loaded container serves
-// on, or "" when unknown.
 // SetTaskPreStart installs f to run for every new container task after its
 // namespaces exist and before it starts (container.Manager.SetPreStart).
 // The manager calls it before Run has created the container manager, so the
 // hook is kept and applied when Run attaches it (attachContainerManager);
 // installing it only on an existing container manager silently dropped it
 // on 146-dev.
-func (l *Launcher) SetTaskPreStart(f func(name string, pid int)) {
+//
+// f runs INSIDE a load, under the launcher's lock (l.mu): it must never call
+// the launcher (that deadlocked 147-dev), and it must return in bounded
+// time. An error from f keeps the task from starting, so the load fails.
+func (l *Launcher) SetTaskPreStart(f func(name string, pid int) error) {
 	l.mu.Lock()
 	l.taskPreStart = f
 	mgr := l.mgr
@@ -75,6 +77,8 @@ func (l *Launcher) ContainerTaskPID(name string) (int, bool) {
 	return pid, pid > 0
 }
 
+// ContainerHostname returns the public hostname a loaded container serves
+// on, or "" when unknown.
 func (l *Launcher) ContainerHostname(name string) string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()

@@ -129,7 +129,8 @@ func (s *Server) ensureHolderOpen(container, appID, resource, sub string, g *cap
 		return errors.New("the folder could not be opened")
 	}
 	s.holdersOpen.set(key, holderOpenState{KeyID: keyID, HostUID: -1, OpenedAt: time.Now().UTC(), ReadOnly: readOnly,
-		Container: container, HolderKey: g.HolderKey, Resource: resource, Subject: sub, CapabilityID: g.CapabilityID})
+		Container: container, HolderKey: g.HolderKey, Resource: resource, Subject: sub, CapabilityID: g.CapabilityID,
+		Mount: hf.Mount, Exposed: hf.Exposed})
 	s.events.emit(container, resourceEvent{Type: "holder.opened", Resource: resource, Subject: sub, CapabilityID: g.CapabilityID})
 	return nil
 }

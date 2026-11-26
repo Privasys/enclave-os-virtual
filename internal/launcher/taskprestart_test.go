@@ -23,16 +23,16 @@ import (
 func TestTaskPreStartSurvivesBeingSetBeforeRun(t *testing.T) {
 	l := &Launcher{log: zap.NewNop()}
 	var got []string
-	l.SetTaskPreStart(func(name string, pid int) { got = append(got, name) })
+	l.SetTaskPreStart(func(name string, pid int) error { got = append(got, name); return nil })
 
 	mgr := &container.Manager{}
 	l.attachContainerManager(mgr)
-	if !mgr.RunPreStart("app", 1) || len(got) != 1 || got[0] != "app" {
+	if ran, _ := mgr.RunPreStart("app", 1); !ran || len(got) != 1 || got[0] != "app" {
 		t.Fatalf("a hook set before the container manager existed was lost (ran %v)", got)
 	}
 
-	l.SetTaskPreStart(func(name string, pid int) { got = append(got, "late:"+name) })
-	if !mgr.RunPreStart("app", 1) || got[len(got)-1] != "late:app" {
+	l.SetTaskPreStart(func(name string, pid int) error { got = append(got, "late:"+name); return nil })
+	if ran, _ := mgr.RunPreStart("app", 1); !ran || got[len(got)-1] != "late:app" {
 		t.Fatalf("a hook set after the attach did not reach the container manager (ran %v)", got)
 	}
 }

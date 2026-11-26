@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -148,18 +149,20 @@ func TestUnlockBindsReadOnlyBeforeTheKey(t *testing.T) {
 // closed (key removed, bind released, state dropped); a read-only one stays
 // open; writable grants and other containers are not touched.
 func TestNewTaskClosesAReadOnlyFolderItWouldSeeWritable(t *testing.T) {
-	hf := launcher.HolderFolders{Mount: "/view", Exposed: "/vol"}
 	for _, writableView := range []bool{false, true} {
 		u := &unlockRecorder{viewWritable: writableView}
 		s := u.server()
 		s.holdersOpen = newHolderState()
 		s.events = newEventHub()
-		s.holderFoldersFn = func(string) (launcher.HolderFolders, error) { return hf, nil }
-		s.holdersOpen.set("ro", holderOpenState{KeyID: "k1", ReadOnly: true, Container: "app", HolderKey: "h1"})
-		s.holdersOpen.set("rw", holderOpenState{KeyID: "k2", ReadOnly: false, Container: "app", HolderKey: "h2"})
-		s.holdersOpen.set("other", holderOpenState{KeyID: "k3", ReadOnly: true, Container: "other", HolderKey: "h3"})
+		// The paths come from the open state, never from the launcher (the
+		// Server here has none: calling it would panic).
+		s.holdersOpen.set("ro", holderOpenState{KeyID: "k1", ReadOnly: true, Container: "app", HolderKey: "h1", Mount: "/view", Exposed: "/vol"})
+		s.holdersOpen.set("rw", holderOpenState{KeyID: "k2", ReadOnly: false, Container: "app", HolderKey: "h2", Mount: "/view", Exposed: "/vol"})
+		s.holdersOpen.set("other", holderOpenState{KeyID: "k3", ReadOnly: true, Container: "other", HolderKey: "h3", Mount: "/view", Exposed: "/vol"})
 
-		s.recheckReadOnlyFolders("app", 4242)
+		if err := s.recheckReadOnlyFolders("app", 4242); err != nil {
+			t.Fatalf("writable view %v: %v", writableView, err)
+		}
 
 		_, roOpen := s.holdersOpen.get("ro")
 		_, rwOpen := s.holdersOpen.get("rw")
@@ -178,6 +181,83 @@ func TestNewTaskClosesAReadOnlyFolderItWouldSeeWritable(t *testing.T) {
 			}
 			u.check(t, "read-only view", "check-view app /data/holders/h1")
 		}
+	}
+}
+
+// The re-check runs under the launcher's lock, so it is bounded: a check
+// that hangs refuses the new task (an error, so it never starts) instead of
+// holding the lock.
+func TestNewTaskRecheckIsBounded(t *testing.T) {
+	old := preStartBound
+	preStartBound = 50 * time.Millisecond
+	t.Cleanup(func() { preStartBound = old })
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	s := &Server{log: zap.NewNop(), holdersOpen: newHolderState()}
+	s.holderViewFn = func(string, string) (bool, error) { <-release; return true, nil }
+	s.holdersOpen.set("ro", holderOpenState{KeyID: "k1", ReadOnly: true, Container: "app", HolderKey: "h1", Mount: "/view", Exposed: "/vol"})
+
+	start := time.Now()
+	if err := s.recheckReadOnlyFolders("app", 4242); err == nil {
+		t.Fatal("a hung re-check let the task start")
+	}
+	if waited := time.Since(start); waited > 2*time.Second {
+		t.Fatalf("the re-check held its caller for %s", waited)
+	}
+	if err := s.recheckReadOnlyFolders("none", 1); err != nil {
+		t.Fatalf("a container with no read-only folder was refused: %v", err)
+	}
+}
+
+// The pre-start re-check runs inside the launcher's load, under its lock:
+// nothing it calls in this package may reference s.launcher (147-dev
+// deadlocked when it asked the launcher for the folder's paths).
+func TestPreStartRecheckNeverCallsTheLauncher(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodies := map[string]*ast.BlockStmt{}
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range f.Decls {
+			if fn, ok := d.(*ast.FuncDecl); ok && fn.Body != nil && fn.Recv != nil {
+				bodies[fn.Name.Name] = fn.Body
+			}
+		}
+	}
+	// Walk the Server methods reachable from the hook.
+	seen := map[string]bool{}
+	var walk func(name string)
+	walk = func(name string) {
+		if seen[name] || bodies[name] == nil {
+			return
+		}
+		seen[name] = true
+		ast.Inspect(bodies[name], func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if x, ok := sel.X.(*ast.Ident); ok && x.Name == "s" {
+				if sel.Sel.Name == "launcher" {
+					t.Errorf("%s (reached from the pre-start hook) uses s.launcher", name)
+				}
+				walk(sel.Sel.Name)
+			}
+			return true
+		})
+	}
+	walk("recheckReadOnlyFolders")
+	if !seen["closeFoldersNotReadOnly"] || !seen["holderClose"] || !seen["releaseHolderBind"] {
+		t.Fatalf("the walk did not reach the hook's helpers: %v", seen)
 	}
 }
 

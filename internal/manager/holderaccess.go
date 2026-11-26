@@ -6,6 +6,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -44,41 +45,57 @@ func holderReadOnly(perms []string) (bool, error) {
 // hook): each folder open read-only for that container must be a read-only
 // mount in the new task's own view. One that is not (or cannot be checked)
 // is CLOSED: its key is removed, so the new task finds it locked.
-func (s *Server) recheckReadOnlyFolders(container string, pid int) {
+//
+// It runs INSIDE the launcher's load, which holds the launcher's lock: it
+// must never call the launcher (a source test enforces it), and it is
+// bounded by preStartBound. The folder's paths come from the open state,
+// recorded when the folder was opened. If the checks do not finish in time
+// the task is refused (it never starts); the checks still close what they
+// reach.
+func (s *Server) recheckReadOnlyFolders(container string, pid int) error {
 	open := s.holdersOpen.readOnlyOf(container)
 	if len(open) == 0 {
-		return
+		return nil
 	}
-	hf, err := s.holderFoldersOf(container)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.closeFoldersNotReadOnly(container, pid, open)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-time.After(preStartBound):
+		s.log.Error("holder read-only re-check did not finish in time: the new task is refused",
+			zap.String("container", container), zap.Duration("bound", preStartBound))
+		return fmt.Errorf("the read-only folder check for %s did not finish in %s", container, preStartBound)
+	}
+}
+
+// preStartBound caps the pre-start re-check (a variable for tests).
+var preStartBound = 10 * time.Second
+
+// closeFoldersNotReadOnly closes every folder in open that the task whose
+// init is pid does not see read-only.
+func (s *Server) closeFoldersNotReadOnly(container string, pid int, open map[string]holderOpenState) {
 	for key, st := range open {
 		inContainer := path.Join(holderContainerMount, holders.Dir, st.HolderKey)
-		ro, verr := false, err
-		if verr == nil {
-			ro, verr = s.viewReadOnlyAt(container, pid, inContainer)
-		}
-		if verr == nil && ro {
+		ro, err := s.viewReadOnlyAt(container, pid, inContainer)
+		if err == nil && ro {
 			continue
 		}
 		s.log.Error("holder read-only folder not read-only in a new task: closing it",
 			zap.String("container", container), zap.String("holder", st.HolderKey),
-			zap.Bool("read_only_view", ro), zap.Error(verr))
-		if err == nil {
-			s.holderClose(hf.Mount, st.HolderKey, st.KeyID)
-			s.releaseHolderBind(hf, st.HolderKey)
+			zap.Bool("read_only_view", ro), zap.Error(err))
+		if st.Mount != "" {
+			s.holderClose(st.Mount, st.HolderKey, st.KeyID)
 		}
+		s.releaseHolderBind(launcher.HolderFolders{Mount: st.Mount, Exposed: st.Exposed}, st.HolderKey)
 		s.holdersOpen.drop(key)
 		if s.events != nil {
 			s.events.emit(container, resourceEvent{Type: "holder.closed", Resource: st.Resource, Subject: st.Subject, CapabilityID: st.CapabilityID})
 		}
 	}
-}
-
-// holderFoldersOf is the launcher's HolderFolders (tests replace it).
-func (s *Server) holderFoldersOf(container string) (launcher.HolderFolders, error) {
-	if s.holderFoldersFn != nil {
-		return s.holderFoldersFn(container)
-	}
-	return s.launcher.HolderFolders(container)
 }
 
 // viewReadOnlyAt reads the mount view of the task whose init is pid.
