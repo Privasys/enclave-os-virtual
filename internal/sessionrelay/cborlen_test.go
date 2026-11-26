@@ -72,6 +72,7 @@ func TestSealedRoundTrip(t *testing.T) {
 func TestMuxHugeCborLength(t *testing.T) {
 	m := NewManager()
 	sess, _ := testSession(t, m, "")
+	sess.Host = "app.example.org" // the host the mux OPENs below name
 	relayHost := startRelay(t, m, startEchoApp(t))
 	c := dialMux(t, relayHost)
 	evil := []byte{0xa3, 0x7b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}

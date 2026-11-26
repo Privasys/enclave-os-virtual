@@ -329,7 +329,10 @@ func (mc *muxConn) handleOpen(sid string, stream uint64, payload []byte) {
 		return
 	}
 	sess, ok := mc.m.lookupByID(sid)
-	if !ok {
+	// The OPEN's host is the gateway's routing header, outside the seal: a
+	// stream for any host but the session's own is refused before it is
+	// registered or dialled, exactly as an unknown session is (no oracle).
+	if !ok || !sess.sameHost(host) {
 		// Mirrors the v1 pre-101 refusal: the SDK re-establishes the session.
 		_ = mc.writeClose(sid, stream, websocket.StatusPolicyViolation, "unknown or expired session")
 		return

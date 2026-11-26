@@ -45,6 +45,8 @@ func testSession(t *testing.T, m *Manager, sub string) (*Session, func(method, p
 		t.Fatalf("buildSession: %v", err)
 	}
 	sess.Sub = sub
+	// httptest requests carry Host example.com: the session is bootstrapped there.
+	sess.Host = "example.com"
 	m.mu.Lock()
 	m.sessions[sid] = sess
 	m.mu.Unlock()
@@ -75,6 +77,7 @@ func TestSealedGETViaHeaderEnvelope(t *testing.T) {
 	defer srv.Close()
 
 	sess, seal := testSession(t, m, "user-123")
+	sess.Host = hostKey(strings.TrimPrefix(srv.URL, "http://")) // requests go to the test server
 	env := seal("GET", "/api/v1/me/tools", nil, 0)
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/me/tools", nil)
@@ -156,6 +159,7 @@ func TestRelaySubInjection(t *testing.T) {
 
 	// Vouched session: sub asserted.
 	vouched, sealV := testSession(t, m, "user-123")
+	vouched.Host = hostKey(strings.TrimPrefix(srv.URL, "http://"))
 	post(vouched, sealV("POST", "/x", []byte(`{}`), 0))
 	if gotSub != "user-123" {
 		t.Fatalf("vouched sub = %q, want user-123", gotSub)
@@ -163,6 +167,7 @@ func TestRelaySubInjection(t *testing.T) {
 
 	// Sub-less (FIDO2-ceremony) session: header absent entirely.
 	anon, sealA := testSession(t, m, "")
+	anon.Host = hostKey(strings.TrimPrefix(srv.URL, "http://"))
 	post(anon, sealA("POST", "/x", []byte(`{}`), 0))
 	if sawHeader {
 		t.Fatalf("sub-less session leaked %s = %q", relaySubHeader, gotSub)

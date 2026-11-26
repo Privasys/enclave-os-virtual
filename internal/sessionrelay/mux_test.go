@@ -163,6 +163,7 @@ func (s *streamSealer) unseal(t *testing.T, frame []byte, wantCtr uint64) []byte
 func TestMuxStreamEcho(t *testing.T) {
 	m := NewManager()
 	sess, _ := testSession(t, m, "user-1")
+	sess.Host = "app.example.org" // the host the mux OPENs below name
 	relayHost := startRelay(t, m, startEchoApp(t))
 	c := dialMux(t, relayHost)
 
@@ -209,6 +210,7 @@ func TestMuxStreamEcho(t *testing.T) {
 func TestMuxConcurrentStreams(t *testing.T) {
 	m := NewManager()
 	sess, _ := testSession(t, m, "")
+	sess.Host = "app.example.org" // the host the mux OPENs below name
 	relayHost := startRelay(t, m, startEchoApp(t))
 	c := dialMux(t, relayHost)
 
@@ -253,6 +255,7 @@ func TestMuxConcurrentStreams(t *testing.T) {
 func TestMuxRejects(t *testing.T) {
 	m := NewManager()
 	sess, _ := testSession(t, m, "")
+	sess.Host = "h" // the host the mux OPENs below name
 	relayHost := startRelay(t, m, startEchoApp(t))
 
 	t.Run("unknown session", func(t *testing.T) {
@@ -369,6 +372,7 @@ func TestMuxPing(t *testing.T) {
 func TestDirectSealedWebSocketRefused(t *testing.T) {
 	m := NewManager()
 	sess, _ := testSession(t, m, "")
+	sess.Host = "app.example.org" // the host the mux OPENs below name
 	relayHost := startRelay(t, m, startEchoApp(t))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

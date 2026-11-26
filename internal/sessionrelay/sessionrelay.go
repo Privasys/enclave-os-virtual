@@ -235,6 +235,18 @@ type Session struct {
 	// X-Privasys-Sub header so apps behind the relay can attribute
 	// requests without a bearer ever crossing the gateway leg.
 	Sub string
+	// Host is the app host (hostKey) the session was bootstrapped on, with
+	// that host's identity key. Every use (a sealed request, a mux stream
+	// OPEN, a rebind) must name the same host: the gateway carries the
+	// routing host outside the seal, and without this check it could hand a
+	// user's sealed traffic for one app, with that user's Sub, to another
+	// app on the same enclave.
+	Host string
+}
+
+// sameHost reports whether host is the session's bootstrap host.
+func (s *Session) sameHost(host string) bool {
+	return s.Host != "" && s.Host == hostKey(host)
 }
 
 // NewManager creates a session manager. The enclave identity key is
@@ -602,12 +614,19 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 		sessionID = base64.RawURLEncoding.EncodeToString(sessionIDRaw)
 	}
 
+	// A rebind reuses a session id: never across hosts, or the gateway could
+	// move a live session onto another app.
+	if prev, live := m.lookupByID(sessionID); live && !prev.sameHost(r.Host) {
+		http.Error(w, "unknown or expired session", http.StatusUnauthorized)
+		return
+	}
 	sess, err := buildSession(sessionID, sessionIDRaw, shared, m.ttl, m.now)
 	if err != nil {
 		http.Error(w, "session derive: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	sess.Sub = sub
+	sess.Host = hostKey(r.Host)
 
 	if !m.admit(sessionID, sess) {
 		w.Header().Set("Retry-After", "30")
@@ -665,7 +684,10 @@ func (s *Session) wsStreamPrefixes(streamHex string) (c2s, s2c [4]byte) {
 
 func (m *Manager) handleSealed(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	sess, ok := m.lookup(r)
-	if !ok {
+	// A session is bound to the host it was bootstrapped on: a request the
+	// gateway routes to another host is refused before anything is
+	// decrypted, with the same answer as an unknown session (no oracle).
+	if !ok || !sess.sameHost(r.Host) {
 		http.Error(w, "unknown or expired session", http.StatusUnauthorized)
 		return
 	}
