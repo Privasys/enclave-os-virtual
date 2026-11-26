@@ -122,6 +122,27 @@ type holderOpenState struct {
 	OpenedAt time.Time
 	// ReadOnly: the folder is open read-only (its grant is [read]).
 	ReadOnly bool
+	// Container, HolderKey and Resource/Subject/CapabilityID name the open
+	// folder, so a new task of the container can re-check it
+	// (recheckReadOnlyFolders).
+	Container    string
+	HolderKey    string
+	Resource     string
+	Subject      string
+	CapabilityID string
+}
+
+// readOnlyOf lists the open read-only folders of container, by grant key.
+func (h *holderState) readOnlyOf(container string) map[string]holderOpenState {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := map[string]holderOpenState{}
+	for k, st := range h.open {
+		if st.ReadOnly && st.Container == container {
+			out[k] = st
+		}
+	}
+	return out
 }
 
 // holderState is what the manager knows about open folders: nothing
@@ -363,7 +384,7 @@ func (s *Server) mintHolderCapability(w http.ResponseWriter, r *http.Request, co
 	// The grant records exactly the ask's permission set (resolveHolder), so
 	// the folder is unlocked in that mode now: read-only is bound before the
 	// key loads, as on every other open.
-	keyID, readOnly, err := s.unlockHolderFolder(hf, holderKey, p.Capability.Permissions, raw, -1, true)
+	keyID, readOnly, err := s.unlockHolderFolder(container, hf, holderKey, p.Capability.Permissions, raw, -1, true)
 	if errors.Is(err, errHolderAccess) {
 		s.jsonError(w, http.StatusForbidden, err.Error())
 		return
@@ -402,7 +423,8 @@ func (s *Server) mintHolderCapability(w http.ResponseWriter, r *http.Request, co
 	}
 	// The mint loaded the key: the folder is open, owned by root until the
 	// app's first open names a uid.
-	s.holdersOpen.set(grantKey(appID, p.resource, sub), holderOpenState{KeyID: keyID, HostUID: -1, OpenedAt: time.Now().UTC(), ReadOnly: readOnly})
+	s.holdersOpen.set(grantKey(appID, p.resource, sub), holderOpenState{KeyID: keyID, HostUID: -1, OpenedAt: time.Now().UTC(), ReadOnly: readOnly,
+		Container: container, HolderKey: holderKey, Resource: p.resource, Subject: sub, CapabilityID: capID})
 	s.log.Info("holder folder minted", zap.String("container", container), zap.String("resource", p.resource),
 		zap.String("holder", holderKey), zap.Bool("unattended", unattended), zap.Bool("read_only", readOnly),
 		zap.String("capability_id", capID))
@@ -640,7 +662,7 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusInternalServerError, "the stored key could not be unwrapped")
 		return
 	}
-	keyID, readOnly, err := s.unlockHolderFolder(hf, g.HolderKey, g.Permissions, raw, hostUID, false)
+	keyID, readOnly, err := s.unlockHolderFolder(name, hf, g.HolderKey, g.Permissions, raw, hostUID, false)
 	zeroBytes(raw)
 	if errors.Is(err, errHolderAccess) {
 		s.jsonError(w, http.StatusForbidden, err.Error())
@@ -651,7 +673,8 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusInternalServerError, "the folder could not be opened")
 		return
 	}
-	s.holdersOpen.set(key, holderOpenState{KeyID: keyID, HostUID: hostUID, OpenedAt: time.Now().UTC(), ReadOnly: readOnly})
+	s.holdersOpen.set(key, holderOpenState{KeyID: keyID, HostUID: hostUID, OpenedAt: time.Now().UTC(), ReadOnly: readOnly,
+		Container: name, HolderKey: g.HolderKey, Resource: resource, Subject: body.Subject, CapabilityID: g.CapabilityID})
 	s.events.emit(name, resourceEvent{Type: "holder.opened", Resource: resource, Subject: body.Subject, CapabilityID: g.CapabilityID})
 	s.answerOpen(w, name, hf.Mount, g, containerPath)
 }

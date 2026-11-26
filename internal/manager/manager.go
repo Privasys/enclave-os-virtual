@@ -223,10 +223,12 @@ type Server struct {
 	freezeStateOf func(name string) launcher.FreezeState
 	// holderBind, holderLoadFn and holderCloseFn replace the holder-folder
 	// mount and key operations (tests only).
-	holderBind    func(dir string, readOnly bool) error
-	holderLoadFn  func(mount, holderKey string, raw []byte, hostUID int, create bool, guard func() error) (string, error)
-	holderCloseFn func(mount, holderKey, keyID string)
-	server  *http.Server
+	holderBind      func(dir string, readOnly bool) error
+	holderLoadFn    func(mount, holderKey string, raw []byte, hostUID int, create bool, guard func() error) (string, error)
+	holderCloseFn   func(mount, holderKey, keyID string)
+	holderViewFn    func(container, inContainer string) (bool, error)
+	holderFoldersFn func(container string) (launcher.HolderFolders, error)
+	server          *http.Server
 	// registry persists every successful Load so the manager can replay
 	// them on restart. nil when Config.RegistryPath is empty.
 	registry *registry
@@ -354,6 +356,11 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 	s.caps = newCapabilityBroker(cfg.CapabilityStateDir, s.log)
 	s.holdersOpen = newHolderState()
 	s.events = newEventHub()
+	// Every new task of an app re-proves its open read-only folders against
+	// the task's own mount view before the task starts (holderaccess.go).
+	if l != nil {
+		l.SetTaskPreStart(s.recheckReadOnlyFolders)
+	}
 	// Teach the launcher's image GC the FULL desired image set (every app in
 	// the registry), so a concurrent replay never prunes a sibling's cached
 	// image before that sibling loads. Without this the GC evicts an image an

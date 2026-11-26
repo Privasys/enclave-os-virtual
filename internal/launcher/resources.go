@@ -47,6 +47,26 @@ func (l *Launcher) ContainerResourceDecls(name string) []ResourceDecl {
 
 // ContainerHostname returns the public hostname a loaded container serves
 // on, or "" when unknown.
+// SetTaskPreStart installs f to run for every new container task after its
+// namespaces exist and before it starts (container.Manager.SetPreStart).
+func (l *Launcher) SetTaskPreStart(f func(name string, pid int)) {
+	if l.mgr != nil {
+		l.mgr.SetPreStart(f)
+	}
+}
+
+// ContainerTaskPID is the init PID of the container's running task, or
+// false when it has none. The manager reads the container's own mount view
+// through /proc/<pid>/mountinfo with it.
+func (l *Launcher) ContainerTaskPID(name string) (int, bool) {
+	mc, ok := l.mgr.Get(name)
+	if !ok || mc.Task == nil {
+		return 0, false
+	}
+	pid := int(mc.Task.Pid())
+	return pid, pid > 0
+}
+
 func (l *Launcher) ContainerHostname(name string) string {
 	l.mu.RLock()
 	defer l.mu.RUnlock()

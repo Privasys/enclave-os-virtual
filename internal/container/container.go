@@ -163,6 +163,10 @@ type Manager struct {
 	containers map[string]*ManagedContainer
 	mu         sync.RWMutex
 
+	// preStart runs for every new task after its namespaces exist and
+	// before it starts (SetPreStart).
+	preStart func(name string, pid int)
+
 	// usernsRemap, when true, runs each container in a user namespace with
 	// container-root mapped to an unprivileged host uid (see Create). Set only
 	// on SHARED, multi-tenant VMs; dedicated VMs (incl. all GPU) leave it off,
@@ -927,6 +931,16 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		containerIP = ip
 	}
 
+	// The task's mount namespace exists now and nothing in it has run: the
+	// last moment to check what the container will see (the manager re-checks
+	// its read-only folders here) before the app can reach anything.
+	m.mu.RLock()
+	preStart := m.preStart
+	m.mu.RUnlock()
+	if preStart != nil {
+		preStart(spec.Name, int(task.Pid()))
+	}
+
 	if err := task.Start(ctx); err != nil {
 		network.Detach(spec.Port)
 		_, _ = task.Delete(ctx)
@@ -996,6 +1010,14 @@ func (m *Manager) forceRemoveOrphan(ctx context.Context, name string) {
 // Forget drops the entry a pull registered for a container that was never
 // created, so a load abandoned after its pull leaves nothing listed. A created
 // container is left alone: Stop removes those.
+// SetPreStart installs the hook run for every new task between its creation
+// and its start.
+func (m *Manager) SetPreStart(f func(name string, pid int)) {
+	m.mu.Lock()
+	m.preStart = f
+	m.mu.Unlock()
+}
+
 func (m *Manager) Forget(name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

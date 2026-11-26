@@ -120,7 +120,7 @@ func (s *Server) ensureHolderOpen(container, appID, resource, sub string, g *cap
 	}
 	// The same open as the app's: the folder is exposed to the container in
 	// the mode its grant allows (read-only bound first), whoever opens it.
-	keyID, readOnly, err := s.unlockHolderFolder(hf, g.HolderKey, g.Permissions, raw, -1, false)
+	keyID, readOnly, err := s.unlockHolderFolder(container, hf, g.HolderKey, g.Permissions, raw, -1, false)
 	zeroBytes(raw)
 	if errors.Is(err, errHolderAccess) {
 		return err
@@ -128,7 +128,8 @@ func (s *Server) ensureHolderOpen(container, appID, resource, sub string, g *cap
 	if err != nil {
 		return errors.New("the folder could not be opened")
 	}
-	s.holdersOpen.set(key, holderOpenState{KeyID: keyID, HostUID: -1, OpenedAt: time.Now().UTC(), ReadOnly: readOnly})
+	s.holdersOpen.set(key, holderOpenState{KeyID: keyID, HostUID: -1, OpenedAt: time.Now().UTC(), ReadOnly: readOnly,
+		Container: container, HolderKey: g.HolderKey, Resource: resource, Subject: sub, CapabilityID: g.CapabilityID})
 	s.events.emit(container, resourceEvent{Type: "holder.opened", Resource: resource, Subject: sub, CapabilityID: g.CapabilityID})
 	return nil
 }

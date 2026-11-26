@@ -36,20 +36,50 @@ func EnsureView(src, view string) error {
 	return nil
 }
 
-// BindReadOnly binds dir onto itself read-only (idempotent: a dir that is
-// already a read-only mount point is left as is).
+// BindReadOnly binds dir onto itself read-only, as a mount that is ALREADY
+// read-only when it is attached: open_tree clones dir detached,
+// mount_setattr makes the clone read-only, move_mount attaches it. Mount
+// propagation copies the mount with its read-only flag into every slave
+// (the containers' /data). Binding first and remounting read-only after
+// does NOT work: the bind propagates writable and a remount never
+// propagates, so the container kept a writable copy. There is no fallback
+// to that method: if the new mount API fails, the bind fails, and a
+// read-only open is refused.
+//
+// Any earlier bind on dir is removed first, so a bind made the old way is
+// never kept just because the host's copy looks read-only.
 func BindReadOnly(dir string) error {
-	if ro, err := isReadOnlyMount(dir); err == nil && ro {
-		return nil
+	if err := Unbind(dir); err != nil {
+		return err
 	}
-	if err := unix.Mount(dir, dir, "", unix.MS_BIND, ""); err != nil {
-		return fmt.Errorf("holders: bind %s: %w", dir, err)
+	fd, err := unix.OpenTree(unix.AT_FDCWD, dir, unix.OPEN_TREE_CLONE|unix.OPEN_TREE_CLOEXEC)
+	if err != nil {
+		return fmt.Errorf("holders: open_tree %s: %w", dir, err)
 	}
-	if err := unix.Mount("", dir, "", unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY, ""); err != nil {
+	defer unix.Close(fd)
+	attr := unix.MountAttr{Attr_set: unix.MOUNT_ATTR_RDONLY}
+	if err := unix.MountSetattr(fd, "", unix.AT_EMPTY_PATH, &attr); err != nil {
+		return fmt.Errorf("holders: mount_setattr %s read-only: %w", dir, err)
+	}
+	if err := unix.MoveMount(fd, "", unix.AT_FDCWD, dir, unix.MOVE_MOUNT_F_EMPTY_PATH); err != nil {
+		return fmt.Errorf("holders: move_mount %s: %w", dir, err)
+	}
+	if ro, err := isReadOnlyMount(dir); err != nil || !ro {
 		_ = unix.Unmount(dir, unix.MNT_DETACH)
-		return fmt.Errorf("holders: remount %s read-only: %w", dir, err)
+		return fmt.Errorf("holders: %s is not read-only after the bind", dir)
 	}
 	return nil
+}
+
+// ContainerViewReadOnly reports whether the container whose init process is
+// pid sees containerPath as its own read-only mount, read from
+// /proc/<pid>/mountinfo (no setns needed).
+func ContainerViewReadOnly(pid int, containerPath string) (bool, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/mountinfo", pid))
+	if err != nil {
+		return false, fmt.Errorf("holders: container mountinfo: %w", err)
+	}
+	return MountInfoReadOnly(data, containerPath), nil
 }
 
 // Unbind removes a read-only bind made by BindReadOnly (a dir that is not a
