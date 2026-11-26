@@ -287,6 +287,7 @@ func runServe(args []string) error {
 		MachineName:            *machineName,
 		Hostname:               *hostname,
 		PlatformHostname:       platformHostname,
+		AppDomain:              pinnedAppDomain(pinned.ProfileFile, *unpinned),
 		ManagementPort:         "9443",
 		CACertPath:             *caCert,
 		CAKeyPath:              *caKeyPath,
@@ -555,6 +556,21 @@ func resolvePinned(profileFile string, unpinned bool, g pinned.Given, registered
 		return g, fmt.Errorf("refusing to start on a %s image: %w", profile, err)
 	}
 	return eff, nil
+}
+
+// pinnedAppDomain is the app domain compiled for the image's profile (the
+// name the control plane gives this manager is <machine-name>-mgr.<domain>),
+// or "" when unpinned or the profile has none.
+func pinnedAppDomain(profileFile string, unpinned bool) string {
+	if unpinned {
+		return ""
+	}
+	profile, err := pinned.Profile(profileFile)
+	if err != nil {
+		return ""
+	}
+	s, _ := pinned.For(profile)
+	return s.AppDomain
 }
 
 func walletJWKSURL(override, issuer string) string {

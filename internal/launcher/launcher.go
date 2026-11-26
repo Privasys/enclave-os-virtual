@@ -56,6 +56,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/extensions"
 	"github.com/Privasys/enclave-os-virtual/internal/manifest"
 	"github.com/Privasys/enclave-os-virtual/internal/merkle"
+	"github.com/Privasys/enclave-os-virtual/internal/mgrname"
 	"github.com/Privasys/enclave-os-virtual/internal/network"
 	"github.com/Privasys/enclave-os-virtual/internal/oids"
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
@@ -111,6 +112,12 @@ type Config struct {
 	// PlatformHostname is the FQDN for the management API route in Caddy
 	// (e.g. "v-fr-1.example.com").  Set by the caller via --platform-hostname.
 	PlatformHostname string
+
+	// AppDomain is the image profile's pinned app domain (pinned.Settings):
+	// the control plane reaches this manager at
+	// <MachineName>-mgr.<AppDomain> (internal/mgrname), whose certificate
+	// must carry the platform extensions too. Empty: no such name.
+	AppDomain string
 
 	// ManagementPort is the local port for the management API
 	// (default: "9443").  Caddy reverse-proxies to this port.
@@ -944,6 +951,19 @@ func (l *Launcher) Run(ctx context.Context) error {
 		zap.String("machine_name", l.cfg.MachineName),
 		zap.String("platform_hostname", l.cfg.PlatformHostname),
 	)
+	// The manager's name as the control plane derives it from the enclave
+	// name (registration sends machine-name as that name). If an operator
+	// renames the enclave, the control plane's name moves and this one does
+	// not: compare this line with the enclave's manager hostname in the
+	// control plane.
+	if mgr := l.managerHostname(); mgr != "" {
+		l.log.Info("manager hostname carries the platform extensions",
+			zap.String("manager_hostname", mgr), zap.String("machine_name", l.cfg.MachineName),
+			zap.String("app_domain", l.cfg.AppDomain))
+	} else if l.cfg.AppDomain != "" {
+		l.log.Warn("no manager hostname could be derived: its certificate will carry no platform extensions",
+			zap.String("machine_name", l.cfg.MachineName), zap.String("app_domain", l.cfg.AppDomain))
+	}
 
 	// 3. Set up Caddy routes if configured.
 	if l.caddyClient != nil {
@@ -1645,6 +1665,11 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// and extension files (e.g. "myapp.apps.privasys.org").
 	if req.Hostname != "" {
 		spec.Hostname = req.Hostname
+	}
+	// The manager's own name carries the platform's extensions: no app may
+	// take it, or its certificate would show the platform's identity.
+	if mgr := l.managerHostname(); mgr != "" && strings.EqualFold(spec.Hostname, mgr) {
+		return nil, fmt.Errorf("launcher: %s: hostname %s is this enclave's manager hostname", req.Name, spec.Hostname)
 	}
 
 	// Under l.mu: the checks against the containers loaded and the loads on
@@ -2854,7 +2879,33 @@ func (l *Launcher) writePlatformExtensions() error {
 		exts = append(exts, oids.Extension(oids.EnclaveInstanceID, id))
 	}
 
-	return extensions.Write(l.cfg.ExtensionsDir, l.cfg.PlatformHostname, exts, "")
+	if err := extensions.Write(l.cfg.ExtensionsDir, l.cfg.PlatformHostname, exts, ""); err != nil {
+		return err
+	}
+	// The same set under the manager's own name, as the control plane names
+	// it: clients reach the management API there (through the gateway), and
+	// a certificate without the platform extensions is rightly refused. No
+	// other unknown name gets them: those keep the bare leaf.
+	if mgr := l.managerHostname(); mgr != "" {
+		if err := extensions.Write(l.cfg.ExtensionsDir, mgr, exts, ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// managerHostname is the control plane's name for this manager
+// (<MachineName>-mgr.<AppDomain>), or "" when it cannot be derived or equals
+// the platform hostname. A pure function of the config: it is called from
+// inside loads, which hold l.mu, so it must never take a lock. No app may
+// serve this name (Load refuses it), so an app's extensions file is never
+// overwritten with the platform's.
+func (l *Launcher) managerHostname() string {
+	mgr := mgrname.ManagerHostname(l.cfg.MachineName, l.cfg.AppDomain)
+	if mgr == "" || strings.EqualFold(mgr, l.cfg.PlatformHostname) {
+		return ""
+	}
+	return mgr
 }
 
 // enclaveIDBytes parses a UUID string into its 16 raw bytes, or nil.

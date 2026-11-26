@@ -28,6 +28,12 @@ type Settings struct {
 	MonitoringRoles    []string
 	AttestationServers []string
 	MgmtURLs           []string
+	// AppDomain is the domain the control plane names this fleet's apps and
+	// managers under (its APP_DOMAIN): a manager is reached as
+	// <enclave name>-mgr.<AppDomain> (internal/mgrname). Not a trust setting:
+	// it only names the hostname whose certificate carries the platform
+	// extensions.
+	AppDomain string
 }
 
 // profiles: production images serve the production platform only; dev
@@ -40,6 +46,7 @@ var profiles = map[string]Settings{
 		MonitoringRoles:    []string{"privasys-platform:monitoring"},
 		AttestationServers: []string{"https://as.privasys.org/verify"},
 		MgmtURLs:           []string{"https://api.developer.privasys.org"},
+		AppDomain:          "apps.privasys.org",
 	},
 	"dev": {
 		Issuers:            []string{"https://privasys.id"},
@@ -48,6 +55,7 @@ var profiles = map[string]Settings{
 		MonitoringRoles:    []string{"privasys-platform-test:monitoring"},
 		AttestationServers: []string{"https://as.privasys.org/verify"},
 		MgmtURLs:           []string{"https://api-test.developer.privasys.org", "https://api.developer.test.privasys.org"},
+		AppDomain:          "apps.test.privasys.org",
 	},
 }
 
