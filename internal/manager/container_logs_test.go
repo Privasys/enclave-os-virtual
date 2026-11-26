@@ -101,7 +101,9 @@ func TestHandleContainerLogs(t *testing.T) {
 
 	// A platform role (monitoring, manager, staff admin) is NOT enough: the
 	// platform never reads an app's output. Nor is no token at all.
-	for name, tok := range map[string]string{"staff": staff, "none": ""} {
+	// An app ADMIN configures the app but does not read its output either.
+	admin := iss.token(t, "admin-1", "enclave-os-virtual", map[string]any{"roles": []string{"enclave-os-virtual:app:cf7a0d585468416884c341ebe0ce4025:admin"}})
+	for name, tok := range map[string]string{"staff": staff, "none": "", "app admin": admin} {
 		if rec = logsRequest(t, s, "/api/v1/containers/drive/logs", tok); rec.Code != http.StatusForbidden {
 			t.Fatalf("%s: got %d, want 403", name, rec.Code)
 		}

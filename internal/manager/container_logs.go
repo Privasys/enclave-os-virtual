@@ -31,9 +31,10 @@ func (s *Server) handleContainerLogs(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadRequest, "invalid container name")
 		return
 	}
-	// An app's output is the app's data: only its owner or admin reads it,
-	// exactly as only they configure it. A platform role (monitoring,
-	// manager, staff) is not enough; the platform never sees app data.
+	// An app's output is the app's data: only its OWNER reads it (the
+	// configure gate's check, narrowed to the owner: an app admin configures
+	// but does not read the output). A platform role (monitoring, manager,
+	// staff) is not enough; the platform never sees app data.
 	var st launcher.FreezeState
 	switch {
 	case s.freezeStateOf != nil:
@@ -41,7 +42,7 @@ func (s *Server) handleContainerLogs(w http.ResponseWriter, r *http.Request) {
 	case s.launcher != nil:
 		st = s.launcher.ContainerFreezeState(name)
 	}
-	if _, _, err := s.configureGrant(r, name, st); err != nil {
+	if _, role, err := s.configureGrant(r, name, st); err != nil || role != "owner" {
 		s.jsonError(w, http.StatusForbidden, "not authorised for this app's logs")
 		return
 	}
