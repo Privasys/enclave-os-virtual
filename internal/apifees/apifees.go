@@ -227,13 +227,26 @@ type Store struct {
 	acked       uint64
 	explicitAck bool
 	lastPulled  uint64
+	// epoch names this store's sequence: random when the store is created
+	// (or reset after a corrupt file), persisted with seq. An ack counts only
+	// for the epoch it names, so an ack from before a reset never trims the
+	// events of a new sequence.
+	epoch string
 }
 
-// persisted is the on-disk shape ({seq, acked, events}).
+// persisted is the on-disk shape ({epoch, seq, acked, events}).
 type persisted struct {
+	Epoch  string  `json:"epoch,omitempty"`
 	Seq    uint64  `json:"seq"`
 	Acked  uint64  `json:"acked,omitempty"`
 	Events []Event `json:"events"`
+}
+
+// Epoch is the store's sequence id, returned with every pull.
+func (s *Store) Epoch() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.epoch
 }
 
 // Open loads (or initialises) a fee store at path. An empty path keeps the
@@ -243,7 +256,8 @@ type persisted struct {
 // events until seq catches up; keep the file on the encrypted /data volume
 // alongside the app registry.
 func Open(path string, log *zap.Logger) *Store {
-	s := &Store{path: path, log: log.Named("apifees")}
+	// A new sequence until a persisted one is loaded.
+	s := &Store{path: path, log: log.Named("apifees"), epoch: newCallID()}
 	if path == "" {
 		return s
 	}
@@ -259,6 +273,9 @@ func Open(path string, log *zap.Logger) *Store {
 		s.log.Warn("fee store corrupt; starting empty", zap.String("path", path), zap.Error(err))
 		return s
 	}
+	if p.Epoch != "" {
+		s.epoch = p.Epoch
+	} // a store written before epochs keeps its seq under a fresh epoch
 	s.seq = p.Seq
 	s.acked = p.Acked
 	s.events = p.Events
@@ -318,15 +335,18 @@ func (s *Store) RecordLedger(app, function, callerSub, payerLedger, payerApp str
 }
 
 // Snapshot is the pull without an explicit acknowledgement (see Pull).
-func (s *Store) Snapshot() []Event { return s.Pull(nil) }
+func (s *Store) Snapshot() []Event { return s.Pull(nil, "") }
 
 // Pull returns the unacknowledged events (oldest first) and persists the
-// store best-effort. ack, when given, is the highest seq the puller has
-// applied; without it, and only while the puller has never acknowledged
+// store best-effort. ack, when given with this store's epoch, is the highest
+// seq the puller has applied; an ack for another epoch is ignored (it trims
+// nothing). Without an ack, and only while the puller has never acknowledged
 // explicitly, the events the previous pull returned count as applied.
-func (s *Store) Pull(ack *uint64) []Event {
+func (s *Store) Pull(ack *uint64, epoch string) []Event {
 	s.mu.Lock()
 	switch {
+	case ack != nil && epoch != s.epoch:
+		// Stale or foreign epoch: never trims.
 	case ack != nil:
 		s.explicitAck = true
 		if a := min(*ack, s.seq); a > s.acked {
@@ -341,7 +361,7 @@ func (s *Store) Pull(ack *uint64) []Event {
 	if n := len(out); n > 0 {
 		s.lastPulled = out[n-1].Seq
 	}
-	p := persisted{Seq: s.seq, Acked: s.acked, Events: out}
+	p := persisted{Epoch: s.epoch, Seq: s.seq, Acked: s.acked, Events: out}
 	path := s.path
 	s.mu.Unlock()
 

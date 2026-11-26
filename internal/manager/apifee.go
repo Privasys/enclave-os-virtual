@@ -293,8 +293,9 @@ func (s *Server) handleAPIFees(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusForbidden, "monitoring role required")
 		return
 	}
-	// ?ack=<seq>: the puller has applied every event up to seq; only those
-	// are trimmed. Without it, the previous pull's events count as applied.
+	// ?ack=<seq>&epoch=<epoch>: the puller has applied every event up to seq
+	// of that epoch; only those are trimmed. Without an ack, the previous
+	// pull's events count as applied.
 	var ack *uint64
 	if v := r.URL.Query().Get("ack"); v != "" {
 		n, err := strconv.ParseUint(v, 10, 64)
@@ -304,9 +305,11 @@ func (s *Server) handleAPIFees(w http.ResponseWriter, r *http.Request) {
 		}
 		ack = &n
 	}
-	events := s.apiFees.Pull(ack)
+	// ack counts only with the epoch it was taken in (?epoch=): after a store
+	// reset the old cursor must not trim the new sequence.
+	events := s.apiFees.Pull(ack, r.URL.Query().Get("epoch"))
 	if events == nil {
 		events = []apifees.Event{}
 	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"api_fees": events})
+	s.writeJSON(w, http.StatusOK, map[string]any{"api_fees": events, "epoch": s.apiFees.Epoch()})
 }
