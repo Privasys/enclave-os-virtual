@@ -3,6 +3,7 @@ package launcher
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -169,5 +170,25 @@ func TestSetDependenciesUnknownContainer(t *testing.T) {
 	l := depTestLauncher(t, t.TempDir(), nil)
 	if _, err := l.SetDependencies("ghost", depTestSet()); err == nil {
 		t.Fatal("expected error for unknown container")
+	}
+}
+
+// An app's serving leaf carries the enclave instance id (OID 1.3), raw 16
+// bytes, as the manager's own leaf does: a client can pin a deployment to
+// its host.
+func TestWriteContainerExtensionsStampsEnclaveInstanceID(t *testing.T) {
+	dir := t.TempDir()
+	l := depTestLauncher(t, dir, nil)
+	l.cfg.ToolSpecEnclaveID = "dfe7de7b-ec36-4fda-a4e4-5b8422f851a3"
+
+	l.mu.Lock()
+	err := l.writeContainerExtensions("app1", "app1.apps.privasys.org", 10101)
+	l.mu.Unlock()
+	if err != nil {
+		t.Fatalf("writeContainerExtensions: %v", err)
+	}
+	got, found := readExtValue(t, dir, "app1.apps.privasys.org", "1.3.6.1.4.1.65230.1.3")
+	if !found || hex.EncodeToString(got) != "dfe7de7bec364fdaa4e45b8422f851a3" {
+		t.Fatalf("OID 1.3 = %x (found %v), want the enclave id", got, found)
 	}
 }

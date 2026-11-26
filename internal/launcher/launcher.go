@@ -2884,6 +2884,11 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string, port
 	// mgmt-provided value stamped on vault identity leaves (MintVaultIdentity),
 	// never the container's self-declared /.well-known extensions.
 	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc, l.storageFacts[containerName], l.appIDs[containerName])
+	// Enclave Instance ID (OID 1.3), as on the manager's leaf: lets a client
+	// pin a deployment to the host it runs on.
+	if id := enclaveIDBytes(l.cfg.ToolSpecEnclaveID); id != nil {
+		exts = append(exts, oids.Extension(oids.EnclaveInstanceID, id))
+	}
 
 	// Attested dependency set (OID 6.1): the platform-declared DIRECT
 	// dependencies, canonical SDK encoding. Manager-owned — the issuance
