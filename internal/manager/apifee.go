@@ -14,6 +14,7 @@ package manager
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"go.uber.org/zap"
@@ -149,6 +150,16 @@ func (s *Server) serveAppBilled(w http.ResponseWriter, r *http.Request, containe
 	}
 	rule := pt.Rule
 
+	// A priced call is served only when its fee can be kept: with the
+	// unacknowledged fee ring full, refuse it (the caller retries) rather
+	// than serve it and lose the charge.
+	if s.apiFees != nil && s.apiFees.Full() {
+		apiFeeRefusals.Inc()
+		w.Header().Set("Retry-After", "30")
+		s.jsonError(w, http.StatusServiceUnavailable, "billing backlog: retry shortly")
+		return
+	}
+
 	// Wallet-originated calls: the wallet app proves per request that it is
 	// an attested instance (WIA + holder-key proof bound to this method and
 	// path). Exempt callers are neither asked for consent nor charged, and
@@ -282,7 +293,18 @@ func (s *Server) handleAPIFees(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusForbidden, "monitoring role required")
 		return
 	}
-	events := s.apiFees.Snapshot()
+	// ?ack=<seq>: the puller has applied every event up to seq; only those
+	// are trimmed. Without it, the previous pull's events count as applied.
+	var ack *uint64
+	if v := r.URL.Query().Get("ack"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			s.jsonError(w, http.StatusBadRequest, "ack must be a sequence number")
+			return
+		}
+		ack = &n
+	}
+	events := s.apiFees.Pull(ack)
 	if events == nil {
 		events = []apifees.Event{}
 	}

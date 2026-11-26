@@ -126,12 +126,14 @@ func TestStoreRingBound(t *testing.T) {
 	for i := 0; i < maxEvents+10; i++ {
 		s.Record("app", "f", "", 1)
 	}
-	snap := s.Snapshot()
-	if len(snap) != maxEvents {
-		t.Fatalf("ring not bounded: %d", len(snap))
+	// The bound is enforced by refusing calls (Full), never by ageing events
+	// out: every unacknowledged event survives, oldest first.
+	if !s.Full() {
+		t.Fatal("not Full past maxEvents")
 	}
-	if snap[0].Seq != 11 || snap[len(snap)-1].Seq != maxEvents+10 {
-		t.Fatalf("oldest events not aged out: first seq %d, last %d", snap[0].Seq, snap[len(snap)-1].Seq)
+	snap := s.Snapshot()
+	if len(snap) != maxEvents+10 || snap[0].Seq != 1 || snap[len(snap)-1].Seq != maxEvents+10 {
+		t.Fatalf("unacknowledged events lost: %d, first seq %d", len(snap), snap[0].Seq)
 	}
 }
 

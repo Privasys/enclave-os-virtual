@@ -118,10 +118,17 @@ var (
 			Help:      "Number of currently loaded containers.",
 		},
 	)
+	apiFeeRefusals = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "enclave_os",
+			Name:      "api_fee_refusals_total",
+			Help:      "Priced calls refused because the unacknowledged fee-event ring was full.",
+		},
+	)
 )
 
 func init() {
-	prometheus.MustRegister(containerStatus, apiRequests, containersLoaded)
+	prometheus.MustRegister(containerStatus, apiRequests, containersLoaded, apiFeeRefusals)
 }
 
 // Config holds the management API server configuration.

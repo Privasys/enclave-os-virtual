@@ -47,9 +47,9 @@ import (
 // advertised and the enforced price sets share one measured source.
 const ManifestLabel = "org.privasys.manifest"
 
-// maxEvents bounds the fee-event ring. At the 60s pull cadence this allows
-// ~68 priced calls/second sustained before an unpulled event ages out —
-// the same bound as the wasm runtime's ring.
+// maxEvents bounds the UNACKNOWLEDGED fee events. An unacknowledged event is
+// never dropped: when this many wait for the puller, new priced calls are
+// refused (Full) rather than served unbilled.
 const maxEvents = 4096
 
 // PriceRule is a per-tool fee declaration, wire-compatible with the wasm
@@ -219,12 +219,20 @@ type Store struct {
 
 	mu     sync.Mutex
 	seq    uint64
-	events []Event
+	events []Event // unacknowledged events, oldest first
+	// acked is the highest seq the puller has acknowledged; events at or
+	// below it are trimmed. explicitAck records that the puller acknowledges
+	// with ?ack=; until it does, a pull acknowledges what the PREVIOUS pull
+	// returned (lastPulled), which the puller has had an interval to apply.
+	acked       uint64
+	explicitAck bool
+	lastPulled  uint64
 }
 
-// persisted is the on-disk shape ({seq, events}).
+// persisted is the on-disk shape ({seq, acked, events}).
 type persisted struct {
 	Seq    uint64  `json:"seq"`
+	Acked  uint64  `json:"acked,omitempty"`
 	Events []Event `json:"events"`
 }
 
@@ -252,8 +260,29 @@ func Open(path string, log *zap.Logger) *Store {
 		return s
 	}
 	s.seq = p.Seq
+	s.acked = p.Acked
 	s.events = p.Events
+	s.trimLocked()
 	return s
+}
+
+// Full reports that maxEvents events wait for the puller: a priced call must
+// then be refused, never served without its fee being kept.
+func (s *Store) Full() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.events) >= maxEvents
+}
+
+// trimLocked drops the acknowledged events.
+func (s *Store) trimLocked() {
+	i := 0
+	for i < len(s.events) && s.events[i].Seq <= s.acked {
+		i++
+	}
+	if i > 0 {
+		s.events = append(s.events[:0], s.events[i:]...)
+	}
 }
 
 // Record appends one fee event and returns it.
@@ -283,21 +312,36 @@ func (s *Store) RecordLedger(app, function, callerSub, payerLedger, payerApp str
 		PayerApp:    payerApp,
 		Credits:     credits,
 	}
+	// Never evicted: the caller checked Full before serving the call.
 	s.events = append(s.events, ev)
-	if n := len(s.events) - maxEvents; n > 0 {
-		s.events = append(s.events[:0], s.events[n:]...)
-	}
 	return ev
 }
 
-// Snapshot returns a copy of the ring (oldest first) and persists the store
-// best-effort. Events are never drained here — the puller advances its own
-// seq cursor and the ring ages out naturally.
-func (s *Store) Snapshot() []Event {
+// Snapshot is the pull without an explicit acknowledgement (see Pull).
+func (s *Store) Snapshot() []Event { return s.Pull(nil) }
+
+// Pull returns the unacknowledged events (oldest first) and persists the
+// store best-effort. ack, when given, is the highest seq the puller has
+// applied; without it, and only while the puller has never acknowledged
+// explicitly, the events the previous pull returned count as applied.
+func (s *Store) Pull(ack *uint64) []Event {
 	s.mu.Lock()
+	switch {
+	case ack != nil:
+		s.explicitAck = true
+		if a := min(*ack, s.seq); a > s.acked {
+			s.acked = a
+		}
+	case !s.explicitAck && s.lastPulled > s.acked:
+		s.acked = s.lastPulled
+	}
+	s.trimLocked()
 	out := make([]Event, len(s.events))
 	copy(out, s.events)
-	p := persisted{Seq: s.seq, Events: out}
+	if n := len(out); n > 0 {
+		s.lastPulled = out[n-1].Seq
+	}
+	p := persisted{Seq: s.seq, Acked: s.acked, Events: out}
 	path := s.path
 	s.mu.Unlock()
 
