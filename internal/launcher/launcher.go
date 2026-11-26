@@ -511,6 +511,10 @@ type Launcher struct {
 	cfg Config
 	log *zap.Logger
 	mgr *container.Manager
+	// taskPreStart is the hook for every new container task
+	// (SetTaskPreStart). Kept here because the manager installs it before
+	// Run creates the container manager.
+	taskPreStart func(name string, pid int)
 
 	// caddyClient manages Caddy routes via the admin API.  Nil when
 	// Caddy integration is disabled (no ExtensionsDir configured).
@@ -868,6 +872,19 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 	return l
 }
 
+// attachContainerManager makes mgr the launcher's container manager and
+// hands it the task pre-start hook installed before it existed
+// (SetTaskPreStart).
+func (l *Launcher) attachContainerManager(mgr *container.Manager) {
+	l.mu.Lock()
+	l.mgr = mgr
+	f := l.taskPreStart
+	l.mu.Unlock()
+	if f != nil {
+		mgr.SetPreStart(f)
+	}
+}
+
 // Run is the main entry point. It connects to containerd, computes initial
 // (empty) attestation data, and blocks until shutdown.
 func (l *Launcher) Run(ctx context.Context) error {
@@ -878,7 +895,7 @@ func (l *Launcher) Run(ctx context.Context) error {
 		return err
 	}
 	defer mgr.Close()
-	l.mgr = mgr
+	l.attachContainerManager(mgr)
 
 	// Get containerd version hash for OID 2.4.
 	l.containerdHash, err = mgr.ContainerdVersionHash(ctx)

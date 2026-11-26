@@ -1018,6 +1018,19 @@ func (m *Manager) SetPreStart(f func(name string, pid int)) {
 	m.mu.Unlock()
 }
 
+// RunPreStart runs the installed pre-start hook, if any, and reports whether
+// there was one (the launcher's wiring test drives it).
+func (m *Manager) RunPreStart(name string, pid int) bool {
+	m.mu.RLock()
+	f := m.preStart
+	m.mu.RUnlock()
+	if f == nil {
+		return false
+	}
+	f(name, pid)
+	return true
+}
+
 func (m *Manager) Forget(name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
