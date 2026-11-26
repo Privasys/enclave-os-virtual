@@ -55,5 +55,34 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # -race: data races fail the run. -tags testhooks: compiles the
+      # test-only entry points (internal/launcher/testhooks.go) that let the
+      # manager's tests boot in main's order and run the pre-start checks
+      # under the launcher's real load lock. Never set on an image build.
       - name: Test
-        run: go test ./... -count=1
+        run: go test ./... -count=1 -race -tags testhooks
+
+      # Mount and filesystem-encryption behaviour only shows as root: the
+      # read-only bind reaching a container's (slave) mount view, holder
+      # folders on a real ext4 loop device. Run as a normal user these tests
+      # SKIP, which is how a read-only bind that never reached the container
+      # shipped to a dev host (145-dev). Here they must run: any skip fails.
+      - name: Root-only tests
+        run: |
+          go test -c -o "$RUNNER_TEMP/holders.test" ./internal/holders/
+          sudo "$RUNNER_TEMP/holders.test" -test.v -test.count=1 2>&1 | tee "$RUNNER_TEMP/root-tests.log"
+          # The propagation test needs only root and mount namespaces: it
+          # must always run. The loop-device test also needs a kernel with
+          # filesystem encryption; it must run whenever the runner's kernel
+          # has it (Ubuntu's does).
+          must="TestReadOnlyBindReachesASlaveReadOnly"
+          if grep -qs '^CONFIG_FS_ENCRYPTION=y' "/boot/config-$(uname -r)"; then
+            must="$must|TestHolderFoldersOnALoopDevice"
+          else
+            echo "::warning::this runner kernel has no filesystem encryption; the loop-device test may skip"
+          fi
+          if grep -E -- "--- SKIP: ($must) " "$RUNNER_TEMP/root-tests.log"; then
+            echo "::error::a root-only test skipped on the CI runner; it must run here"
+            exit 1
+          fi
+          grep -qE -- "--- PASS: TestReadOnlyBindReachesASlaveReadOnly " "$RUNNER_TEMP/root-tests.log"
