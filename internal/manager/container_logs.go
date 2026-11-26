@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/Privasys/enclave-os-virtual/internal/auth"
 	"github.com/Privasys/enclave-os-virtual/internal/container"
+	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 )
 
 // Container log tailing: GET /api/v1/containers/{name}/logs.
@@ -26,15 +26,23 @@ const (
 )
 
 func (s *Server) handleContainerLogs(w http.ResponseWriter, r *http.Request) {
-	result := r.Context().Value(authResultKey).(*auth.AuthResult)
-	if !result.HasMonitoringAccess() {
-		s.jsonError(w, http.StatusForbidden, "monitoring role required")
-		return
-	}
-
 	name := r.PathValue("name")
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
 		s.jsonError(w, http.StatusBadRequest, "invalid container name")
+		return
+	}
+	// An app's output is the app's data: only its owner or admin reads it,
+	// exactly as only they configure it. A platform role (monitoring,
+	// manager, staff) is not enough; the platform never sees app data.
+	var st launcher.FreezeState
+	switch {
+	case s.freezeStateOf != nil:
+		st = s.freezeStateOf(name)
+	case s.launcher != nil:
+		st = s.launcher.ContainerFreezeState(name)
+	}
+	if _, _, err := s.configureGrant(r, name, st); err != nil {
+		s.jsonError(w, http.StatusForbidden, "not authorised for this app's logs")
 		return
 	}
 

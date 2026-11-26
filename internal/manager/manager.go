@@ -211,6 +211,9 @@ type Server struct {
 	// holderResourcesOf overrides the host → (container, declared resource
 	// count) lookup for the holder paths (tests only).
 	holderResourcesOf func(host string) (string, int)
+	// freezeStateOf overrides the container → FreezeState lookup for the
+	// logs owner gate (tests only).
+	freezeStateOf func(name string) launcher.FreezeState
 	server  *http.Server
 	// registry persists every successful Load so the manager can replay
 	// them on restart. nil when Config.RegistryPath is empty.
@@ -550,7 +553,9 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("GET /api/v1/api-fees", s.requireAuth(s.handleAPIFees))
 	mux.HandleFunc("GET /api/v1/eventlog", s.requireAuth(s.handleEventLog))
 	// Tail of a container's captured stdout/stderr ring (see container_logs.go).
-	mux.HandleFunc("GET /api/v1/containers/{name}/logs", s.requireAuth(s.handleContainerLogs))
+	// The app's owner or admin only (the configure gate's check), never a
+	// platform role: see handleContainerLogs.
+	mux.HandleFunc("GET /api/v1/containers/{name}/logs", s.handleContainerLogs)
 	mux.Handle("GET /metrics", s.requireAuth(s.handleMetrics))
 
 	// Mutating endpoints (require manager role).

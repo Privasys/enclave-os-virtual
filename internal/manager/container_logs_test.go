@@ -1,7 +1,6 @@
 package manager
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,16 +8,15 @@ import (
 	"strings"
 	"testing"
 
-	"go.uber.org/zap"
-
-	"github.com/Privasys/enclave-os-virtual/internal/auth"
+	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 )
 
-func logsRequest(t *testing.T, s *Server, target, role string) *httptest.ResponseRecorder {
+func logsRequest(t *testing.T, s *Server, target, bearer string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, target, nil)
-	req = req.WithContext(context.WithValue(req.Context(), authResultKey,
-		&auth.AuthResult{Source: "oidc", Role: role}))
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
 	// Route through a mux so PathValue("name") is populated as in production.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/containers/{name}/logs", s.handleContainerLogs)
@@ -41,7 +39,12 @@ func TestHandleContainerLogs(t *testing.T) {
 	writeFile("stderr.log.1", "older ")
 	writeFile("stderr.log", "newer")
 
-	s := &Server{log: zap.NewNop()}
+	// Only the app's owner or admin reads its logs (the configure gate's check).
+	s, iss := newIdentityServer(t)
+	const appID = "cf7a0d58-5468-4168-84c3-41ebe0ce4025"
+	s.freezeStateOf = func(string) launcher.FreezeState { return launcher.FreezeState{AppID: appID} }
+	owner := iss.token(t, "owner-1", "enclave-os-virtual", map[string]any{"roles": []string{"enclave-os-virtual:app:cf7a0d585468416884c341ebe0ce4025:owner"}})
+	staff := iss.token(t, "staff-1", "enclave-os-virtual", map[string]any{"roles": []string{"enclave-os-virtual:monitoring", "enclave-os-virtual:manager", "enclave-os-virtual:admin"}})
 	s.logPathsFn = func(name, stream string) []string {
 		if name != "drive" {
 			return []string{filepath.Join(dir, "absent", stream+".log")}
@@ -53,7 +56,7 @@ func TestHandleContainerLogs(t *testing.T) {
 	}
 
 	// Happy path: rotated + active concatenated in order.
-	rec := logsRequest(t, s, "/api/v1/containers/drive/logs?stream=stderr", "monitoring")
+	rec := logsRequest(t, s, "/api/v1/containers/drive/logs?stream=stderr", owner)
 	if rec.Code != http.StatusOK || rec.Body.String() != "older newer" {
 		t.Fatalf("got %d %q, want 200 %q", rec.Code, rec.Body.String(), "older newer")
 	}
@@ -62,19 +65,19 @@ func TestHandleContainerLogs(t *testing.T) {
 	}
 
 	// tail_bytes trims from the front.
-	rec = logsRequest(t, s, "/api/v1/containers/drive/logs?stream=stderr&tail_bytes=5", "manager")
+	rec = logsRequest(t, s, "/api/v1/containers/drive/logs?stream=stderr&tail_bytes=5", owner)
 	if rec.Code != http.StatusOK || rec.Body.String() != "newer" {
 		t.Fatalf("tail: got %d %q, want 200 %q", rec.Code, rec.Body.String(), "newer")
 	}
 
 	// Default stream is stderr.
-	rec = logsRequest(t, s, "/api/v1/containers/drive/logs", "monitoring")
+	rec = logsRequest(t, s, "/api/v1/containers/drive/logs", owner)
 	if rec.Code != http.StatusOK || rec.Body.String() != "older newer" {
 		t.Fatalf("default stream: got %d %q", rec.Code, rec.Body.String())
 	}
 
 	// No captured files at all -> 404.
-	rec = logsRequest(t, s, "/api/v1/containers/ghost/logs", "monitoring")
+	rec = logsRequest(t, s, "/api/v1/containers/ghost/logs", owner)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("missing logs: got %d, want 404", rec.Code)
 	}
@@ -85,20 +88,22 @@ func TestHandleContainerLogs(t *testing.T) {
 		"/api/v1/containers/drive/logs?tail_bytes=-1",
 		"/api/v1/containers/drive/logs?tail_bytes=x",
 	} {
-		if rec = logsRequest(t, s, target, "monitoring"); rec.Code != http.StatusBadRequest {
+		if rec = logsRequest(t, s, target, owner); rec.Code != http.StatusBadRequest {
 			t.Fatalf("%s: got %d, want 400", target, rec.Code)
 		}
 	}
 
 	// Path-escaping names are rejected before touching the filesystem.
-	rec = logsRequest(t, s, "/api/v1/containers/"+`..%2Fother`+"/logs", "monitoring")
+	rec = logsRequest(t, s, "/api/v1/containers/"+`..%2Fother`+"/logs", owner)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("traversal name: got %d, want 400", rec.Code)
 	}
 
-	// A role with no monitoring access is refused.
-	rec = logsRequest(t, s, "/api/v1/containers/drive/logs", "none")
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("role gate: got %d, want 403", rec.Code)
+	// A platform role (monitoring, manager, staff admin) is NOT enough: the
+	// platform never reads an app's output. Nor is no token at all.
+	for name, tok := range map[string]string{"staff": staff, "none": ""} {
+		if rec = logsRequest(t, s, "/api/v1/containers/drive/logs", tok); rec.Code != http.StatusForbidden {
+			t.Fatalf("%s: got %d, want 403", name, rec.Code)
+		}
 	}
 }
