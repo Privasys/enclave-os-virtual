@@ -531,7 +531,15 @@ func reservedExtensionOID(oid asn1.ObjectIdentifier) bool {
 // fetchContainerExtensions calls GET <upstream>/.well-known/attestation-extensions
 // and parses the response as a JSON array of extensionEntry objects.
 func fetchContainerExtensions(upstream string) ([]pkix.Extension, error) {
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{
+		Timeout: 2 * time.Second,
+		// Never follow a redirect: the workload answers this request, and a
+		// 3xx would send Caddy to any address it can reach (its own admin
+		// API, the manager on loopback, a metadata endpoint), whose bytes
+		// would then be written into a certificate. A redirect is a non-200
+		// answer: no extensions.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	resp, err := client.Get(upstream + "/.well-known/attestation-extensions")
 	if err != nil {
 		return nil, fmt.Errorf("GET attestation-extensions: %w", err)
