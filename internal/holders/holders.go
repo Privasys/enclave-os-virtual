@@ -157,20 +157,36 @@ func ensureEncryptFeature(device string) error {
 }
 
 // Create makes a holder's folder under an enabled volume and binds it to
-// rawKey: the key is loaded, the folder created, the policy set. A folder
-// that already exists must carry a policy for this very key; a different
-// key is refused rather than silently opening nothing. Returns the kernel's
-// identifier of the key (16 bytes, hex), which the policy carries.
-func Create(mount, holderKey string, rawKey []byte) (keyID string, err error) {
+// rawKey: the folder is created, guard runs, then the key is loaded and the
+// policy set. A folder that already exists must carry a policy for this very
+// key; a different key is refused rather than silently opening nothing.
+// Returns the kernel's identifier of the key (16 bytes, hex), which the
+// policy carries.
+//
+// guard (may be nil) runs once the folder exists and BEFORE its key is
+// loaded: the manager makes the container's view of the folder read-only
+// there, so a read-only grant never has a writable window. Anything written
+// into a new folder before guard ran makes the policy fail (an encryption
+// policy needs an empty directory), so the create fails closed.
+func Create(mount, holderKey string, rawKey []byte, guard func() error) (keyID string, err error) {
 	if !ValidHolderKey(holderKey) {
 		return "", errors.New("holders: invalid holder key")
 	}
-	id, err := AddKey(mount, rawKey)
-	if err != nil {
-		return "", err
+	runGuard := func() error {
+		if guard == nil {
+			return nil
+		}
+		return guard()
 	}
 	folder := FolderPath(mount, holderKey)
 	if fi, statErr := os.Stat(folder); statErr == nil && fi.IsDir() {
+		if err := runGuard(); err != nil {
+			return "", err
+		}
+		id, err := AddKey(mount, rawKey)
+		if err != nil {
+			return "", err
+		}
 		have, pErr := policyIdentifier(folder)
 		if pErr != nil {
 			return "", pErr
@@ -181,9 +197,17 @@ func Create(mount, holderKey string, rawKey []byte) (keyID string, err error) {
 		return id, nil
 	}
 	dir := filepath.Join(mount, Dir)
+	var id string
 	err = withMutableDir(dir, func() error {
 		if err := os.Mkdir(folder, 0o700); err != nil {
 			return err
+		}
+		if err := runGuard(); err != nil {
+			return err
+		}
+		var aErr error
+		if id, aErr = AddKey(mount, rawKey); aErr != nil {
+			return aErr
 		}
 		return setPolicy(folder, id)
 	})

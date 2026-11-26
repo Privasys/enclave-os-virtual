@@ -221,10 +221,11 @@ type Server struct {
 	// freezeStateOf overrides the container → FreezeState lookup for the
 	// logs owner gate (tests only).
 	freezeStateOf func(name string) launcher.FreezeState
-	// holderBind and holderOpenFn replace the holder-folder mount and key
-	// operations (tests only).
-	holderBind   func(dir string, readOnly bool) error
-	holderOpenFn func(mount, holderKey string, raw []byte, hostUID int) (string, error)
+	// holderBind, holderLoadFn and holderCloseFn replace the holder-folder
+	// mount and key operations (tests only).
+	holderBind    func(dir string, readOnly bool) error
+	holderLoadFn  func(mount, holderKey string, raw []byte, hostUID int, create bool, guard func() error) (string, error)
+	holderCloseFn func(mount, holderKey, keyID string)
 	server  *http.Server
 	// registry persists every successful Load so the manager can replay
 	// them on restart. nil when Config.RegistryPath is empty.

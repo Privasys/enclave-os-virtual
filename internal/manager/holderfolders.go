@@ -359,17 +359,36 @@ func (s *Server) mintHolderCapability(w http.ResponseWriter, r *http.Request, co
 		unattended = unattended && *body.Setup.Unattended
 	}
 	holderKey := holderKeyFor(appID, sub)
-	keyID, err := holders.Create(hf.Mount, holderKey, raw)
+	_, wasOpen := s.holdersOpen.get(grantKey(appID, p.resource, sub))
+	// The grant records exactly the ask's permission set (resolveHolder), so
+	// the folder is unlocked in that mode now: read-only is bound before the
+	// key loads, as on every other open.
+	keyID, readOnly, err := s.unlockHolderFolder(hf, holderKey, p.Capability.Permissions, raw, -1, true)
+	if errors.Is(err, errHolderAccess) {
+		s.jsonError(w, http.StatusForbidden, err.Error())
+		return
+	}
 	if err != nil {
 		s.log.Error("holder folder create", zap.String("container", container), zap.Error(err))
 		s.jsonError(w, http.StatusInternalServerError, "the folder could not be created")
 		return
+	}
+	// A mint that fails after the unlock locks the folder again: no folder
+	// stays open without a grant the manager tracks.
+	// (A folder that was already open before this mint is left as it was.)
+	relock := func() {
+		if wasOpen {
+			return
+		}
+		_, _, _ = holders.Close(hf.Mount, holderKey, keyID)
+		s.releaseHolderBind(hf, holderKey)
 	}
 	capID := newCapabilityID()
 	wrapped := ""
 	if unattended {
 		wrapped, err = wrapKey(hf.WrapKey, raw, holderKey+"|"+capID)
 		if err != nil {
+			relock()
 			s.jsonError(w, http.StatusInternalServerError, "the key could not be wrapped")
 			return
 		}
@@ -377,14 +396,16 @@ func (s *Server) mintHolderCapability(w http.ResponseWriter, r *http.Request, co
 	containerPath := path.Join(holderContainerMount, holders.Dir, holderKey)
 	_, g, err := s.caps.resolveHolder(body.Nonce, capID, map[string]string{"path": containerPath}, holderKey, keyID, wrapped, unattended)
 	if err != nil {
+		relock()
 		s.jsonError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	// The mint loaded the key: the folder is open, owned by root until the
 	// app's first open names a uid.
-	s.holdersOpen.set(grantKey(appID, p.resource, sub), holderOpenState{KeyID: keyID, HostUID: -1, OpenedAt: time.Now().UTC()})
+	s.holdersOpen.set(grantKey(appID, p.resource, sub), holderOpenState{KeyID: keyID, HostUID: -1, OpenedAt: time.Now().UTC(), ReadOnly: readOnly})
 	s.log.Info("holder folder minted", zap.String("container", container), zap.String("resource", p.resource),
-		zap.String("holder", holderKey), zap.Bool("unattended", unattended), zap.String("capability_id", capID))
+		zap.String("holder", holderKey), zap.Bool("unattended", unattended), zap.Bool("read_only", readOnly),
+		zap.String("capability_id", capID))
 	s.events.emit(container, resourceEvent{Type: "capability.approved", Resource: p.resource, Subject: sub, CapabilityID: capID})
 	s.writeJSON(w, http.StatusCreated, map[string]any{
 		"capability_id":  capID,
@@ -619,7 +640,7 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusInternalServerError, "the stored key could not be unwrapped")
 		return
 	}
-	keyID, readOnly, err := s.openHolderFolder(hf, g, raw, hostUID)
+	keyID, readOnly, err := s.unlockHolderFolder(hf, g.HolderKey, g.Permissions, raw, hostUID, false)
 	zeroBytes(raw)
 	if errors.Is(err, errHolderAccess) {
 		s.jsonError(w, http.StatusForbidden, err.Error())

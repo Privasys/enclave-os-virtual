@@ -50,25 +50,38 @@ func (s *Server) unbindHolder(dir string) error {
 	return holders.Unbind(dir)
 }
 
-// openHolderFolder loads g's key with the folder in the mode its grant
-// allows: for read-only, the read-only bind first, undone if the key then
-// fails to load (fail closed: no folder).
-func (s *Server) openHolderFolder(hf launcher.HolderFolders, g *capabilityGrant, raw []byte, hostUID int) (keyID string, readOnly bool, err error) {
-	readOnly, err = holderReadOnly(g.Permissions)
+// unlockHolderFolder is the ONLY way a holder folder becomes unlocked: the
+// wallet's mint (create), the app's open, the runtime's own file access and
+// any reopen after a restart all come here (a source test enforces it). It
+// decides the mode from what the holder approved; for read-only it makes the
+// container's view of the folder read-only BEFORE the key is loaded, and
+// undoes the bind if the key then fails to load (fail closed: no folder).
+// A writable grant removes any earlier read-only bind first.
+func (s *Server) unlockHolderFolder(hf launcher.HolderFolders, holderKey string, perms []string, raw []byte, hostUID int, create bool) (keyID string, readOnly bool, err error) {
+	readOnly, err = holderReadOnly(perms)
 	if err != nil {
 		return "", false, err
 	}
-	exposed := holders.FolderPath(hf.Exposed, g.HolderKey)
-	if readOnly {
-		if err := s.bindReadOnly(exposed); err != nil {
-			return "", true, err
-		}
-	} else if err := s.unbindHolder(exposed); err != nil {
-		return "", false, err
-	}
-	keyID, err = s.holderOpen(hf.Mount, g.HolderKey, raw, hostUID)
-	if err != nil {
+	exposed := holders.FolderPath(hf.Exposed, holderKey)
+	guarded := false
+	guard := func() error {
+		guarded = true
 		if readOnly {
+			return s.bindReadOnly(exposed)
+		}
+		return s.unbindHolder(exposed)
+	}
+	keyID, err = s.holderLoad(hf.Mount, holderKey, raw, hostUID, create, guard)
+	if err == nil && !guarded {
+		// A loader that never ran the guard must not leave a folder open in
+		// a mode nobody checked: the key it loaded is removed again, and any
+		// bind released, before the refusal.
+		s.holderClose(hf.Mount, holderKey, keyID)
+		_ = s.unbindHolder(exposed)
+		return "", readOnly, errors.New("holders: the folder was unlocked without its access guard")
+	}
+	if err != nil {
+		if readOnly && guarded {
 			_ = s.unbindHolder(exposed)
 		}
 		return "", readOnly, err
@@ -76,10 +89,26 @@ func (s *Server) openHolderFolder(hf launcher.HolderFolders, g *capabilityGrant,
 	return keyID, readOnly, nil
 }
 
-// holderOpen is holders.Open (tests replace it).
-func (s *Server) holderOpen(mount, holderKey string, raw []byte, hostUID int) (string, error) {
-	if s.holderOpenFn != nil {
-		return s.holderOpenFn(mount, holderKey, raw, hostUID)
+// holderClose removes a holder's key (tests replace it).
+func (s *Server) holderClose(mount, holderKey, keyID string) {
+	if s.holderCloseFn != nil {
+		s.holderCloseFn(mount, holderKey, keyID)
+		return
+	}
+	_, _, _ = holders.Close(mount, holderKey, keyID)
+}
+
+// holderLoad creates (mint) or opens the folder, running guard after the
+// folder exists and before its key is loaded. Tests replace it.
+func (s *Server) holderLoad(mount, holderKey string, raw []byte, hostUID int, create bool, guard func() error) (string, error) {
+	if s.holderLoadFn != nil {
+		return s.holderLoadFn(mount, holderKey, raw, hostUID, create, guard)
+	}
+	if create {
+		return holders.Create(mount, holderKey, raw, guard)
+	}
+	if err := guard(); err != nil {
+		return "", err
 	}
 	return holders.Open(mount, holderKey, raw, hostUID)
 }

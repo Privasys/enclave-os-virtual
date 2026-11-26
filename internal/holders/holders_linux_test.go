@@ -77,11 +77,11 @@ func TestHolderFoldersOnALoopDevice(t *testing.T) {
 	holderB := strings.Repeat("b", 32)
 	keyA, _ := NewRawKey()
 	keyB, _ := NewRawKey()
-	idA, err := Create(mount, holderA, keyA)
+	idA, err := Create(mount, holderA, keyA, nil)
 	if err != nil {
 		t.Fatalf("create A: %v", err)
 	}
-	if _, err := Create(mount, holderB, keyB); err != nil {
+	if _, err := Create(mount, holderB, keyB, nil); err != nil {
 		t.Fatalf("create B: %v", err)
 	}
 	secret := filepath.Join(FolderPath(mount, holderA), "notes.md")
@@ -92,10 +92,10 @@ func TestHolderFoldersOnALoopDevice(t *testing.T) {
 		t.Fatalf("write in B: %v", err)
 	}
 	// The same key again is the same identifier, another key is refused.
-	if id2, err := Create(mount, holderA, keyA); err != nil || id2 != idA {
+	if id2, err := Create(mount, holderA, keyA, nil); err != nil || id2 != idA {
 		t.Fatalf("create A again: %v %q", err, id2)
 	}
-	if _, err := Create(mount, holderA, keyB); err == nil {
+	if _, err := Create(mount, holderA, keyB, nil); err == nil {
 		t.Fatal("a folder must not accept another key")
 	}
 
