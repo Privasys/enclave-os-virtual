@@ -69,8 +69,12 @@ func (s *Server) handleToolSpec(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Set("Authorization", "Bearer "+s.cfg.EnclaveToken)
 	if s.cfg.EnclaveSigner != nil {
+		// Fail closed: the platform checks the attested signature, and the
+		// bare credential must never stand in for it.
 		if err := s.cfg.EnclaveSigner.Sign(req, nil); err != nil {
-			s.log.Warn("tool-spec: attested auth unavailable, sending credential only", zap.Error(err))
+			s.log.Warn("tool-spec: attested auth unavailable; not sent", zap.Error(err))
+			s.jsonError(w, http.StatusServiceUnavailable, "tool spec cannot be attested right now; retry shortly")
+			return
 		}
 	}
 

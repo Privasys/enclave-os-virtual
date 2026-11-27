@@ -78,8 +78,12 @@ func (s *Server) relayUsageFor(w http.ResponseWriter, r *http.Request, name, app
 	req.Header.Set(appIDHeader, appID)
 	req.Header.Set("Authorization", "Bearer "+s.cfg.EnclaveToken)
 	if s.cfg.EnclaveSigner != nil {
+		// Fail closed: the platform checks the attested signature, and the
+		// bare credential must never stand in for it.
 		if err := s.cfg.EnclaveSigner.Sign(req, body); err != nil {
-			s.log.Warn("usage: attested auth unavailable, sending credential only", zap.Error(err))
+			s.log.Warn("usage: attested auth unavailable; not sent", zap.Error(err))
+			s.jsonError(w, http.StatusServiceUnavailable, "usage cannot be attested right now; retry shortly")
+			return
 		}
 	}
 	resp, err := (&http.Client{Timeout: usageTimeout}).Do(req)
