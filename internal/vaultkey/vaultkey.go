@@ -228,6 +228,14 @@ func decodeShare(payload []byte) (string, *vault.Share, error) {
 	return hex.EncodeToString(payload[:generationSize]), s, nil
 }
 
+// decodeRawShare reads an owner's secret share: the plain share the owner's
+// CreateKeyShares writes, with no generation prefix, so every share is one
+// group.
+func decodeRawShare(payload []byte) (string, *vault.Share, error) {
+	s, err := vault.ShareFromBytes(payload)
+	return "", s, err
+}
+
 // bestGroup picks the largest same-generation share group meeting the
 // threshold. Pure; unit-tested.
 func bestGroup(byGen map[string][]*vault.Share, threshold int) []*vault.Share {
@@ -266,14 +274,15 @@ type collected struct {
 }
 
 // collect exports this vault's share of handle from every endpoint. Never
-// creates anything.
-func collect(ctx context.Context, log *zap.Logger, cfg Config, opts vault.DialOptions, handle string) collected {
+// creates anything. decode splits a share's payload into its generation and
+// share: decodeShare for a volume DEK, decodeRawShare for an owner's secret.
+func collect(ctx context.Context, log *zap.Logger, cfg Config, opts vault.DialOptions, handle string, decode func([]byte) (string, *vault.Share, error)) collected {
 	c := collected{byGen: make(map[string][]*vault.Share)}
 	for _, ep := range cfg.Endpoints {
 		material, err := exportFrom(ctx, ep, opts, handle)
 		switch {
 		case err == nil:
-			gen, share, derr := decodeShare(material)
+			gen, share, derr := decode(material)
 			if derr != nil {
 				log.Warn("undecodable share", zap.String("vault", ep), zap.Error(derr))
 				continue
@@ -319,7 +328,7 @@ func (c collected) reconstruct(threshold int) (string, bool, error) {
 // absent is true only when every vault reports the handle absent or deleted
 // (a retire that already ran). Never use absent to decide a create.
 func rebuild(ctx context.Context, log *zap.Logger, cfg Config, opts vault.DialOptions, handle string) (dekHex string, absent bool, err error) {
-	got := collect(ctx, log, cfg, opts, handle)
+	got := collect(ctx, log, cfg, opts, handle, decodeShare)
 	dekHex, ok, err := got.reconstruct(cfg.threshold())
 	switch {
 	case err != nil:
@@ -355,7 +364,7 @@ func resolveOrProvision(ctx context.Context, log *zap.Logger, cfg Config, handle
 	}
 
 	// ---- Phase 1: try to collect existing shares -----------------------
-	got := collect(ctx, log, cfg, opts, handle)
+	got := collect(ctx, log, cfg, opts, handle, decodeShare)
 	byGen, notFound, denied, lastErr := got.byGen, got.notFound, got.denied, got.lastErr
 	if dekHex, ok, err := got.reconstruct(cfg.threshold()); err != nil {
 		return "", "", false, err
@@ -488,30 +497,8 @@ func Export(ctx context.Context, log *zap.Logger, cfg Config, handle string, ima
 		return nil, err
 	}
 
-	var shares []*vault.Share
-	denied, notFound := 0, 0
-	var lastErr error
-	for _, ep := range cfg.Endpoints {
-		material, err := exportFrom(ctx, ep, opts, handle)
-		switch {
-		case err == nil:
-			s, derr := vault.ShareFromBytes(material)
-			if derr != nil {
-				log.Warn("undecodable share", zap.String("vault", ep), zap.Error(derr))
-				continue
-			}
-			shares = append(shares, s)
-		case strings.Contains(err.Error(), "key not found"):
-			notFound++
-		case strings.Contains(err.Error(), "policy.principals"):
-			// The key exists but this measurement is not in its policy.
-			denied++
-		default:
-			lastErr = err
-			log.Warn("vault unavailable", zap.String("vault", ep), zap.Error(err))
-		}
-	}
-
+	got := collect(ctx, log, cfg, opts, handle, decodeRawShare)
+	shares := got.byGen[""]
 	if len(shares) >= cfg.threshold() {
 		secret, err := vault.ShamirReconstruct(shares[:cfg.threshold()])
 		if err != nil {
@@ -520,13 +507,16 @@ func Export(ctx context.Context, log *zap.Logger, cfg Config, handle string, ima
 		log.Info("secret reconstructed from constellation", zap.Int("shares", len(shares)))
 		return secret, nil
 	}
-	if denied > 0 {
-		return nil, fmt.Errorf("vaultkey: key %q exists but this measurement is not authorised to export it (%d/%d vaults denied on policy) — the owner must grant this manager measurement ExportKey on the credential", handle, denied, len(cfg.Endpoints))
+	if got.denied > 0 {
+		return nil, fmt.Errorf("vaultkey: key %q exists but this measurement is not authorised to export it (%d/%d vaults denied on policy) — the owner must grant this manager measurement ExportKey on the credential", handle, got.denied, len(cfg.Endpoints))
 	}
-	if notFound == len(cfg.Endpoints) {
+	if got.deleted > 0 {
+		return nil, fmt.Errorf("vaultkey: credential %q was deleted on %d of %d vaults — register a new one before deploying", handle, got.deleted, len(cfg.Endpoints))
+	}
+	if got.notFound == len(cfg.Endpoints) {
 		return nil, fmt.Errorf("vaultkey: credential %q does not exist on the constellation — register it before deploying", handle)
 	}
-	return nil, fmt.Errorf("vaultkey: only %d of %d usable shares (threshold %d); last error: %v", len(shares), len(cfg.Endpoints), cfg.threshold(), lastErr)
+	return nil, fmt.Errorf("vaultkey: only %d of %d usable shares (threshold %d); last error: %v", len(shares), len(cfg.Endpoints), cfg.threshold(), got.lastErr)
 }
 
 // vaultConn is the part of a vault session this package uses; tests fake it.

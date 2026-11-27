@@ -510,3 +510,35 @@ func TestMoveRefusesSourcesDisagreeingOnTheShape(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// Export reads an owner's secret (plain shares, no generation prefix) through
+// the same collection as a DEK: the secret comes back whole, a deleted
+// credential is named as deleted, an absent one as absent.
+func TestExportUsesTheSharedCollection(t *testing.T) {
+	secret := []byte("registry-credential-for-tests")
+	vs := map[string]*fakeVault{"a": source("m1"), "b": source("m2"), "c": source("m3")}
+	fleet(t, vs)
+	shares, err := vault.ShamirSplit(secret, 2, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, ep := range []string{"a", "b", "c"} {
+		vs[ep].shares["cred"] = vault.ShareToBytes(shares[i])
+	}
+	c := cfgOf("a", "b", "c")
+	got, err := Export(context.Background(), zap.NewNop(), c, "cred", nil, nil)
+	if err != nil || !bytes.Equal(got, secret) {
+		t.Fatalf("export: %q %v", got, err)
+	}
+
+	for _, v := range vs {
+		v.tombstones = true
+		v.deleted = map[string]bool{"cred": true}
+	}
+	if _, err := Export(context.Background(), zap.NewNop(), c, "cred", nil, nil); err == nil || !strings.Contains(err.Error(), "was deleted") {
+		t.Fatalf("a deleted credential: %v", err)
+	}
+	if _, err := Export(context.Background(), zap.NewNop(), c, "none", nil, nil); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("an absent credential: %v", err)
+	}
+}
