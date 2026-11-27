@@ -196,27 +196,6 @@ func Extension(oid asn1.ObjectIdentifier, value []byte) pkix.Extension {
 	return pkix.Extension{Id: oid, Critical: false, Value: value}
 }
 
-// PlatformExtensions returns the extensions of the platform (non-workload)
-// leaf. dekOrigin and attestationServersHash are optional; enclaveID (16
-// bytes) is stamped when known.
-func PlatformExtensions(merkleRoot, runtimeVersionHash, combinedWorkloadsHash [32]byte, dekOrigin string, attestationServersHash *[32]byte, enclaveID []byte) []pkix.Extension {
-	exts := []pkix.Extension{
-		Extension(ConfigMerkleRoot, merkleRoot[:]),
-		Extension(RuntimeVersionHash, runtimeVersionHash[:]),
-		Extension(CombinedWorkloadsHash, combinedWorkloadsHash[:]),
-	}
-	if dekOrigin != "" {
-		exts = append(exts, Extension(DataEncryptionKeyOrigin, []byte(dekOrigin)))
-	}
-	if attestationServersHash != nil {
-		exts = append(exts, Extension(AttestationServersHash, attestationServersHash[:]))
-	}
-	if len(enclaveID) == 16 {
-		exts = append(exts, Extension(EnclaveInstanceID, enclaveID))
-	}
-	return exts
-}
-
 // ContainerExtensions returns the workload extensions of a per-container leaf.
 // keySource may be empty to omit 6.1; storage empty omits 6.2; appID (raw
 // 16-byte UUID) empty omits 4.1. App-defined 5.4.* extensions are pulled

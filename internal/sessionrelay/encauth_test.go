@@ -347,3 +347,10 @@ func bytes32(v byte) []byte {
 	}
 	return out
 }
+
+// JWKSResolverFunc is a function adapter for JWKSResolver.
+type JWKSResolverFunc func(ctx context.Context, kid string) (*ecdsa.PublicKey, error)
+
+func (f JWKSResolverFunc) PublicKey(ctx context.Context, kid string) (*ecdsa.PublicKey, error) {
+	return f(ctx, kid)
+}

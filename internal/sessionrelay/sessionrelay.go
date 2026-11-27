@@ -1237,29 +1237,3 @@ func (w *sealedRespWriter) finalize() {
 	w.outer.WriteHeader(http.StatusOK)
 	_, _ = w.outer.Write(enc)
 }
-
-// -----------------------------------------------------------------------------
-// capturing http.ResponseWriter (legacy; kept for tests that pre-date the
-// streaming writer)
-// -----------------------------------------------------------------------------
-
-type capturingWriter struct {
-	header http.Header
-	body   bytes.Buffer
-	status int
-}
-
-func newCapturingWriter() *capturingWriter {
-	return &capturingWriter{header: make(http.Header), status: http.StatusOK}
-}
-
-func (c *capturingWriter) Header() http.Header { return c.header }
-
-func (c *capturingWriter) WriteHeader(code int) { c.status = code }
-
-func (c *capturingWriter) Write(p []byte) (int, error) {
-	if c.status == 0 {
-		c.status = http.StatusOK
-	}
-	return c.body.Write(p)
-}

@@ -6,6 +6,7 @@
 package holders
 
 import (
+	"crypto/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -133,17 +134,13 @@ func TestHolderFoldersOnALoopDevice(t *testing.T) {
 	if st, _, err := Close(mount, holderA, idA); err != nil || st != Absent {
 		t.Fatalf("close after release: %v %v", st, err)
 	}
+}
 
-	// Delete without the key.
-	if err := Delete(mount, holderA); err != nil {
-		t.Fatalf("delete locked: %v", err)
+// NewRawKey returns a fresh 64-byte key (the wallet generates a holder's key).
+func NewRawKey() ([]byte, error) {
+	k := make([]byte, RawKeySize)
+	if _, err := rand.Read(k); err != nil {
+		return nil, err
 	}
-	if _, err := os.Stat(FolderPath(mount, holderA)); err == nil {
-		t.Fatal("folder must be gone")
-	}
-	// The app (no LINUX_IMMUTABLE) could not have done that: holders/ stays
-	// immutable after our own write.
-	if err := os.Mkdir(filepath.Join(mount, Dir, strings.Repeat("c", 32)), 0o700); err == nil {
-		t.Fatal("holders/ must be immutable again")
-	}
+	return k, nil
 }

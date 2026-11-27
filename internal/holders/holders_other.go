@@ -6,7 +6,6 @@
 package holders
 
 import (
-	"crypto/rand"
 	"errors"
 	"path/filepath"
 )
@@ -26,18 +25,6 @@ const (
 	Present
 	IncompletelyRemoved
 )
-
-func (s Status) String() string {
-	switch s {
-	case Absent:
-		return "absent"
-	case Present:
-		return "present"
-	case IncompletelyRemoved:
-		return "incompletely_removed"
-	}
-	return "unknown"
-}
 
 var ErrBusy = errors.New("holders: files in use, key incompletely removed")
 
@@ -66,18 +53,9 @@ func Open(mount, holderKey string, rawKey []byte, hostUID int) (string, error) {
 }
 func Close(mount, holderKey, keyID string) (Status, []int, error) { return 0, nil, errUnsupported }
 func KeyStatus(mount, keyID string) (Status, error)               { return 0, errUnsupported }
-func Delete(mount, holderKey string) error                        { return errUnsupported }
 func Usage(mount, holderKey string) (int64, error)                { return 0, errUnsupported }
 func Chown(mount, holderKey string, hostUID int) error            { return errUnsupported }
 func AddKey(mount string, rawKey []byte) (string, error)          { return "", errUnsupported }
-
-func NewRawKey() ([]byte, error) {
-	k := make([]byte, RawKeySize)
-	if _, err := rand.Read(k); err != nil {
-		return nil, err
-	}
-	return k, nil
-}
 
 // EnsureView, BindReadOnly and Unbind are Linux-only (see mounts_linux.go).
 func EnsureView(src, view string) error { return errors.New("holders: not supported on this OS") }

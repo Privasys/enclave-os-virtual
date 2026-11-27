@@ -1,66 +1,17 @@
-// Package manifest defines the workload manifest format for Enclave OS
-// Virtual. The manifest describes which OCI containers to run, their
-// configuration, and how they map to RA-TLS hostnames.
-//
-// The manifest is the primary input to the platform Config Merkle Tree —
-// every field that affects container behaviour is measured and attested.
-//
-// # Manifest location
-//
-// The workload launcher reads the manifest from (in priority order):
-//  1. Path specified via --manifest flag
-//  2. /data/manifest.yaml (on the LUKS-encrypted data partition)
-//  3. GCP instance metadata key "enclave-os-manifest" (base64-encoded)
-//
-// # Security model
-//
-// The manifest IS the authorization for what runs inside the VM. It is
-// measured into the Config Merkle Tree, which is embedded in every RA-TLS
-// certificate. Changing the manifest changes the Merkle root, causing
-// clients pinning a known-good root to reject the connection.
+// Package manifest defines a container workload as the launcher loads it,
+// and the per-container Config Merkle Tree measured into its RA-TLS
+// certificate: every field that affects the container's behaviour is
+// measured and attested.
 package manifest
 
 import (
 	"crypto/sha256"
-	"fmt"
-	"os"
 	"sort"
 
 	ratls "enclave-os-mini/clients/go/ratls"
 
 	"github.com/Privasys/enclave-os-virtual/internal/merkle"
-	"gopkg.in/yaml.v3"
 )
-
-// Manifest is the top-level workload configuration.
-type Manifest struct {
-	// Version is the manifest schema version. Currently "1".
-	Version string `yaml:"version"`
-
-	// Platform contains platform-wide settings.
-	Platform Platform `yaml:"platform"`
-
-	// Containers is the list of OCI containers to run.
-	Containers []Container `yaml:"containers"`
-}
-
-// Platform contains platform-level configuration.
-type Platform struct {
-	// Hostname is the VM's primary FQDN for the management API
-	// (e.g. "v-fr-1.example.com").
-	Hostname string `yaml:"hostname"`
-
-	// CACertPath is the path to the PEM-encoded intermediary CA certificate.
-	CACertPath string `yaml:"ca_cert"`
-
-	// CAKeyPath is the path to the PEM-encoded intermediary CA private key.
-	CAKeyPath string `yaml:"ca_key"`
-
-	// AttestationServers is a list of attestation server URLs for remote
-	// quote verification.  The list is hashed (sorted, newline-joined)
-	// and published as OID 2.7 for verifier transparency.
-	AttestationServers []string `yaml:"attestation_servers"`
-}
 
 // Container defines a single OCI container workload.
 type Container struct {
@@ -183,103 +134,6 @@ type HealthCheck struct {
 	// (probe indefinitely; the prior behaviour). Not part of the measured
 	// config (see ContainerMerkleTree), so it never changes attestation.
 	ReadinessTimeoutSeconds int `yaml:"readiness_timeout_seconds,omitempty" json:"readiness_timeout_seconds,omitempty"`
-}
-
-// Load reads and parses a manifest from the given YAML file path.
-func Load(path string) (*Manifest, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("manifest: failed to read %q: %w", path, err)
-	}
-	return Parse(data)
-}
-
-// Parse parses a manifest from raw YAML bytes.
-func Parse(data []byte) (*Manifest, error) {
-	var m Manifest
-	if err := yaml.Unmarshal(data, &m); err != nil {
-		return nil, fmt.Errorf("manifest: failed to parse YAML: %w", err)
-	}
-	if err := m.Validate(); err != nil {
-		return nil, err
-	}
-	return &m, nil
-}
-
-// Validate checks the manifest for required fields and consistency.
-func (m *Manifest) Validate() error {
-	if m.Version != "1" {
-		return fmt.Errorf("manifest: unsupported version %q (expected \"1\")", m.Version)
-	}
-	if m.Platform.CACertPath == "" {
-		return fmt.Errorf("manifest: platform.ca_cert is required")
-	}
-	if m.Platform.CAKeyPath == "" {
-		return fmt.Errorf("manifest: platform.ca_key is required")
-	}
-
-	names := make(map[string]bool)
-	hostnames := make(map[string]bool)
-	for i, c := range m.Containers {
-		if c.Name == "" {
-			return fmt.Errorf("manifest: containers[%d].name is required", i)
-		}
-		if names[c.Name] {
-			return fmt.Errorf("manifest: duplicate container name %q", c.Name)
-		}
-		names[c.Name] = true
-
-		if c.Image == "" {
-			return fmt.Errorf("manifest: containers[%d] (%s).image is required", i, c.Name)
-		}
-
-		if c.Hostname != "" {
-			if hostnames[c.Hostname] {
-				return fmt.Errorf("manifest: duplicate hostname %q", c.Hostname)
-			}
-			hostnames[c.Hostname] = true
-		}
-
-		if c.Port <= 0 || c.Port > 65535 {
-			return fmt.Errorf("manifest: containers[%d] (%s).port must be 1-65535, got %d", i, c.Name, c.Port)
-		}
-	}
-	return nil
-}
-
-// PlatformMerkleTree computes the platform-wide Config Merkle Tree from
-// the manifest, CA certificate, and resolved container image digests.
-//
-// imageDigests maps container name → resolved SHA-256 digest bytes.
-func (m *Manifest) PlatformMerkleTree(caCertDER []byte, imageDigests map[string][]byte) *merkle.Tree {
-	var leaves []merkle.Leaf
-
-	// Platform CA certificate.
-	leaves = append(leaves, merkle.Leaf{
-		Name: "platform.ca_cert",
-		Data: caCertDER,
-	})
-
-	// Manifest hash (the full YAML, measuring all config choices).
-	manifestYAML, _ := yaml.Marshal(m)
-	leaves = append(leaves, merkle.Leaf{
-		Name: "platform.manifest",
-		Data: manifestYAML,
-	})
-
-	// Per-container image digests.
-	for _, c := range m.Containers {
-		digest, ok := imageDigests[c.Name]
-		if !ok {
-			continue
-		}
-		leaves = append(leaves, merkle.Leaf{
-			Name: fmt.Sprintf("container.%s.image_digest", c.Name),
-			Data: digest,
-		})
-	}
-
-	return merkle.New(leaves)
 }
 
 // ContainerMerkleTree computes a per-container Config Merkle Tree for the

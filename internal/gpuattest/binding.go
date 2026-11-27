@@ -14,8 +14,8 @@ import (
 //   - deterministic — the nonce is derived from a COARSE UTC day window, so
 //     the (expensive, ~1-2s) NVML report is regenerated at most once per day.
 //     The boundary race is therefore once a day at midnight; a verifier
-//     tolerates the current OR previous day (see WindowMatches). Per-handshake
-//     freshness does NOT depend on this nonce — it comes from the fresh TDX
+//     tolerates the current OR previous day. Per-handshake freshness does
+//     NOT depend on this nonce — it comes from the fresh TDX
 //     quote's REPORTDATA committing to SHA-256(evidence).
 //
 //   - challenge — the nonce is derived from the fresh ClientHello nonce, so an
@@ -45,14 +45,4 @@ func ChallengeNonce(clientNonce []byte) [NonceSize]byte {
 	var out [NonceSize]byte
 	copy(out[:], h.Sum(nil))
 	return out
-}
-
-// WindowMatches reports whether nonce is a valid deterministic GPU nonce for
-// the certificate's NotBefore day — accepting the previous UTC day too so a
-// report minted just before a midnight rollover still verifies.
-func WindowMatches(nonce [NonceSize]byte, notBefore time.Time) bool {
-	if nonce == DeterministicNonce(notBefore) {
-		return true
-	}
-	return nonce == DeterministicNonce(notBefore.AddDate(0, 0, -1))
 }

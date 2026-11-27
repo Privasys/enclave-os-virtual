@@ -39,7 +39,6 @@ package holders
 
 import (
 	"bytes"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -75,18 +74,6 @@ const (
 	// files are still readable. Not a revoke.
 	IncompletelyRemoved
 )
-
-func (s Status) String() string {
-	switch s {
-	case Absent:
-		return "absent"
-	case Present:
-		return "present"
-	case IncompletelyRemoved:
-		return "incompletely_removed"
-	}
-	return "unknown"
-}
 
 // ErrBusy is returned by Close when files under the folder are still in
 // use and the key could not be fully removed.
@@ -278,18 +265,6 @@ func KeyStatus(mount, keyID string) (Status, error) {
 	return Status(a.Status), nil
 }
 
-// Delete removes a holder's folder, key or no key: a locked folder can be
-// deleted by name (verified 2026-09-17), which is what lets a holder erase
-// their data from a phone that never held the key.
-func Delete(mount, holderKey string) error {
-	if !ValidHolderKey(holderKey) {
-		return errors.New("holders: invalid holder key")
-	}
-	return withMutableDir(filepath.Join(mount, Dir), func() error {
-		return os.RemoveAll(FolderPath(mount, holderKey))
-	})
-}
-
 // Usage returns the bytes under a holder's folder, walked by name (works
 // locked: sizes are visible without the key).
 func Usage(mount, holderKey string) (int64, error) {
@@ -304,16 +279,6 @@ func Usage(mount, holderKey string) (int64, error) {
 		return nil
 	})
 	return total, err
-}
-
-// NewRawKey returns a fresh 64-byte key. The wallet generates the holder's
-// key; this exists for tests and for a runtime asked to key a folder itself.
-func NewRawKey() ([]byte, error) {
-	k := make([]byte, RawKeySize)
-	if _, err := rand.Read(k); err != nil {
-		return nil, err
-	}
-	return k, nil
 }
 
 // ---- the ioctls ---------------------------------------------------------

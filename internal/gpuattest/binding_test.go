@@ -20,24 +20,6 @@ func TestDeterministicNonceIsPerDay(t *testing.T) {
 	}
 }
 
-func TestWindowMatchesToleratesPreviousDay(t *testing.T) {
-	notBefore := time.Date(2026, 7, 8, 0, 0, 30, 0, time.UTC)
-	// A report minted on the same day verifies.
-	if !WindowMatches(DeterministicNonce(notBefore), notBefore) {
-		t.Fatal("same-day nonce must match")
-	}
-	// A report minted just before midnight (previous day) still verifies.
-	prev := DeterministicNonce(notBefore.AddDate(0, 0, -1))
-	if !WindowMatches(prev, notBefore) {
-		t.Fatal("previous-day nonce must be tolerated")
-	}
-	// Two days stale must NOT verify.
-	twoAgo := DeterministicNonce(notBefore.AddDate(0, 0, -2))
-	if WindowMatches(twoAgo, notBefore) {
-		t.Fatal("two-day-stale nonce must be rejected")
-	}
-}
-
 func TestChallengeNonceDomainSeparated(t *testing.T) {
 	cn := []byte{0xde, 0xad, 0xbe, 0xef}
 	if ChallengeNonce(cn) == ChallengeNonce([]byte{0x00}) {

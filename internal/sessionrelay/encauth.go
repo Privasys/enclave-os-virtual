@@ -161,14 +161,6 @@ type JWKSResolver interface {
 	PublicKey(ctx context.Context, kid string) (*ecdsa.PublicKey, error)
 }
 
-// JWKSResolverFunc is a function adapter for JWKSResolver.
-type JWKSResolverFunc func(ctx context.Context, kid string) (*ecdsa.PublicKey, error)
-
-// PublicKey implements JWKSResolver.
-func (f JWKSResolverFunc) PublicKey(ctx context.Context, kid string) (*ecdsa.PublicKey, error) {
-	return f(ctx, kid)
-}
-
 // DefaultEncAuthVerifier is the canonical EncAuth verifier. It reads
 // the IdP signing key from the supplied resolver (kid is currently
 // not embedded in the envelope; callers should expose at least one

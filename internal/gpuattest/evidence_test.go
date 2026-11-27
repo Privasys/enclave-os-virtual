@@ -5,6 +5,9 @@ package gpuattest
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -28,7 +31,7 @@ func sample() *Evidence {
 
 func TestEvidenceRoundTrip(t *testing.T) {
 	in := sample()
-	out, err := Unmarshal(in.Marshal())
+	out, err := unmarshal(in.Marshal())
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -58,10 +61,70 @@ func TestSha256Stable(t *testing.T) {
 }
 
 func TestUnmarshalRejectsGarbage(t *testing.T) {
-	if _, err := Unmarshal([]byte("nope")); err == nil {
+	if _, err := unmarshal([]byte("nope")); err == nil {
 		t.Fatal("expected bad-magic error")
 	}
-	if _, err := Unmarshal(append([]byte("PGAE"), 0x02)); err == nil {
+	if _, err := unmarshal(append([]byte("PGAE"), 0x02)); err == nil {
 		t.Fatal("expected unsupported-version error")
 	}
+}
+
+// unmarshal decodes an envelope produced by Marshal, as a verifier reads it,
+// so the tests check the format end to end.
+func unmarshal(b []byte) (*Evidence, error) {
+	if len(b) < 5 || [4]byte{b[0], b[1], b[2], b[3]} != envMagic {
+		return nil, errors.New("gpuattest: bad envelope magic")
+	}
+	if b[4] != envVersion {
+		return nil, fmt.Errorf("gpuattest: unsupported envelope version %d", b[4])
+	}
+	e := &Evidence{}
+	p := 5
+	for p < len(b) {
+		if p+5 > len(b) {
+			return nil, errors.New("gpuattest: truncated TLV header")
+		}
+		typ := b[p]
+		l := binary.BigEndian.Uint32(b[p+1 : p+5])
+		p += 5
+		if l > maxEnvelope || p+int(l) > len(b) {
+			return nil, errors.New("gpuattest: truncated TLV value")
+		}
+		v := b[p : p+int(l)]
+		p += int(l)
+		switch typ {
+		case fNonce:
+			if len(v) != NonceSize {
+				return nil, errors.New("gpuattest: bad nonce length")
+			}
+			copy(e.Nonce[:], v)
+		case fReport:
+			e.AttestationReport = append([]byte(nil), v...)
+		case fCertChain:
+			e.AttestationCertChain = append([]byte(nil), v...)
+		case fCecReport:
+			e.CecReport = append([]byte(nil), v...)
+		case fUUID:
+			e.GPUUUID = string(v)
+		case fDriver:
+			e.DriverVersion = string(v)
+		case fVBIOS:
+			e.VBIOSVersion = string(v)
+		case fCCEnv:
+			if len(v) == 4 {
+				e.CCEnvironment = binary.BigEndian.Uint32(v)
+			}
+		case fCCFeature:
+			if len(v) == 4 {
+				e.CCFeature = binary.BigEndian.Uint32(v)
+			}
+		case fDevTools:
+			if len(v) == 4 {
+				e.DevToolsMode = binary.BigEndian.Uint32(v)
+			}
+		default:
+			// Unknown field: skip (forward-compatible).
+		}
+	}
+	return e, nil
 }

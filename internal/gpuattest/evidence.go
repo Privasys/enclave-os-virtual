@@ -6,8 +6,6 @@ package gpuattest
 import (
 	"crypto/sha256"
 	"encoding/binary"
-	"errors"
-	"fmt"
 )
 
 // Evidence is the self-contained NVIDIA GPU CC attestation evidence carried in
@@ -83,62 +81,3 @@ func (e *Evidence) Marshal() []byte {
 // Sha256 is SHA-256 over the marshaled envelope — the value the RA-TLS
 // REPORTDATA commits to (D1: report_data = SHA512(SHA256(pubkey) ‖ B ‖ this)).
 func (e *Evidence) Sha256() [32]byte { return sha256.Sum256(e.Marshal()) }
-
-// Unmarshal decodes an envelope produced by Marshal. Used by the verifier.
-func Unmarshal(b []byte) (*Evidence, error) {
-	if len(b) < 5 || [4]byte{b[0], b[1], b[2], b[3]} != envMagic {
-		return nil, errors.New("gpuattest: bad envelope magic")
-	}
-	if b[4] != envVersion {
-		return nil, fmt.Errorf("gpuattest: unsupported envelope version %d", b[4])
-	}
-	e := &Evidence{}
-	p := 5
-	for p < len(b) {
-		if p+5 > len(b) {
-			return nil, errors.New("gpuattest: truncated TLV header")
-		}
-		typ := b[p]
-		l := binary.BigEndian.Uint32(b[p+1 : p+5])
-		p += 5
-		if l > maxEnvelope || p+int(l) > len(b) {
-			return nil, errors.New("gpuattest: truncated TLV value")
-		}
-		v := b[p : p+int(l)]
-		p += int(l)
-		switch typ {
-		case fNonce:
-			if len(v) != NonceSize {
-				return nil, errors.New("gpuattest: bad nonce length")
-			}
-			copy(e.Nonce[:], v)
-		case fReport:
-			e.AttestationReport = append([]byte(nil), v...)
-		case fCertChain:
-			e.AttestationCertChain = append([]byte(nil), v...)
-		case fCecReport:
-			e.CecReport = append([]byte(nil), v...)
-		case fUUID:
-			e.GPUUUID = string(v)
-		case fDriver:
-			e.DriverVersion = string(v)
-		case fVBIOS:
-			e.VBIOSVersion = string(v)
-		case fCCEnv:
-			if len(v) == 4 {
-				e.CCEnvironment = binary.BigEndian.Uint32(v)
-			}
-		case fCCFeature:
-			if len(v) == 4 {
-				e.CCFeature = binary.BigEndian.Uint32(v)
-			}
-		case fDevTools:
-			if len(v) == 4 {
-				e.DevToolsMode = binary.BigEndian.Uint32(v)
-			}
-		default:
-			// Unknown field: skip (forward-compatible).
-		}
-	}
-	return e, nil
-}
