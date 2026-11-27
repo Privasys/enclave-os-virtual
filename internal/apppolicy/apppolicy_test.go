@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -385,5 +386,39 @@ func TestDirectDomainHasOneOwnerInTheStore(t *testing.T) {
 	}
 	if got := s.DomainOwner("shop.example.com"); got != other {
 		t.Fatalf("owner after release = %q", got)
+	}
+}
+
+// Pins from a runtime before one-owner-per-domain may name one domain twice.
+// Such a domain has no owner (nobody serves it, rather than a random one of
+// them), it is listed as contested, a holder can still update the rest of
+// its policy, and no third app can claim it.
+func TestContestedDomainHasNoOwner(t *testing.T) {
+	idp := newIdP()
+	path := filepath.Join(t.TempDir(), "pins.json")
+	const other, third = "99998888777766665555444433332222", "aaaabbbbccccddddeeeeffff00001111"
+	pins := fmt.Sprintf(`{%q:{"approver":"owner-1111","seq":1,"domains":["shop.example.com"]},%q:{"approver":"owner-9999","seq":1,"domains":["shop.example.com"]}}`, testApp, other)
+	if err := os.WriteFile(path, []byte(pins), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := NewStore(path, idp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 50; i++ {
+		if got := s.DomainOwner("shop.example.com"); got != "" {
+			t.Fatalf("a contested domain has owner %q", got)
+		}
+	}
+	if c := s.ContestedDomains(); len(c["shop.example.com"]) != 2 {
+		t.Fatalf("contested = %v", c)
+	}
+	d := fmt.Sprintf(`{"v":1,"app_id":%q,"seq":2,"domains":["shop.example.com","b.example.com"]}`, testApp)
+	if _, _, err := s.Accept(envelope(t, d, idp.approve(t, "owner-1111", d)), testApp); err != nil {
+		t.Fatalf("a holder's update that keeps the contested domain: %v", err)
+	}
+	d = fmt.Sprintf(`{"v":1,"app_id":%q,"seq":1,"domains":["shop.example.com"]}`, third)
+	if _, _, err := s.Accept(envelope(t, d, idp.approve(t, "owner-aaaa", d)), third); !errors.Is(err, ErrDomainTaken) {
+		t.Fatalf("a third app's claim: %v", err)
 	}
 }

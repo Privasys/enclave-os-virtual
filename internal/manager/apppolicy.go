@@ -58,9 +58,11 @@ func (s *Server) handleSetAppPolicy(w http.ResponseWriter, r *http.Request) {
 	// re-apply at every load). The store then checks, atomically and
 	// durably, that no other app's accepted policy names them.
 	if pre, _, _, perr := apppolicy.Parse(raw); perr == nil && len(pre.Domains) > 0 {
+		// This runs before the approval is verified (the route needs no
+		// role), so the answer names no other app: the detail is logged.
 		if err := s.launcher.CheckDirectDomains(name, pre.Domains); err != nil {
 			s.log.Warn("app policy refused: direct domains", zap.String("container", name), zap.Error(err))
-			s.jsonError(w, http.StatusConflict, err.Error())
+			s.jsonError(w, http.StatusConflict, "a direct domain in this policy cannot be served by this app on this host")
 			return
 		}
 	}
@@ -201,6 +203,12 @@ func newPolicyStore(path string, verifier apppolicy.TokenVerifier, log *zap.Logg
 	if err != nil {
 		log.Error("signed app policy disabled: pin store unusable", zap.String("path", path), zap.Error(err))
 		return nil
+	}
+	// Pins accepted before one-owner-per-domain may name one domain twice:
+	// such a domain is served by nobody until an operator settles it.
+	for d, apps := range store.ContestedDomains() {
+		log.Error("direct domain named by more than one app's policy; not served until settled",
+			zap.String("domain", d), zap.Strings("apps", apps))
 	}
 	return store
 }

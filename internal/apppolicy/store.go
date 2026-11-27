@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"sync"
 )
 
@@ -134,13 +136,20 @@ func (s *Store) Accept(raw []byte, appID string) (*Document, []byte, error) {
 	// One app per direct domain on this host, durably: the first accepted
 	// policy that names a domain owns it until that app's own policy drops
 	// it. Who happens to be loaded at the moment (boot replay, a redeploy, a
-	// stopped app) never decides it.
+	// stopped app) never decides it. A domain the app already names stays
+	// allowed, so an app holding a contested domain can still update the
+	// rest of its policy (the domain stays unserved until it is settled).
+	current, pinned := s.pins[doc.AppID]
 	for _, d := range doc.Domains {
-		if owner := s.domainOwnerLocked(d); owner != "" && owner != doc.AppID {
-			return nil, nil, fmt.Errorf("%w: %s", ErrDomainTaken, d)
+		if slices.Contains(current.Domains, d) {
+			continue
+		}
+		for _, owner := range s.domainOwnersLocked(d) {
+			if owner != doc.AppID {
+				return nil, nil, fmt.Errorf("%w: %s", ErrDomainTaken, d)
+			}
 		}
 	}
-	current, pinned := s.pins[doc.AppID]
 	if pinned {
 		if sub != current.Approver {
 			return nil, nil, fmt.Errorf("apppolicy: %s does not approve this app's policy", sub)
@@ -258,23 +267,53 @@ func (s *Store) SignedFor(appID string) (callers, deps json.RawMessage, owners [
 var ErrDomainTaken = errors.New("apppolicy: the domain is approved for another app on this host")
 
 // DomainOwner returns the app whose accepted policy names the direct domain
-// name, or "" when none does. It is the record of who owns a direct domain
-// on this host; the launcher serves a domain only for its owner.
+// name, or "" when none does or when more than one does. It is the record of
+// who owns a direct domain on this host; the launcher serves a domain only
+// for its owner. Two pins naming one domain can only come from a runtime
+// before one-owner-per-domain: nobody serves such a domain until an operator
+// settles it (ContestedDomains lists them).
 func (s *Store) DomainOwner(name string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.domainOwnerLocked(name)
+	if owners := s.domainOwnersLocked(name); len(owners) == 1 {
+		return owners[0]
+	}
+	return ""
 }
 
-func (s *Store) domainOwnerLocked(name string) string {
+// ContestedDomains returns each direct domain that more than one app's
+// accepted policy names, with those apps.
+func (s *Store) ContestedDomains() map[string][]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	all := map[string][]string{}
+	for appID, p := range s.pins {
+		for _, d := range p.Domains {
+			all[d] = append(all[d], appID)
+		}
+	}
+	out := map[string][]string{}
+	for d, apps := range all {
+		if len(apps) > 1 {
+			sort.Strings(apps)
+			out[d] = apps
+		}
+	}
+	return out
+}
+
+// domainOwnersLocked returns every app whose accepted policy names name.
+func (s *Store) domainOwnersLocked(name string) []string {
+	var owners []string
 	for appID, p := range s.pins {
 		for _, d := range p.Domains {
 			if d == name {
-				return appID
+				owners = append(owners, appID)
+				break
 			}
 		}
 	}
-	return ""
+	return owners
 }
 
 // DomainsFor returns the direct adopter hostnames the app's owner approved,
