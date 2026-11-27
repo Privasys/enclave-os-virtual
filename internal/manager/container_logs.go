@@ -16,8 +16,8 @@ import (
 // stdout/stderr on the encrypted /data (see internal/container.TaskLogPaths).
 // This endpoint returns the tail of one stream as text/plain. It is the ONLY
 // way off the host for captured container output: the files never leave /data
-// otherwise, and this handler sits behind the manager bearer auth like every
-// other diagnostic. Being part of the measured host image, its existence is
+// otherwise, and only the app's owner reads them (the handler checks the
+// configure grant's owner role). Being part of the measured host image, its existence is
 // visible to anyone verifying the enclave's attestation.
 
 const (

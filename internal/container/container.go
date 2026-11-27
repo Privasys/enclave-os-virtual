@@ -928,7 +928,6 @@ func (m *Manager) forceRemoveOrphan(ctx context.Context, name string) {
 	}
 }
 
-// Stop stops and removes a container.
 // SetPreStart installs the hook run for every new task between its creation
 // and its start. It runs inside the launcher's load, under the launcher's
 // lock: it must not call back into the launcher, and it must return in

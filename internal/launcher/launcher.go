@@ -2843,9 +2843,9 @@ type ContainerStatus struct {
 // Package variable so tests can point it at a fixture.
 var imageProfilePath = "/etc/privasys/image-profile"
 
-// imageProfile reads the baked image flavor. Returns "" when the marker
-// is missing (images predating it); the OID 2.8 extension is then
-// omitted and verifiers treat the image as legacy.
+// imageProfile reads the measured image profile, for the OID 2.8 extension.
+// The manager does not start without one (pinned.Current), so "" is only
+// seen off an image, in tests.
 func imageProfile() string {
 	b, err := os.ReadFile(imageProfilePath)
 	if err != nil {

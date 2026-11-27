@@ -13,14 +13,14 @@ const ConfigureGrantEnv = "PRIVASYS_CONFIGURE_GRANT"
 // host metadata can set the capability marker.
 func (l *Launcher) stampPlatformEnv(env map[string]string) {
 	// The identity provider this fleet trusts, for spend tokens (the app
-	// fetches one per signed-in user from <issuer>/spend/token). A hint from
-	// host configuration: an app verifying tokens allowlists it in code.
+	// fetches one per signed-in user from <issuer>/spend/token): the image's
+	// pinned issuer. An app verifying tokens still allowlists it in code.
 	delete(env, "PRIVASYS_ISSUER")
 	if l.cfg.Issuer != "" {
 		env["PRIVASYS_ISSUER"] = strings.TrimRight(l.cfg.Issuer, "/")
 	}
 	// The audience the fleet's tokens carry (one per deployment: the test
-	// platform's on dev). A hint, like the issuer.
+	// platform's on dev), pinned like the issuer.
 	delete(env, "PRIVASYS_AUDIENCE")
 	if l.cfg.Audience != "" {
 		env["PRIVASYS_AUDIENCE"] = l.cfg.Audience
