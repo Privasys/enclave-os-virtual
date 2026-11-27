@@ -153,6 +153,10 @@ func (c *Client) AddRoute(hostname, upstream string, mutualAuth bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if err := c.checkHostLocked(hostname, hostname); err != nil {
+		return err
+	}
+
 	c.routes[hostname] = route{
 		Hostname:   hostname,
 		Upstream:   upstream,
@@ -214,6 +218,17 @@ func (c *Client) SetAliases(hostname string, aliases []string) error {
 	if !ok {
 		return fmt.Errorf("caddy: no route for hostname %q", hostname)
 	}
+	seen := make(map[string]bool, len(aliases))
+	for _, a := range aliases {
+		key := strings.ToLower(a)
+		if seen[key] || strings.EqualFold(a, hostname) {
+			return fmt.Errorf("caddy: host %q named twice on route %q", a, hostname)
+		}
+		seen[key] = true
+		if err := c.checkHostLocked(a, hostname); err != nil {
+			return err
+		}
+	}
 	r.Aliases = append([]string(nil), aliases...)
 	sort.Strings(r.Aliases)
 	c.routes[hostname] = r
@@ -223,6 +238,33 @@ func (c *Client) SetAliases(hostname string, aliases []string) error {
 		zap.Strings("aliases", r.Aliases))
 
 	return c.reload(false)
+}
+
+// checkHostLocked refuses a host the generated config must never carry: a
+// pattern (Caddy would match it ahead of other routes, which sort after
+// '*'), or a name another route already serves as its hostname or an alias.
+// owner is the route the host is for. Every route and alias goes through
+// it, so buildConfig never emits the same host twice.
+//
+// Must be called with c.mu held.
+func (c *Client) checkHostLocked(host, owner string) error {
+	if host == "" || strings.ContainsAny(host, "*{}/ ") {
+		return fmt.Errorf("caddy: host %q is not one concrete hostname", host)
+	}
+	for h, r := range c.routes {
+		if h == owner {
+			continue // the owner's own route and aliases are being set
+		}
+		if strings.EqualFold(h, host) {
+			return fmt.Errorf("caddy: host %q is already the route of %q", host, h)
+		}
+		for _, a := range r.Aliases {
+			if strings.EqualFold(a, host) {
+				return fmt.Errorf("caddy: host %q is already an alias of %q", host, h)
+			}
+		}
+	}
+	return nil
 }
 
 // RouteCount returns the number of active routes.

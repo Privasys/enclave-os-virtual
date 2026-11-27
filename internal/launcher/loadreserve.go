@@ -27,18 +27,11 @@ func (l *Launcher) reserveLoadLocked(name string, r loadReservation) error {
 	if _, exists := l.reserved[name]; exists {
 		return fmt.Errorf("launcher: container %q is already being loaded", name)
 	}
-	// Check for duplicate hostname (should not happen with deterministic
-	// derivation, but guard against name collisions).
+	// One owner per hostname (hostnames.go): no other app's canonical name,
+	// load on its way or direct domain.
 	if r.hostname != "" {
-		for _, s := range l.specs {
-			if s.Hostname == r.hostname {
-				return fmt.Errorf("launcher: hostname %q already in use by %q", r.hostname, s.Name)
-			}
-		}
-		for other, o := range l.reserved {
-			if o.hostname == r.hostname {
-				return fmt.Errorf("launcher: hostname %q already in use by %q", r.hostname, other)
-			}
+		if err := l.claimHostLocked(name, r.hostname); err != nil {
+			return fmt.Errorf("launcher: %w", err)
 		}
 	}
 	// Check for duplicate host port. Containers share the host network

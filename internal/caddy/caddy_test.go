@@ -1,6 +1,7 @@
 package caddy
 
 import (
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -262,5 +263,36 @@ func TestSetProxyProtocolFromDrivesTheWrapper(t *testing.T) {
 	c.cfg.ProxyProtocolFrom = proxyProtocolCIDRs(nil)
 	if _, ok := srv0Of(t, c)["listener_wrappers"]; ok {
 		t.Fatal("an empty list must remove the wrapper")
+	}
+}
+
+// One host, one route: Caddy matches routes in order, so a pattern or a name
+// served twice would hand one app's traffic to another. Both are refused
+// before anything changes.
+func TestRoutesRefuseWildcardsAndDuplicates(t *testing.T) {
+	c := NewClient(Config{AdminAddr: "unix//nonexistent"}, zap.NewNop())
+	// No admin API here: seed routes directly, then check the refusals,
+	// which come before any reload.
+	c.routes["a.apps.example.org"] = route{Hostname: "a.apps.example.org", Upstream: "localhost:1", Aliases: []string{"shop.example.com"}}
+	c.routes["b.apps.example.org"] = route{Hostname: "b.apps.example.org", Upstream: "localhost:2"}
+
+	for _, h := range []string{"*.apps.example.org", "*", "", "shop.example.com", "SHOP.example.com", "A.apps.example.org"} {
+		if err := c.AddRoute(h, "localhost:3", false); err == nil || !strings.HasPrefix(err.Error(), "caddy: host") {
+			t.Errorf("AddRoute(%q) was not refused up front: %v", h, err)
+		}
+	}
+	for _, aliases := range [][]string{
+		{"shop.example.com"},               // another route's alias
+		{"a.apps.example.org"},             // another route's hostname
+		{"b.apps.example.org"},             // its own hostname
+		{"*.example.com"},                  // a pattern
+		{"x.example.com", "X.example.com"}, // twice
+	} {
+		if err := c.SetAliases("b.apps.example.org", aliases); err == nil {
+			t.Errorf("SetAliases(%v) was accepted", aliases)
+		}
+	}
+	if len(c.routes["b.apps.example.org"].Aliases) != 0 {
+		t.Fatalf("a refused alias was recorded: %v", c.routes["b.apps.example.org"].Aliases)
 	}
 }

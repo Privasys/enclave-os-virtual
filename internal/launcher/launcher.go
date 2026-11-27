@@ -570,10 +570,13 @@ type Launcher struct {
 	// here (direct.go); nil when direct domains are not configured.
 	// directBranches holds each container's direct-TLS branch of its volume
 	// key, directDomains the names it serves now.
-	direct          *directtls.Service
-	directBranches  map[string][]byte
-	directDomains   map[string][]string
-	directView      sync.Map // container -> []string, readable without l.mu
+	direct         *directtls.Service
+	directBranches map[string][]byte
+	directDomains  map[string][]string
+	directView     sync.Map // container -> []string, readable without l.mu
+	// directMu serialises direct-domain changes and unloads (taken before
+	// l.mu), so a name is never claimed while its last owner removes it.
+	directMu        sync.Mutex
 	containerdHash  []byte
 	combinedImgHash [32]byte
 
@@ -1666,10 +1669,12 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	if req.Hostname != "" {
 		spec.Hostname = req.Hostname
 	}
-	// The manager's own name carries the platform's extensions: no app may
-	// take it, or its certificate would show the platform's identity.
-	if mgr := l.managerHostname(); mgr != "" && strings.EqualFold(spec.Hostname, mgr) {
-		return nil, fmt.Errorf("launcher: %s: hostname %s is this enclave's manager hostname", req.Name, spec.Hostname)
+	// One concrete name under the app domain, never a platform name: the
+	// manager's name carries the platform's extensions, and a pattern would
+	// become a Caddy host matcher ahead of other apps' routes. Who holds the
+	// name is checked under l.mu below (hostnames.go).
+	if err := l.ValidateLoadHostname(spec.Hostname); err != nil {
+		return nil, fmt.Errorf("launcher: %s: %w", req.Name, err)
 	}
 
 	// Under l.mu: the checks against the containers loaded and the loads on
@@ -2250,6 +2255,10 @@ var ErrNotLoaded = errors.New("container not loaded")
 
 // Unload stops and removes a container, then recomputes attestation.
 func (l *Launcher) Unload(ctx context.Context, name string) error {
+	// directMu before l.mu, as SetDirectDomains takes them: an unload's
+	// direct names are not claimed by another app while they are removed.
+	l.directMu.Lock()
+	defer l.directMu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -2354,9 +2363,11 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 			if l.appHostRouter != nil {
 				l.appHostRouter.UnregisterAppHost(removedSpec.Hostname)
 			}
-			if err := extensions.Remove(l.cfg.ExtensionsDir, removedSpec.Hostname); err != nil {
-				l.log.Warn("failed to remove container extensions",
-					zap.String("hostname", removedSpec.Hostname), zap.Error(err))
+			if l.hostOwnerLocked(removedSpec.Hostname) == "" {
+				if err := extensions.Remove(l.cfg.ExtensionsDir, removedSpec.Hostname); err != nil {
+					l.log.Warn("failed to remove container extensions",
+						zap.String("hostname", removedSpec.Hostname), zap.Error(err))
+				}
 			}
 		}
 	}

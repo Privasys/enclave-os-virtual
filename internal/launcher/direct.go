@@ -17,11 +17,12 @@ package launcher
 
 import (
 	"crypto/ecdsa"
-	"encoding/json"
 	"crypto/hkdf"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"go.uber.org/zap"
 
@@ -200,6 +201,13 @@ func (l *Launcher) SetDirectDomains(containerName string, domains []string) erro
 	if !l.DirectSupported() {
 		return nil
 	}
+	// One direct change at a time on this host (and none during an unload):
+	// the markers and certificates are written after l.mu is released, and
+	// a name one app drops must not be claimed by another before the first
+	// has finished removing it.
+	l.directMu.Lock()
+	defer l.directMu.Unlock()
+
 	l.mu.Lock()
 	spec, ok := l.specs[containerName]
 	if !ok {
@@ -215,6 +223,22 @@ func (l *Launcher) SetDirectDomains(containerName string, domains []string) erro
 		l.mu.Unlock()
 		return fmt.Errorf("direct domains need a vault-backed volume, so the ACME account survives upgrades")
 	}
+	// One owner per hostname (hostnames.go), checked and recorded under the
+	// same lock: nothing is written for a name this container may not take.
+	for _, d := range domains {
+		if strings.EqualFold(d, spec.Hostname) {
+			l.mu.Unlock()
+			return fmt.Errorf("direct domain %s is the app's own hostname", d)
+		}
+		if err := l.validateDirectDomain(d); err != nil {
+			l.mu.Unlock()
+			return err
+		}
+		if err := l.claimHostLocked(containerName, d); err != nil {
+			l.mu.Unlock()
+			return err
+		}
+	}
 	previous := l.directDomains[containerName]
 	// The RA-TLS leaf on an adopter name carries the app host's extensions.
 	for _, d := range domains {
@@ -225,14 +249,14 @@ func (l *Launcher) SetDirectDomains(containerName string, domains []string) erro
 	}
 	l.directDomains[containerName] = append([]string(nil), domains...)
 	l.directView.Store(containerName, append([]string(nil), domains...))
-	hostname := spec.Hostname
-	l.mu.Unlock()
-
+	// A dropped name's extensions go only if no one holds it now.
 	for _, d := range previous {
-		if !contains(domains, d) {
+		if !contains(domains, d) && l.hostOwnerLocked(d) == "" {
 			_ = extensions.Remove(l.cfg.ExtensionsDir, d)
 		}
 	}
+	hostname := spec.Hostname
+	l.mu.Unlock()
 
 	var key *ecdsa.PrivateKey
 	if len(domains) > 0 {
@@ -272,7 +296,8 @@ func (l *Launcher) directChanged(containerName string) {
 
 // removeDirect drops a container's direct domains at unload.
 //
-// Must be called with l.mu held.
+// Must be called with l.directMu and l.mu held, after the container's spec
+// is gone.
 func (l *Launcher) removeDirect(containerName, hostname string) {
 	if !l.DirectSupported() {
 		return
@@ -286,6 +311,9 @@ func (l *Launcher) removeDirect(containerName, hostname string) {
 	}
 	l.direct.Remove(containerName)
 	for _, d := range domains {
+		if l.hostOwnerLocked(d) != "" {
+			continue // never another owner's file
+		}
 		_ = extensions.Remove(l.cfg.ExtensionsDir, d)
 	}
 	if err := l.caddyClient.SetAliases(hostname, nil); err != nil {

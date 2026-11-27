@@ -51,6 +51,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/Privasys/enclave-os-virtual/internal/hostname"
 )
 
 // BindingDomain prefixes the operation binding. It matches the identity
@@ -254,16 +256,17 @@ func (c *Constellation) Matches(mrenclave string, endpoints []string) bool {
 const MaxDomains = 20
 
 // ValidateDomains checks the shape of a policy's domains: lowercase fully
-// qualified hostnames, no wildcard, no duplicate. Ownership is the control
-// plane's check (DNS proof); this one only keeps a malformed name from ever
-// reaching an ACME order.
+// qualified hostnames, no wildcard, no duplicate. It is a shape check only. A
+// policy reaches the runtime without passing the control plane, so whether
+// an app may serve a name on this host is the launcher's check (one owner per
+// hostname, launcher.SetDirectDomains), never assumed from a DNS proof.
 func ValidateDomains(domains []string) error {
 	if len(domains) > MaxDomains {
 		return fmt.Errorf("apppolicy: %d domains, at most %d", len(domains), MaxDomains)
 	}
 	seen := make(map[string]bool, len(domains))
 	for _, d := range domains {
-		if !validHostname(d) {
+		if !hostname.Valid(d) {
 			return fmt.Errorf("apppolicy: %q is not a lowercase fully qualified hostname", d)
 		}
 		if seen[d] {
@@ -272,25 +275,4 @@ func ValidateDomains(domains []string) error {
 		seen[d] = true
 	}
 	return nil
-}
-
-func validHostname(h string) bool {
-	if len(h) == 0 || len(h) > 253 || strings.HasSuffix(h, ".") {
-		return false
-	}
-	labels := strings.Split(h, ".")
-	if len(labels) < 2 {
-		return false
-	}
-	for _, l := range labels {
-		if len(l) == 0 || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
-			return false
-		}
-		for _, c := range l {
-			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
-				return false
-			}
-		}
-	}
-	return true
 }

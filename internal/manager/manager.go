@@ -1238,6 +1238,13 @@ func (s *Server) handleLoadContainer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One concrete name under the app domain, refused here so the control
+	// plane sees it; the launcher checks it again, with who holds it.
+	if err := s.launcher.ValidateLoadHostname(req.Hostname); err != nil {
+		s.jsonError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Enforce containers claim policy.
 	if !result.IsContainerPermitted(req.Image) {
 		s.log.Warn("container not permitted by token policy",
