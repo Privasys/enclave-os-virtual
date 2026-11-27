@@ -363,6 +363,21 @@ func (s *Server) mintHolderCapability(w http.ResponseWriter, r *http.Request, co
 		s.jsonError(w, http.StatusForbidden, "this request was made for another holder")
 		return
 	}
+	// A writable open cannot become read-only in place, here as on the open
+	// path: a writable fd the app already holds would survive the read-only
+	// bind. The folder must be closed (which ends whatever holds its files)
+	// before a read-only grant is minted on it.
+	if st, open := s.holdersOpen.get(grantKey(appID, p.resource, sub)); open && !st.ReadOnly {
+		readOnly, aerr := holderReadOnly(p.Capability.Permissions)
+		if aerr != nil {
+			s.jsonError(w, http.StatusForbidden, aerr.Error())
+			return
+		}
+		if readOnly {
+			s.jsonError(w, http.StatusConflict, "the folder is open writable; close it before it can open read-only")
+			return
+		}
+	}
 	keyB64 := body.Setup.KeyB64
 	if keyB64 == "" {
 		keyB64 = body.KeyB64

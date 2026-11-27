@@ -317,3 +317,38 @@ func TestCapabilityAsksAndPushesAreBounded(t *testing.T) {
 		t.Fatal("a released slot must be reusable")
 	}
 }
+
+// A [read] mint on a folder already open writable is refused (409), as the
+// open path refuses it: the app's writable file handles would survive the
+// read-only bind. The same mint on a folder open read-only, or not open,
+// goes past this check.
+func TestReadOnlyMintOnAWritableOpenFolderIsRefused(t *testing.T) {
+	s := &Server{log: zap.NewNop(), caps: newCapabilityBroker("", nil), holdersOpen: newHolderState()}
+	decl := testDecl
+	decl.Kind = launcher.AppStorageKind
+	decl.Name = "workspace"
+	decl.Permissions = []string{"read"}
+	p, _ := s.caps.create("ctr-a", "app1", resourceAppSelf, "sub", decl)
+	mint := func() *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		body := `{"nonce":"` + p.Nonce + `","setup":{"key_b64":""}}`
+		s.mintHolderCapability(rec, httptest.NewRequest("POST", "/", strings.NewReader(body)), "ctr-a", "app1", "sub")
+		return rec
+	}
+	key := grantKey("app1", p.resource, "sub")
+
+	s.holdersOpen.set(key, holderOpenState{KeyID: "k", ReadOnly: false})
+	if rec := mint(); rec.Code != http.StatusConflict {
+		t.Fatalf("read-only mint on a writable open folder: %d %s", rec.Code, rec.Body.String())
+	}
+	// Open read-only, or not open: the mint goes on (and stops here at the
+	// empty key, before any folder work).
+	s.holdersOpen.set(key, holderOpenState{KeyID: "k", ReadOnly: true})
+	if rec := mint(); rec.Code != http.StatusBadRequest {
+		t.Fatalf("read-only mint on a read-only open folder: %d %s", rec.Code, rec.Body.String())
+	}
+	s.holdersOpen.drop(key)
+	if rec := mint(); rec.Code != http.StatusBadRequest {
+		t.Fatalf("read-only mint on a closed folder: %d %s", rec.Code, rec.Body.String())
+	}
+}
