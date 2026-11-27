@@ -45,10 +45,11 @@ func TestExplicitAckTrimsOnlyApplied(t *testing.T) {
 	}
 }
 
-// A puller that never acknowledges: each pull acknowledges what the previous
-// pull returned, so the ring drains at the pull cadence and nothing is lost
-// between two pulls.
-func TestImplicitAckIsThePreviousPull(t *testing.T) {
+// A pull without an ack never trims, however many pulls came before: an
+// event leaves the store only once the puller says it applied it (the
+// ack-less mode, where the previous pull counted as applied, could drop
+// unapplied events across a manager restart; GHSA-xh8w-wxhv-99fp).
+func TestPullWithoutAckTrimsNothing(t *testing.T) {
 	s := Open("", zap.NewNop())
 	s.Record("app", "f", "sub", 1)
 	s.Record("app", "f", "sub", 1)
@@ -56,9 +57,8 @@ func TestImplicitAckIsThePreviousPull(t *testing.T) {
 		t.Fatalf("first pull: %d", len(got))
 	}
 	s.Record("app", "f", "sub", 1)
-	got := s.Pull(nil, "")
-	if len(got) != 1 || got[0].Seq != 3 {
-		t.Fatalf("second pull: %+v", got)
+	if got := s.Pull(nil, ""); len(got) != 3 || got[0].Seq != 1 {
+		t.Fatalf("second pull trimmed: %+v", got)
 	}
 }
 

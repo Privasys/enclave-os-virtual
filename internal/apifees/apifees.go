@@ -210,7 +210,7 @@ type Event struct {
 // each successful priced call and pulled (never drained) by the
 // management-service; the persisted seq survives a manager restart so the
 // puller's cursor stays monotonic. Persistence is best-effort and happens
-// on Snapshot (the pull), mirroring the wasm runtime's save-on-read: a
+// on Pull, mirroring the wasm runtime's save-on-read: a
 // crash loses at most one pull interval of fees — lossy by design, and the
 // ledger's call_id idempotency absorbs re-reads.
 type Store struct {
@@ -221,12 +221,8 @@ type Store struct {
 	seq    uint64
 	events []Event // unacknowledged events, oldest first
 	// acked is the highest seq the puller has acknowledged; events at or
-	// below it are trimmed. explicitAck records that the puller acknowledges
-	// with ?ack=; until it does, a pull acknowledges what the PREVIOUS pull
-	// returned (lastPulled), which the puller has had an interval to apply.
-	acked       uint64
-	explicitAck bool
-	lastPulled  uint64
+	// below it are trimmed. Only an explicit ?ack= moves it.
+	acked uint64
 	// epoch names this store's sequence: random when the store is created
 	// (or reset after a corrupt file), persisted with seq. An ack counts only
 	// for the epoch it names, so an ack from before a reset never trims the
@@ -334,33 +330,21 @@ func (s *Store) RecordLedger(app, function, callerSub, payerLedger, payerApp str
 	return ev
 }
 
-// Snapshot is the pull without an explicit acknowledgement (see Pull).
-func (s *Store) Snapshot() []Event { return s.Pull(nil, "") }
-
 // Pull returns the unacknowledged events (oldest first) and persists the
 // store best-effort. ack, when given with this store's epoch, is the highest
-// seq the puller has applied; an ack for another epoch is ignored (it trims
-// nothing). Without an ack, and only while the puller has never acknowledged
-// explicitly, the events the previous pull returned count as applied.
+// seq the puller has applied, and only events up to it are trimmed. A pull
+// without an ack, or with an ack for another epoch, trims nothing: an event
+// leaves the store only once the puller says it applied it.
 func (s *Store) Pull(ack *uint64, epoch string) []Event {
 	s.mu.Lock()
-	switch {
-	case ack != nil && epoch != s.epoch:
-		// Stale or foreign epoch: never trims.
-	case ack != nil:
-		s.explicitAck = true
+	if ack != nil && epoch == s.epoch {
 		if a := min(*ack, s.seq); a > s.acked {
 			s.acked = a
 		}
-	case !s.explicitAck && s.lastPulled > s.acked:
-		s.acked = s.lastPulled
 	}
 	s.trimLocked()
 	out := make([]Event, len(s.events))
 	copy(out, s.events)
-	if n := len(out); n > 0 {
-		s.lastPulled = out[n-1].Seq
-	}
 	p := persisted{Epoch: s.epoch, Seq: s.seq, Acked: s.acked, Events: out}
 	path := s.path
 	s.mu.Unlock()

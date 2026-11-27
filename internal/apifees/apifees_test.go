@@ -115,7 +115,7 @@ func TestStoreRecordAndRing(t *testing.T) {
 	if ev2.Seq != 2 || ev2.CallID == ev.CallID {
 		t.Fatalf("seq/call_id not advancing: %#v vs %#v", ev, ev2)
 	}
-	snap := s.Snapshot()
+	snap := s.Pull(nil, "")
 	if len(snap) != 2 || snap[0].Seq != 1 || snap[1].Seq != 2 {
 		t.Fatalf("unexpected snapshot: %#v", snap)
 	}
@@ -131,7 +131,7 @@ func TestStoreRingBound(t *testing.T) {
 	if !s.Full() {
 		t.Fatal("not Full past maxEvents")
 	}
-	snap := s.Snapshot()
+	snap := s.Pull(nil, "")
 	if len(snap) != maxEvents+10 || snap[0].Seq != 1 || snap[len(snap)-1].Seq != maxEvents+10 {
 		t.Fatalf("unacknowledged events lost: %d, first seq %d", len(snap), snap[0].Seq)
 	}
@@ -143,7 +143,7 @@ func TestStorePersistence(t *testing.T) {
 
 	s := Open(path, zap.NewNop())
 	s.Record("app", "f", "sub", 100)
-	s.Snapshot() // persists
+	s.Pull(nil, "") // persists
 
 	// Reopen: seq continues past the persisted value, so a puller cursor
 	// from a pre-restart snapshot never skips fresh events.
@@ -152,7 +152,7 @@ func TestStorePersistence(t *testing.T) {
 	if ev.Seq != 2 {
 		t.Fatalf("seq did not survive restart: %d", ev.Seq)
 	}
-	snap := s2.Snapshot()
+	snap := s2.Pull(nil, "")
 	if len(snap) != 2 {
 		t.Fatalf("events did not survive restart: %#v", snap)
 	}

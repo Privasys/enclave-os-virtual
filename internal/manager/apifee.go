@@ -294,8 +294,7 @@ func (s *Server) handleAPIFees(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// ?ack=<seq>&epoch=<epoch>: the puller has applied every event up to seq
-	// of that epoch; only those are trimmed. Without an ack, the previous
-	// pull's events count as applied.
+	// of that epoch; only those are trimmed. Without an ack nothing is.
 	var ack *uint64
 	if v := r.URL.Query().Get("ack"); v != "" {
 		n, err := strconv.ParseUint(v, 10, 64)
