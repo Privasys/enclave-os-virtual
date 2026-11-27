@@ -36,31 +36,31 @@ func TestIsStaticUnsealedPath(t *testing.T) {
 		{"attestation stays sealed unless declared prefix", "/privasys/attestation", true},
 	}
 	for _, c := range cases {
-		if got := s.isStaticUnsealedPath(host, c.path); got != c.want {
-			t.Errorf("%s: isStaticUnsealedPath(%q) = %v, want %v", c.name, c.path, got, c.want)
+		if got := s.surfacesOf(host).IsStatic(c.path); got != c.want {
+			t.Errorf("%s: IsStatic(%q) = %v, want %v", c.name, c.path, got, c.want)
 		}
 	}
 
 	// Unknown host: nothing is exempt.
-	if s.isStaticUnsealedPath("other.apps.privasys.org", "/assets/x.js") {
+	if s.surfacesOf("other.apps.privasys.org").IsStatic("/assets/x.js") {
 		t.Error("undeclared host must not expose any path")
 	}
 
 	// A dangerously broad "/" declaration must still never expose /api.
 	s.SetStaticUnsealedPrefixes(host, []string{"/"})
-	if s.isStaticUnsealedPath(host, "/api/session.list") {
+	if s.surfacesOf(host).IsStatic("/api/session.list") {
 		t.Error("/api must stay sealed even when the app declares '/'")
 	}
-	if !s.isStaticUnsealedPath(host, "/") {
+	if !s.surfacesOf(host).IsStatic("/") {
 		t.Error("'/' must still match the root document")
 	}
-	if s.isStaticUnsealedPath(host, "/anything") {
+	if s.surfacesOf(host).IsStatic("/anything") {
 		t.Error("'/' must be exact-match only, not a catch-all prefix")
 	}
 
 	// Clearing removes the exemption.
 	s.SetStaticUnsealedPrefixes(host, nil)
-	if s.isStaticUnsealedPath(host, "/") {
+	if s.surfacesOf(host).IsStatic("/") {
 		t.Error("cleared host must not expose any path")
 	}
 }

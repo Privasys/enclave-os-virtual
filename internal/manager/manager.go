@@ -2366,7 +2366,7 @@ func routeAuthLabel(ra apifees.RouteAuth) string {
 	}
 }
 
-// authorizeRoute applies a guarded route's policy, with the semantics of
+// routeGrant applies a guarded route's policy, with the semantics of
 // Enclave OS Mini's @auth:
 //   - owner: the configure gate's rule (the app's owner or admin role);
 //   - role(a, b): a verified platform bearer carrying one of the roles, as
@@ -2374,13 +2374,9 @@ func routeAuthLabel(ra apifees.RouteAuth) string {
 //   - authenticated: a verified platform bearer, or a subject the runtime
 //     itself asserted (a sealed session, or a verified direct-leg token;
 //     the header is stripped from clients on every leg).
-func (s *Server) authorizeRoute(r *http.Request, containerName string, st launcher.FreezeState, ra apifees.RouteAuth) error {
-	_, _, err := s.routeGrant(r, containerName, st, ra)
-	return err
-}
-
-// routeGrant is authorizeRoute returning, for an owner route, who passed it
-// (as configureGrant); other policies return no subject or role.
+//
+// For an owner route it returns who passed it (as configureGrant); other
+// policies return no subject or role.
 func (s *Server) routeGrant(r *http.Request, containerName string, st launcher.FreezeState, ra apifees.RouteAuth) (string, string, error) {
 	if ra.Policy == apifees.PolicyOwner {
 		return s.configureGrant(r, containerName, st)
@@ -2459,43 +2455,23 @@ func configPathKey(p string) string {
 	return strings.ToLower(path.Clean("/" + strings.Join(segs, "/")))
 }
 
-// authorizeConfigure decides whether the caller may hit the container's
-// configure surface (the configure-authz standard). Primary: the request
-// bearer must be a valid platform-issuer token whose roles include
-// <audience>:app:<app-id-hex>:owner or :admin — grants/revocations are live
-// (next token), managed by the control plane on team changes. Transitional
-// fallback: a verified sub on the load-envelope owners team (removed once
-// the IdP role backfill is verified). Everything fails closed.
+// configureGrant decides whether the caller may hit the container's configure
+// surface (the configure-authz standard), and returns who passed it: the
+// verified subject and the matched role ("owner" or "admin"; the owners-list
+// fallback is "owner").
 //
-// A load carrying neither an app id nor an owners team used to be ADMITTED
-// here with a warning, which meant any caller could reach the configure
-// surface of such a container. That was deliberate and transitional, pending
-// the control plane redeploying those containers with the envelope — but it
-// was a live fail-open for as long as one existed, and it was reported as
-// such on 2026-09-17. It is now refused like anything else.
+// The request bearer must be a valid platform-issuer token whose roles
+// include <audience>:app:<app-id-hex>:owner or :admin; grants and revocations
+// are live (next token), managed by the control plane on team changes. A
+// verified subject on the load envelope's owners team is the fallback. A load
+// carrying neither an app id nor an owners team is refused: no caller can be
+// authorised for it. Everything fails closed.
 //
-// The precondition for closing it was that every live container carries an
-// app id. The control plane sets AppId on both the first-deploy and redeploy
-// paths, so a redeploy through mgmt is enough to lift a container out of the
-// old branch; the registry entry is replaced by name, so the id survives the
-// replay that happens on every manager restart. A container that somehow
-// still arrives without one now gets a 403 naming the remedy rather than
-// silent admission.
-//
-// Note the sealed-relay X-Privasys-Sub is
-// deliberately NOT accepted: it asserts a subject but carries no roles. That
-// holds whether or not the call arrived sealed — a browser configuring an app
-// does so over a sealed session now, and the relay unwraps before this gate
-// runs, so the inner request must still carry the user's platform bearer. The
-// authority is the bearer's role, never the relay's assertion.
-func (s *Server) authorizeConfigure(r *http.Request, containerName string, st launcher.FreezeState) error {
-	_, _, err := s.configureGrant(r, containerName, st)
-	return err
-}
-
-// configureGrant is authorizeConfigure returning who passed it: the verified
-// subject and the matched role ("owner" or "admin"; the owners-list fallback
-// is "owner").
+// The sealed relay's X-Privasys-Sub is not accepted: it asserts a subject but
+// carries no roles. A browser configuring an app does so over a sealed
+// session, and the relay unwraps before this gate runs, so the inner request
+// must still carry the user's platform bearer. The authority is the bearer's
+// role, never the relay's assertion.
 func (s *Server) configureGrant(r *http.Request, containerName string, st launcher.FreezeState) (string, string, error) {
 	if st.AppID == "" && len(st.Owners) == 0 {
 		s.log.Warn("configure gate: refusing a load that carries neither an app id nor an owners team",

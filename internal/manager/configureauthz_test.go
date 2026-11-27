@@ -13,11 +13,6 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 )
 
-// authorizeConfigure had no test coverage at all until the 2026-09-17
-// disclosure, which is a large part of why a fail-open branch sat in it for
-// two months. These cover the branch that was reported plus the shape of the
-// gate around it, so the refusal cannot quietly become an admission again.
-
 func gateServer(t *testing.T) *Server {
 	t.Helper()
 	return &Server{log: zap.NewNop()}
@@ -32,13 +27,12 @@ func req(t *testing.T, bearer string) *http.Request {
 	return r
 }
 
-// The reported finding: a container loaded with neither an app id nor an
-// owners team used to be admitted with only a warning, so any caller reached
-// its configure surface. It must now be refused.
-func TestAuthorizeConfigure_RefusesLoadWithNoAppIDAndNoOwners(t *testing.T) {
+// A container loaded with neither an app id nor an owners team is refused:
+// no caller can be authorised for its configure surface.
+func TestConfigureGrant_RefusesLoadWithNoAppIDAndNoOwners(t *testing.T) {
 	s := gateServer(t)
 
-	err := s.authorizeConfigure(req(t, ""), "legacy-app", launcher.FreezeState{})
+	_, _, err := s.configureGrant(req(t, ""), "legacy-app", launcher.FreezeState{})
 	if err == nil {
 		t.Fatal("a load with no app id and no owners was admitted; this is the reported fail-open")
 	}
@@ -50,10 +44,10 @@ func TestAuthorizeConfigure_RefusesLoadWithNoAppIDAndNoOwners(t *testing.T) {
 
 // Presenting a bearer must not change that: there is nothing to authorise
 // against, so the answer is the same.
-func TestAuthorizeConfigure_RefusesNoAppIDAndNoOwnersEvenWithBearer(t *testing.T) {
+func TestConfigureGrant_RefusesNoAppIDAndNoOwnersEvenWithBearer(t *testing.T) {
 	s := gateServer(t)
 
-	if err := s.authorizeConfigure(req(t, "any.token.here"), "legacy-app", launcher.FreezeState{}); err == nil {
+	if _, _, err := s.configureGrant(req(t, "any.token.here"), "legacy-app", launcher.FreezeState{}); err == nil {
 		t.Fatal("a bearer must not rescue a load that carries no app id and no owners")
 	}
 }
@@ -62,10 +56,10 @@ func TestAuthorizeConfigure_RefusesNoAppIDAndNoOwnersEvenWithBearer(t *testing.T
 // verifier wired it still fails closed, but for the verifier reason rather
 // than the legacy one — proving the early return is gone rather than merely
 // reworded.
-func TestAuthorizeConfigure_WithEnvelopeTakesTheVerifierPath(t *testing.T) {
+func TestConfigureGrant_WithEnvelopeTakesTheVerifierPath(t *testing.T) {
 	s := gateServer(t)
 
-	err := s.authorizeConfigure(req(t, ""), "real-app", launcher.FreezeState{
+	_, _, err := s.configureGrant(req(t, ""), "real-app", launcher.FreezeState{
 		AppID: "00112233445566778899aabbccddeeff",
 	})
 	if err == nil {
@@ -81,10 +75,10 @@ func TestAuthorizeConfigure_WithEnvelopeTakesTheVerifierPath(t *testing.T) {
 
 // Owners alone is still an envelope: the transitional sub fallback applies, so
 // it must not be treated as a legacy load either.
-func TestAuthorizeConfigure_OwnersOnlyIsNotALegacyLoad(t *testing.T) {
+func TestConfigureGrant_OwnersOnlyIsNotALegacyLoad(t *testing.T) {
 	s := gateServer(t)
 
-	err := s.authorizeConfigure(req(t, ""), "owners-only", launcher.FreezeState{
+	_, _, err := s.configureGrant(req(t, ""), "owners-only", launcher.FreezeState{
 		Owners: []string{"sub-1"},
 	})
 	if err == nil {

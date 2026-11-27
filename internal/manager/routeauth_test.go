@@ -73,7 +73,7 @@ func TestAuthorizeRoute(t *testing.T) {
 
 	check := func(name string, ra apifees.RouteAuth, r *http.Request, allow bool) {
 		t.Helper()
-		err := s.authorizeRoute(r, "app", st, ra)
+		_, _, err := s.routeGrant(r, "app", st, ra)
 		if allow && err != nil {
 			t.Errorf("%s: refused: %v", name, err)
 		}

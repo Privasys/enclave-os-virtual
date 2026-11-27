@@ -177,12 +177,6 @@ func (s *Server) surfacesOf(hostname string) *surfaces.Surfaces {
 	return v.(*surfaces.Surfaces)
 }
 
-// isStaticUnsealedPath reports whether path is one of host's declared static
-// prefixes (GET/HEAD shell). The data plane is never static.
-func (s *Server) isStaticUnsealedPath(hostname, path string) bool {
-	return s.surfacesOf(hostname).IsStatic(path)
-}
-
 // clearAllowed reports whether a plaintext request on the gateway-terminated
 // leg is on a declared surface and may be served: a static GET/HEAD, a
 // declared public route, or a CORS preflight for a public path when the app
