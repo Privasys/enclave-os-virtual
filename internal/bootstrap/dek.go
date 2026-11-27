@@ -165,6 +165,9 @@ func firstBootDEK(ctx context.Context, log *zap.Logger, cfg Config, token string
 		return "", err
 	}
 	dk := payload.DataKey
+	if err := checkAttestationServer(dk.AttestationServer); err != nil {
+		return "", fmt.Errorf("dek: redeem payload: %w", err)
+	}
 	dek, origin, _, err := vaultkey.ResolveOrProvision(ctx, log, vaultkey.Config{
 		Endpoints:            dk.Endpoints,
 		Threshold:            dk.Threshold,
@@ -248,13 +251,23 @@ func exportLocator(ctx context.Context, device string) (*vaultLocator, error) {
 		}
 		out = spare
 	}
+	return parseLocator(out)
+}
+
+// parseLocator reads a locator token and holds it to the image's pins
+// (pinLocator): the header is host-writable, so nothing in it is used as
+// written.
+func parseLocator(blob []byte) (*vaultLocator, error) {
 	var loc vaultLocator
-	if err := json.Unmarshal(out, &loc); err != nil {
+	if err := json.Unmarshal(blob, &loc); err != nil {
 		return nil, fmt.Errorf("locator token unreadable: %w", err)
 	}
 	if loc.Type != "privasys-vault" || loc.Handle == "" || len(loc.Endpoints) == 0 ||
 		loc.MgmtURL == "" || loc.EnclaveID == "" {
 		return nil, errors.New("locator token incomplete")
+	}
+	if err := pinLocator(&loc); err != nil {
+		return nil, err
 	}
 	return &loc, nil
 }

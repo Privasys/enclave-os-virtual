@@ -84,6 +84,16 @@ func Profile(path string) (string, error) {
 	return p, nil
 }
 
+// Current reads the image profile at path and returns it with its settings:
+// the one way every binary on the image loads them.
+func Current(path string) (string, Settings, error) {
+	p, err := Profile(path)
+	if err != nil {
+		return "", Settings{}, err
+	}
+	return p, profiles[p], nil
+}
+
 // Given are the settings the manager was started with.
 type Given struct {
 	Issuer             string
@@ -161,6 +171,15 @@ func (s Settings) MgmtURL(candidate string) string {
 		return candidate
 	}
 	return s.MgmtURLs[0]
+}
+
+// CheckAttestationServer refuses an attestation server the profile does not
+// allow.
+func (s Settings) CheckAttestationServer(v string) error {
+	if !contains(s.AttestationServers, v) {
+		return fmt.Errorf("attestation server %q is not pinned for this image (allowed: %s)", v, strings.Join(s.AttestationServers, ", "))
+	}
+	return nil
 }
 
 func contains(list []string, v string) bool {

@@ -81,16 +81,6 @@ func applyDefaults(c Config) Config {
 	return c
 }
 
-// readOptionalLine returns the first trimmed line of path, or "".
-func readOptionalLine(path string) string {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	line, _, _ := strings.Cut(string(b), "\n")
-	return strings.TrimSpace(line)
-}
-
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {

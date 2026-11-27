@@ -546,11 +546,10 @@ func resolvePinned(profileFile string, unpinned bool, g pinned.Given, registered
 		}
 		return g, nil
 	}
-	profile, err := pinned.Profile(profileFile)
+	profile, s, err := pinned.Current(profileFile)
 	if err != nil {
 		return g, err
 	}
-	s, _ := pinned.For(profile)
 	eff, err := s.Resolve(g, registered)
 	if err != nil {
 		return g, fmt.Errorf("refusing to start on a %s image: %w", profile, err)
@@ -565,11 +564,10 @@ func pinnedAppDomain(profileFile string, unpinned bool) string {
 	if unpinned {
 		return ""
 	}
-	profile, err := pinned.Profile(profileFile)
+	_, s, err := pinned.Current(profileFile)
 	if err != nil {
 		return ""
 	}
-	s, _ := pinned.For(profile)
 	return s.AppDomain
 }
 

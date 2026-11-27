@@ -40,6 +40,7 @@ import (
 
 	"golang.org/x/crypto/nacl/box"
 
+	"github.com/Privasys/enclave-os-virtual/internal/pinned"
 	"github.com/Privasys/enclave-os-virtual/internal/tdx"
 )
 
@@ -138,7 +139,10 @@ func RunRegistration(ctx context.Context, cfg Config) error {
 	if _, p, err := splitHostPort(listenAddr); err == nil && p != 0 {
 		callbackPort = p
 	}
-	imageProfile := readOptionalLine("/etc/privasys/image-profile")
+	imageProfile, _, err := pinned.Current(pinnedProfileFile)
+	if err != nil {
+		return fmt.Errorf("registration: %w", err)
+	}
 
 	// One keypair for the whole wait: re-registration refreshes the
 	// server-side epk to the same value, so an approval sealed at any
@@ -362,6 +366,11 @@ func ReportMeasurements(ctx context.Context, cfg Config) error {
 	}
 	if enclaveID == "" || token == "" || mgmtURL == "" {
 		return errors.New("measurements: ENCLAVE_ID/ENCLAVE_TOKEN/MGMT_URL not configured (legacy enclave?)")
+	}
+	// The request carries the enclave credential: only to the pinned control
+	// plane.
+	if mgmtURL, err = pinnedMgmtURL(mgmtURL); err != nil {
+		return fmt.Errorf("measurements: %w", err)
 	}
 
 	binding := sha512.Sum512([]byte("privasys-enclave-measurements-v1" + enclaveID))

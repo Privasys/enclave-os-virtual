@@ -96,3 +96,25 @@ func TestMgmtURLForRegistration(t *testing.T) {
 		t.Fatalf("empty: %s", got)
 	}
 }
+
+func TestCurrentAndAttestationServerCheck(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "image-profile")
+	if _, _, err := Current(path); err == nil {
+		t.Fatal("Current read settings with no profile file")
+	}
+	if err := os.WriteFile(path, []byte("dev\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, s, err := Current(path)
+	if err != nil || p != "dev" || s.AppDomain != "apps.test.privasys.org" {
+		t.Fatalf("Current: %q %+v %v", p, s, err)
+	}
+	if err := s.CheckAttestationServer("https://as.privasys.org/verify"); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"", "https://as.privasys.org/verify/", "https://evil.example/verify"} {
+		if s.CheckAttestationServer(v) == nil {
+			t.Fatalf("%q accepted", v)
+		}
+	}
+}

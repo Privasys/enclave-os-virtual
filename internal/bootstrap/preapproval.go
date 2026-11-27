@@ -203,6 +203,10 @@ func Redeem(ctx context.Context, cfg Config, token string) (*RedeemedEnclave, er
 // per-enclave credential is still locked inside /data at this point).
 func FetchBootAttestationToken(ctx context.Context, cfg Config, mgmtURL, enclaveID string) (string, error) {
 	cfg = applyDefaults(cfg)
+	mgmtURL, err := pinnedMgmtURL(mgmtURL)
+	if err != nil {
+		return "", fmt.Errorf("boot-token: %w", err)
+	}
 	binding := sha512.Sum512([]byte(bootBindingLabel + enclaveID))
 	quote, err := tdx.GetQuote(binding)
 	if err != nil {

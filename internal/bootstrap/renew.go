@@ -71,6 +71,11 @@ func RenewDataDEK(ctx context.Context, log *zap.Logger, cfg Config, device strin
 	case b.EnclaveID != "" && !strings.EqualFold(b.EnclaveID, loc.EnclaveID):
 		return "", "", fmt.Errorf("renew: bundle is for enclave %s, this volume belongs to %s", b.EnclaveID, loc.EnclaveID)
 	}
+	if b.AttestationServer != "" {
+		if err := checkAttestationServer(b.AttestationServer); err != nil {
+			return "", "", fmt.Errorf("renew: bundle: %w", err)
+		}
+	}
 	if b.Handle == loc.Handle {
 		return loc.Handle, loc.Handle, nil // already renewed
 	}

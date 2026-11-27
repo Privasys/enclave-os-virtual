@@ -75,6 +75,11 @@ func (b *RotateBundle) validate(loc *vaultLocator) error {
 	case b.Mrenclave == "":
 		return errors.New("rotate: bundle carries no mrenclave")
 	}
+	if b.AttestationServer != "" {
+		if err := checkAttestationServer(b.AttestationServer); err != nil {
+			return fmt.Errorf("rotate: bundle: %w", err)
+		}
+	}
 	// The handle must be the one this volume already uses. A rotation that
 	// re-pointed /data at a different key would abandon the data.
 	if b.Handle != "" && b.Handle != loc.Handle {
