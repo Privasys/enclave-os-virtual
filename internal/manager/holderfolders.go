@@ -566,6 +566,10 @@ func (s *Server) revokeHolderCapability(w http.ResponseWriter, container, appID,
 	}
 	s.events.emit(container, resourceEvent{Type: "capability.revoked", Resource: g.Resource, Subject: g.Subject, CapabilityID: capID})
 	if g.Kind == launcher.AppStorageKind {
+		// The folder lock covers the close AND the revoke: until the grant
+		// is revoked its wrapped key could reopen the folder, so no open may
+		// run between the verified close and the revoke.
+		defer s.holdersOpen.lock(key)()
 		if verified, err := s.closeHolderVerified(container, key, g); err != nil {
 			s.log.Error("holder revoke", zap.String("container", container), zap.String("capability_id", capID), zap.Error(err))
 			s.jsonError(w, http.StatusInternalServerError, "the folder could not be closed")
