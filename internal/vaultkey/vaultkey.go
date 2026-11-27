@@ -521,7 +521,7 @@ func Export(ctx context.Context, log *zap.Logger, cfg Config, handle string, ima
 
 // vaultConn is the part of a vault session this package uses; tests fake it.
 type vaultConn interface {
-	ExportKey(ctx context.Context, handle string, approvals ...vault.ApprovalToken) ([]byte, error)
+	ExportKey(ctx context.Context, handle string) ([]byte, error)
 	CreateKey(ctx context.Context, handle string, material []byte, grant string) (uint64, error)
 	CreateKeyRenewal(ctx context.Context, handle string, material []byte, grant string, r vault.Renewal) (uint64, error)
 	GetPolicyRaw(ctx context.Context, handle string) (json.RawMessage, uint32, error)

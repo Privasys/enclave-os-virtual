@@ -36,7 +36,7 @@ type fakeVault struct {
 
 type fakeConn struct{ v *fakeVault }
 
-func (c fakeConn) ExportKey(_ context.Context, handle string, _ ...vault.ApprovalToken) ([]byte, error) {
+func (c fakeConn) ExportKey(_ context.Context, handle string) ([]byte, error) {
 	if s, ok := c.v.shares[handle]; ok && !c.v.deleted[handle] {
 		return s, nil
 	}
