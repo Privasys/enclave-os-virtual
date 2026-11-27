@@ -99,14 +99,25 @@ const (
 	// expired ones; verdictSweepInterval bounds how often that happens.
 	verdictSweepAbove    = 4096
 	verdictSweepInterval = time.Second
+	// verdictMax caps the table. Full of live verdicts, a new connection's
+	// evidence is refused: evicting a live verdict would fail a caller that
+	// did nothing wrong, while refusing fails only the newcomer, closed.
+	verdictMax = 8192
 )
+
+// errVerdictTableFull refuses new caller evidence while the table is full.
+var errVerdictTableFull = fmt.Errorf("too many attested connections on this host; retry later")
 
 // recordVerdictLocked stores a connection's verdict, first dropping expired
 // verdicts when the table is large and the last sweep is older than
-// verdictSweepInterval. Callers hold v.mu.
-func (v *ingressVerifier) recordVerdictLocked(conn string, pv *peerVerdict) {
+// verdictSweepInterval, or at once when it is full. A connection's own
+// verdict is always replaced; a new one is refused while the table is full.
+// Callers hold v.mu.
+func (v *ingressVerifier) recordVerdictLocked(conn string, pv *peerVerdict) error {
 	now := time.Now()
-	if len(v.verdicts) > verdictSweepAbove && now.Sub(v.lastSweep) >= verdictSweepInterval {
+	_, known := v.verdicts[conn]
+	full := !known && len(v.verdicts) >= verdictMax
+	if full || len(v.verdicts) > verdictSweepAbove && now.Sub(v.lastSweep) >= verdictSweepInterval {
 		v.lastSweep = now
 		for k, vd := range v.verdicts {
 			if now.Sub(vd.mono) > verdictTTL {
@@ -114,7 +125,11 @@ func (v *ingressVerifier) recordVerdictLocked(conn string, pv *peerVerdict) {
 			}
 		}
 	}
+	if !known && len(v.verdicts) >= verdictMax {
+		return errVerdictTableFull
+	}
 	v.verdicts[conn] = pv
+	return nil
 }
 
 // anyCallerAppID is the allowed-caller entry that admits ANY attested caller
@@ -374,8 +389,11 @@ func (v *ingressVerifier) verifyPeerEvidence(req *peerEvidenceRequest) error {
 		return fmt.Errorf("cannot record the caller's verdict: %w", err)
 	}
 	v.mu.Lock()
-	v.recordVerdictLocked(req.Conn, &peerVerdict{certFP: sha256.Sum256(certDER), host: host, info: info, at: at, mono: time.Now()})
+	err = v.recordVerdictLocked(req.Conn, &peerVerdict{certFP: sha256.Sum256(certDER), host: host, info: info, at: at, mono: time.Now()})
 	v.mu.Unlock()
+	if err != nil {
+		return err
+	}
 	v.log.Debug("ingress caller verified",
 		zap.String("host", host),
 		zap.String("conn", req.Conn),
