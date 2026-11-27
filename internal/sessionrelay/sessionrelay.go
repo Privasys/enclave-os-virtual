@@ -499,7 +499,7 @@ type initResponse struct {
 	// EncAuthReject is the stable reason a supplied EncAuth voucher was
 	// refused (RejectReason: enc-changed / workload-changed /
 	// voucher-expired / voucher-invalid); the bootstrap then fell through
-	// to the unauthenticated legacy path. In the body (not only the
+	// to the anonymous bootstrap. In the body (not only the
 	// X-Privasys-Reason header) because the gateway-terminate leg's CORS
 	// does not expose custom headers to the browser SDK.
 	EncAuthReject string `json:"encauth_reject,omitempty"`
@@ -549,13 +549,7 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Default: random session id (FIDO2-bound bootstrap).
-	var (
-		sessionID    string
-		sessionIDRaw []byte
-		sub          string
-		rejectReason string
-	)
+	var sub, rejectReason string
 
 	if req.EncAuth != nil && verifier != nil {
 		// Rate-limit voucher-backed bootstraps per sid BEFORE the
@@ -570,7 +564,7 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 		}
 		// The voucher's validity window is judged by trusted time, never the
 		// host clock; without trusted time the voucher is refused and the
-		// bootstrap falls through to the legacy path like any other refusal.
+		// bootstrap falls through to the anonymous one like any other refusal.
 		var payload *EncAuthPayload
 		verifyAt, vErr := trustedtime.Now()
 		if vErr == nil {
@@ -584,7 +578,7 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		if vErr != nil {
-			// Fall through to legacy bootstrap path so the SDK can
+			// Fall through to the anonymous bootstrap so the SDK can
 			// retry with a fresh FIDO2 ceremony. Surface the raw error
 			// via a diagnostics header, and the STABLE reason both as
 			// X-Privasys-Reason and in the response body
@@ -601,25 +595,14 @@ func (m *Manager) handleInit(w http.ResponseWriter, r *http.Request) {
 			// transport handle, not an identity. The persistent
 			// per-(user, app, device) `sid` lives in the IdP and the
 			// JWT, and the SDK keeps using it to fetch fresh vouchers.
-			_ = payload // (Sub already captured)
 		}
 	}
 
-	if sessionID == "" {
-		sessionIDRaw = make([]byte, 16)
-		if _, err := rand.Read(sessionIDRaw); err != nil {
-			http.Error(w, "rand", http.StatusInternalServerError)
-			return
-		}
-		sessionID = base64.RawURLEncoding.EncodeToString(sessionIDRaw)
-	}
-
-	// A rebind reuses a session id: never across hosts, or the gateway could
-	// move a live session onto another app.
-	if prev, live := m.lookupByID(sessionID); live && !prev.sameHost(r.Host) {
-		http.Error(w, "unknown or expired session", http.StatusUnauthorized)
-		return
-	}
+	// The session id is random on every bootstrap, voucher or not: a
+	// transport handle, never reused.
+	sessionIDRaw := make([]byte, 16)
+	_, _ = rand.Read(sessionIDRaw) // never fails: crypto/rand panics instead
+	sessionID := base64.RawURLEncoding.EncodeToString(sessionIDRaw)
 	sess, err := buildSession(sessionID, sessionIDRaw, shared, m.ttl, m.now)
 	if err != nil {
 		http.Error(w, "session derive: "+err.Error(), http.StatusInternalServerError)
