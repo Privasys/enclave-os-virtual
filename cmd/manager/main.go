@@ -113,19 +113,19 @@ func runServe(args []string) error {
 	containerdSocket := fs.String("containerd-socket", "",
 		"containerd socket path (default: /run/containerd/containerd.sock)")
 
-	// OIDC flags (required).
+	// OIDC flags (default: the image's pinned values).
 	oidcIssuer := fs.String("oidc-issuer", "",
-		"OIDC issuer URL for bearer token verification (required, e.g. https://auth.example.com)")
+		"OIDC issuer URL for bearer token verification (default: the image's pinned issuer)")
 	oidcAudience := fs.String("oidc-audience", "",
-		"Expected OIDC audience claim (default: the image's pinned audience; off an image, "+defaultOIDCAudience+")")
+		"Expected OIDC audience claim (default: the image's pinned audience)")
 	walletProviderJWKS := fs.String("wallet-provider-jwks", os.Getenv("WALLET_PROVIDER_JWKS"),
 		"Wallet-provider JWKS URL used to verify wallet-originated call proofs "+
 			"(the free_for:[\"wallet\"] API-fee exemption). Defaults to "+
 			"<oidc-issuer>/wallet-provider/jwks. Empty disables the exemption.")
 	oidcManagerRole := fs.String("oidc-manager-role", "",
-		"OIDC role required for mutating operations (load/unload); default: the image's pinned role, off an image "+defaultManagerRole)
+		"OIDC role required for mutating operations (load/unload); default: the image's pinned role")
 	oidcMonitoringRole := fs.String("oidc-monitoring-role", "",
-		"OIDC role for read-only access (healthz, readyz, status, metrics); default: the image's pinned role, off an image "+defaultMonitoringRole)
+		"OIDC role for read-only access (healthz, readyz, status, metrics); default: the image's pinned role")
 	oidcRoleClaim := fs.String("oidc-role-claim", "roles",
 		"JWT claim key containing roles (supports map or array formats)")
 
@@ -176,9 +176,6 @@ func runServe(args []string) error {
 		"TLS server name presented to the gateways (env: TUNNEL_SERVER_NAME). Default: tunnel.<hostname>")
 	isolationUserns := fs.Bool("isolation-userns", os.Getenv("PRIVASYS_ISOLATION_USERNS") == "true",
 		"Run each container in a user namespace (container-root -> unprivileged host uid). SHARED multi-tenant VMs only; leave off on dedicated/GPU VMs. EXPERIMENTAL/UNVALIDATED — validate on m2-dev before prod (env: PRIVASYS_ISOLATION_USERNS)")
-	unpinned := fs.Bool("unpinned", false,
-		"Run OFF an Enclave OS image (a developer machine, a test): no image profile, so the trust settings are taken as given. "+
-			"Never set on an image: its launch wrapper does not pass it, and without it a missing profile refuses the start")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -187,7 +184,7 @@ func runServe(args []string) error {
 	// An Enclave OS image runs only with the trust settings compiled for its
 	// measured profile: these flags come from /data/manager.env, which is
 	// outside the measurement. Empty ones take the pinned values.
-	eff, err := resolvePinned(pinned.ProfileFile, *unpinned, pinned.Given{
+	eff, err := resolvePinned(pinned.ProfileFile, pinned.Given{
 		Issuer:             *oidcIssuer,
 		Audience:           *oidcAudience,
 		ManagerRole:        *oidcManagerRole,
@@ -205,9 +202,6 @@ func runServe(args []string) error {
 	*rsMgmtURL = eff.MgmtURL
 
 	// Validate required flags.
-	if *oidcIssuer == "" {
-		return fmt.Errorf("--oidc-issuer is required")
-	}
 	if *caCert == "" {
 		return fmt.Errorf("--ca-cert is required")
 	}
@@ -287,7 +281,7 @@ func runServe(args []string) error {
 		MachineName:            *machineName,
 		Hostname:               *hostname,
 		PlatformHostname:       platformHostname,
-		AppDomain:              pinnedAppDomain(pinned.ProfileFile, *unpinned),
+		AppDomain:              pinnedAppDomain(pinned.ProfileFile),
 		ManagementPort:         "9443",
 		CACertPath:             *caCert,
 		CAKeyPath:              *caKeyPath,
@@ -302,7 +296,7 @@ func runServe(args []string) error {
 		ToolSpecEnclaveToken: *rsEnclaveToken,
 		IsolationUserns:      *isolationUserns,
 		Issuer:               *oidcIssuer,
-		Audience:             appAudience(*oidcAudience),
+		Audience:             *oidcAudience,
 	}
 	// Bring up the container bridge + egress NAT + manager-port guard before
 	// any container is loaded or the management API binds (#45). Fatal on
@@ -502,50 +496,10 @@ func newLogger(level string) (*zap.Logger, error) {
 	return cfg.Build()
 }
 
-// defaultOIDCAudience is the --oidc-audience default: a host that never set
-// the flag. It is no platform audience, so apps are not given it.
-const defaultOIDCAudience = "enclave-os-virtual"
-
-// appAudience is the audience passed to apps as PRIVASYS_AUDIENCE: the one the
-// host was configured with, or none when the flag kept its default.
-func appAudience(flag string) string {
-	if a := strings.TrimSpace(flag); a != defaultOIDCAudience {
-		return a
-	}
-	return ""
-}
-
-// walletJWKSURL resolves the wallet-provider JWKS endpoint used to verify
-// wallet-originated call proofs. An explicit override wins; otherwise it is
-// derived from the OIDC issuer, which is also the wallet provider.
-const (
-	defaultManagerRole    = "privasys-platform:manager"
-	defaultMonitoringRole = "privasys-platform:monitoring"
-)
-
-// resolvePinned gives the trust settings the manager runs with. By default
-// the manager is an Enclave OS image's: the profile file must exist, and the
-// settings are its pinned values (an empty one is filled, a different one
-// refuses the start). Only an explicit unpinned run (off an image) takes them
-// as given, with the historical defaults.
-func resolvePinned(profileFile string, unpinned bool, g pinned.Given, registered bool) (pinned.Given, error) {
-	if unpinned {
-		// On an image the profile file exists: --unpinned is then refused,
-		// so no launcher bug or unit override can run an image unpinned.
-		if _, err := os.Stat(profileFile); err == nil {
-			return g, fmt.Errorf("--unpinned refused: %s exists, this is an Enclave OS image", profileFile)
-		}
-		if g.Audience == "" {
-			g.Audience = defaultOIDCAudience
-		}
-		if g.ManagerRole == "" {
-			g.ManagerRole = defaultManagerRole
-		}
-		if g.MonitoringRole == "" {
-			g.MonitoringRole = defaultMonitoringRole
-		}
-		return g, nil
-	}
+// resolvePinned gives the trust settings the manager runs with: the image
+// profile file must exist, and the settings are its pinned values (an empty
+// one is filled, a different one refuses the start).
+func resolvePinned(profileFile string, g pinned.Given, registered bool) (pinned.Given, error) {
 	profile, s, err := pinned.Current(profileFile)
 	if err != nil {
 		return g, err
@@ -559,11 +513,8 @@ func resolvePinned(profileFile string, unpinned bool, g pinned.Given, registered
 
 // pinnedAppDomain is the app domain compiled for the image's profile (the
 // name the control plane gives this manager is <machine-name>-mgr.<domain>),
-// or "" when unpinned or the profile has none.
-func pinnedAppDomain(profileFile string, unpinned bool) string {
-	if unpinned {
-		return ""
-	}
+// or "" when the profile has none.
+func pinnedAppDomain(profileFile string) string {
 	_, s, err := pinned.Current(profileFile)
 	if err != nil {
 		return ""
@@ -571,6 +522,9 @@ func pinnedAppDomain(profileFile string, unpinned bool) string {
 	return s.AppDomain
 }
 
+// walletJWKSURL resolves the wallet-provider JWKS endpoint used to verify
+// wallet-originated call proofs. An explicit override wins; otherwise it is
+// derived from the OIDC issuer, which is also the wallet provider.
 func walletJWKSURL(override, issuer string) string {
 	if override != "" {
 		return override
