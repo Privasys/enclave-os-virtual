@@ -425,7 +425,7 @@ func (r *LoadRequest) Validate() error {
 			return fmt.Errorf("config_api.path is required")
 		}
 	}
-	return nil
+	return validateResourceDecls(r.ResourceDecls)
 }
 
 // toContainerSpec converts a LoadRequest to a manifest.Container spec

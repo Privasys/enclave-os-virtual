@@ -1,5 +1,7 @@
 package launcher
 
+import "fmt"
+
 // ResourceDecl is a user-owned resource an app declares in its measured
 // manifest (P1 of plans/drive-as-remote-disk.md), forwarded by the control
 // plane in the load request. The runtime owns the consent flow that turns a
@@ -31,6 +33,22 @@ type ResourceDecl struct {
 	// screen would look identical. The control plane strips any value the
 	// manifest carried before stamping its own.
 	ResourceApp string `json:"resource_app,omitempty"`
+}
+
+// validateResourceDecls refuses a declaration the runtime would otherwise
+// have to guess about. An app_storage folder must say whether the app keeps
+// the holder's key to work unattended: the wallet shows the holder that
+// choice, so a missing option must never be read as either answer.
+func validateResourceDecls(decls []ResourceDecl) error {
+	for _, d := range decls {
+		if d.Kind != AppStorageKind {
+			continue
+		}
+		if _, ok := d.Options["unattended"].(bool); !ok {
+			return fmt.Errorf("resource %q (%s) must set the option unattended to true or false", d.Name, d.Kind)
+		}
+	}
+	return nil
 }
 
 // ContainerResourceDecls returns the resources a loaded container declared

@@ -106,11 +106,20 @@ func TestEventHubFansOutAndDropsSlowListeners(t *testing.T) {
 	}
 }
 
-func TestDeclUnattendedDefaultsToTrue(t *testing.T) {
-	if !declUnattended(capabilityDecl{}) {
-		t.Fatal("no options: unattended by default")
+// Only an explicit true keeps the holder's key; a missing or malformed
+// option reads as false, as the wallet and the control plane read it.
+func TestDeclUnattendedOnlyWhenDeclared(t *testing.T) {
+	for _, d := range []capabilityDecl{
+		{},
+		{Options: map[string]any{}},
+		{Options: map[string]any{"unattended": false}},
+		{Options: map[string]any{"unattended": "true"}},
+	} {
+		if declUnattended(d) {
+			t.Fatalf("%+v reads as unattended", d.Options)
+		}
 	}
-	if declUnattended(capabilityDecl{Options: map[string]any{"unattended": false}}) {
-		t.Fatal("unattended false must be honoured")
+	if !declUnattended(capabilityDecl{Options: map[string]any{"unattended": true}}) {
+		t.Fatal("unattended true must be honoured")
 	}
 }

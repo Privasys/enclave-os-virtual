@@ -458,14 +458,13 @@ func (s *Server) mintHolderCapability(w http.ResponseWriter, r *http.Request, co
 	})
 }
 
+// declUnattended reports whether the declaration lets the app keep the
+// holder's key to work unattended. Only an explicit true does: a load
+// refuses an app_storage declaration without the option, and anything else
+// reads as false, as the wallet and the control plane read it.
 func declUnattended(decl capabilityDecl) bool {
-	if decl.Options == nil {
-		return true
-	}
-	if v, ok := decl.Options["unattended"].(bool); ok {
-		return v
-	}
-	return true
+	v, _ := decl.Options["unattended"].(bool)
+	return v
 }
 
 func newCapabilityID() string {
