@@ -55,7 +55,6 @@ func Close(mount, holderKey, keyID string) (Status, []int, error) { return 0, ni
 func KeyStatus(mount, keyID string) (Status, error)               { return 0, errUnsupported }
 func Usage(mount, holderKey string) (int64, error)                { return 0, errUnsupported }
 func Chown(mount, holderKey string, hostUID int) error            { return errUnsupported }
-func AddKey(mount string, rawKey []byte) (string, error)          { return "", errUnsupported }
 
 // EnsureView, BindReadOnly and Unbind are Linux-only (see mounts_linux.go).
 func EnsureView(src, view string) error { return errors.New("holders: not supported on this OS") }

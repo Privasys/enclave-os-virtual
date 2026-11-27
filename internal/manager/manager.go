@@ -191,16 +191,6 @@ type Config struct {
 	// and outcomes (P2). Keep it on the encrypted /data volume; empty keeps
 	// them in memory (dev/test only).
 	CapabilityStateDir string
-	// ResourceApps names the resource service for each capability kind, by
-	// app id (undashed hex), for this fleet.
-	//
-	// Keyed by kind and supplied by the OPERATOR rather than by the app that
-	// is asking. An app that could name its own resource service could point
-	// the holder at one it controls, and the wallet screen would look exactly
-	// the same. An unknown kind resolves to nothing and the ask is refused,
-	// which is the direction to fail in.
-	ResourceApps map[string]string
-
 	// Clock is the trusted clock behind every security decision. It answers
 	// the clock monitor's polls and takes its config from the management
 	// service. nil disables both routes (dev/test only).
@@ -707,7 +697,6 @@ func (s *Server) Start(ctx context.Context) error {
 	// receive approvals, revokes, opens and closes without polling.
 	mux.HandleFunc("POST /api/v1/resources/{resource}/open", s.handleResourceOpen)
 	mux.HandleFunc("POST /api/v1/resources/{resource}/close", s.handleResourceClose)
-	mux.HandleFunc("GET /api/v1/resources/{resource}/holders", s.handleResourceHolders)
 	mux.HandleFunc("GET /api/v1/resources/{resource}/subjects", s.handleResourceSubjects)
 	mux.HandleFunc("GET /api/v1/resources/events", s.handleResourceEvents)
 	mux.HandleFunc("GET /api/v1/resources/{resource}/status", s.handleResourceStatus)

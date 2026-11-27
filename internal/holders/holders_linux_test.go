@@ -70,7 +70,7 @@ func TestHolderFoldersOnALoopDevice(t *testing.T) {
 	// A kernel without CONFIG_FS_ENCRYPTION (a workstation's WSL, say) cannot
 	// run the rest.
 	if probe, _ := NewRawKey(); probe != nil {
-		if _, err := AddKey(mount, probe); err != nil {
+		if _, err := addKey(mount, probe); err != nil {
 			t.Skipf("this kernel has no filesystem encryption: %v", err)
 		}
 	}

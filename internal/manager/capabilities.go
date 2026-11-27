@@ -104,8 +104,7 @@ type capabilityGrant struct {
 	// question, not a granted one; see stale.
 	Permissions []string `json:"permissions,omitempty"`
 	// Kind and Subject are recorded so the app's subjects can be listed and
-	// a holder's capabilities found without a second store. Records from
-	// before they were kept have neither.
+	// a holder's capabilities found without a second store.
 	Kind    string `json:"kind,omitempty"`
 	Subject string `json:"subject,omitempty"`
 
@@ -544,20 +543,13 @@ func (s *Server) resourceDecl(container, resource string) (capabilityDecl, bool)
 // connector a runtime release, and would put "which product serves mail" in
 // an operating system, which is the wrong layer for it.
 //
-// Config.ResourceApps remains only as an OPERATOR OVERRIDE for a fleet whose
-// control plane does not stamp yet. It is keyed by kind, carries no defaults,
-// and is expected to disappear once every fleet's control plane is current.
-//
 // An unresolved kind returns "" and the caller refuses the ask, so a fleet
 // with no service for a kind cannot be talked into consenting to one.
 func (s *Server) resourceAppFor(decl capabilityDecl) string {
 	if decl.Kind == launcher.AppStorageKind {
 		return resourceAppSelf
 	}
-	if decl.ResourceApp != "" {
-		return decl.ResourceApp
-	}
-	return s.cfg.ResourceApps[decl.Kind]
+	return decl.ResourceApp
 }
 
 // handleResourceRequest starts (or reports) an ask for the calling
@@ -915,8 +907,7 @@ func (b *capabilityBroker) resolveHolder(nonce, capabilityID string, result map[
 }
 
 // grantsFor lists every recorded outcome of an app, from memory and from
-// the volume (records from before Kind and Subject were kept come back
-// without them and are skipped by callers that need those).
+// the volume.
 func (b *capabilityBroker) grantsFor(appID string) []*capabilityGrant {
 	b.mu.Lock()
 	defer b.mu.Unlock()

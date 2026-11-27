@@ -79,7 +79,7 @@ func ContainerViewReadOnly(pid int, containerPath string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("holders: container mountinfo: %w", err)
 	}
-	return MountInfoReadOnly(data, containerPath), nil
+	return mountInfoReadOnly(data, containerPath), nil
 }
 
 // Unbind removes a read-only bind made by BindReadOnly (a dir that is not a

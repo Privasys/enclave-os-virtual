@@ -384,7 +384,6 @@ func (s *Server) mintHolderCapability(w http.ResponseWriter, r *http.Request, co
 			KeyB64     string `json:"key_b64"`
 			Unattended *bool  `json:"unattended"`
 		} `json:"setup"`
-		KeyB64 string `json:"key_b64"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&body); err != nil {
 		s.jsonError(w, http.StatusBadRequest, "invalid body")
@@ -418,11 +417,7 @@ func (s *Server) mintHolderCapability(w http.ResponseWriter, r *http.Request, co
 			return
 		}
 	}
-	keyB64 := body.Setup.KeyB64
-	if keyB64 == "" {
-		keyB64 = body.KeyB64
-	}
-	raw, err := base64.StdEncoding.DecodeString(keyB64)
+	raw, err := base64.StdEncoding.DecodeString(body.Setup.KeyB64)
 	if err != nil || len(raw) != holders.RawKeySize {
 		s.jsonError(w, http.StatusBadRequest, fmt.Sprintf("setup.key_b64 must be %d bytes, standard base64", holders.RawKeySize))
 		return
@@ -556,7 +551,7 @@ func (s *Server) revokeHolderCapability(w http.ResponseWriter, container, appID,
 		s.jsonError(w, http.StatusNotFound, "not this holder's capability")
 		return
 	}
-	if g.Subject != "" && g.Subject != sub {
+	if g.Subject != sub {
 		s.jsonError(w, http.StatusNotFound, "not this holder's capability")
 		return
 	}
@@ -741,7 +736,6 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 	s.holdersOpen.set(key, holderOpenState{KeyID: keyID, HostUID: hostUID, OpenedAt: time.Now().UTC(), ReadOnly: readOnly,
 		Container: name, HolderKey: g.HolderKey, Resource: resource, Subject: body.Subject, CapabilityID: g.CapabilityID,
 		Mount: hf.Mount, Exposed: hf.Exposed})
-	s.events.emit(name, resourceEvent{Type: "holder.opened", Resource: resource, Subject: body.Subject, CapabilityID: g.CapabilityID})
 	s.answerOpen(w, name, hf.Mount, g, containerPath)
 }
 
@@ -820,36 +814,7 @@ func (s *Server) handleResourceClose(w http.ResponseWriter, r *http.Request) {
 	}
 	s.holdersOpen.drop(key)
 	s.releaseHolderBind(hf, g.HolderKey)
-	s.events.emit(name, resourceEvent{Type: "holder.closed", Resource: resource, Subject: body.Subject, CapabilityID: g.CapabilityID})
 	s.writeJSON(w, http.StatusOK, map[string]any{"status": "closed"})
-}
-
-// handleResourceHolders: GET /api/v1/resources/{resource}/holders.
-func (s *Server) handleResourceHolders(w http.ResponseWriter, r *http.Request) {
-	name, ok := s.containerFromRequest(w, r)
-	if !ok {
-		return
-	}
-	resource := r.PathValue("resource")
-	appID := s.launcher.ContainerFreezeState(name).AppID
-	hf, err := s.launcher.HolderFolders(name)
-	if err != nil {
-		s.jsonError(w, http.StatusNotImplemented, err.Error())
-		return
-	}
-	out := []map[string]any{}
-	for _, g := range s.caps.grantsFor(appID) {
-		if g.Resource != resource || g.HolderKey == "" || !g.usable() {
-			continue
-		}
-		state := "locked"
-		if _, open := s.holdersOpen.get(grantKey(appID, resource, g.Subject)); open {
-			state = "open"
-		}
-		used, _ := holders.Usage(hf.Mount, g.HolderKey)
-		out = append(out, map[string]any{"key": g.HolderKey, "state": state, "used_bytes": used, "unattended": g.Unattended})
-	}
-	s.writeJSON(w, http.StatusOK, map[string]any{"holders": out})
 }
 
 // handleResourceSubjects: GET /api/v1/resources/{resource}/subjects. The

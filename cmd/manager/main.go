@@ -351,7 +351,6 @@ func runServe(args []string) error {
 		AppPolicyPath: "/data/manager-app-policy.json",
 		// Resource-capability state (P2) lives beside the registry on /data.
 		CapabilityStateDir: "/data/manager-capabilities",
-		ResourceApps:       resourceApps(),
 		Clock:              clock,
 	}
 	srv := manager.New(mgrCfg, log, l, verifier)
@@ -533,47 +532,6 @@ func walletJWKSURL(override, issuer string) string {
 		return ""
 	}
 	return strings.TrimRight(issuer, "/") + "/wallet-provider/jwks"
-}
-
-// resourceApps is the OPERATOR OVERRIDE for which app serves a capability
-// kind on this fleet, keyed by kind, valued by undashed app id.
-//
-// It carries no defaults and names no product, deliberately. Which app serves
-// "storage.folder" or "mail.mailbox" is not something a generic runtime should
-// know: a table of product app ids compiled in here would mean shipping a
-// connector required a runtime release, and it would put a specific company's
-// product catalogue inside an operating system. The control plane stamps the
-// app id onto each resource declaration it forwards at deploy, and the runtime
-// relays it (see manager.resourceAppFor).
-//
-// This exists only for a fleet whose control plane does not stamp yet, and is
-// expected to be deleted once none are left. PRIVASYS_RESOURCE_APPS is
-// "kind=appid,kind=appid", and the runtime never reads the kind: it is a map
-// key it was handed, not a value it understands.
-//
-// The older PRIVASYS_STORAGE_RESOURCE_APP is deliberately NOT read. Honouring
-// it would mean writing "storage.folder" in here, and one product's vocabulary
-// compiled into every enclave on the fleet is exactly what this change exists
-// to remove. Operators express the same thing as
-// PRIVASYS_RESOURCE_APPS=storage.folder=<app id>, which the runtime treats as
-// an opaque pair. The roll is coordinated with the control-plane configuration
-// either way (see the sequencing note in know-how/mail-connector.md).
-//
-// It is never the asking app's to supply: an app that could name its own
-// resource service could point the holder at one it controls, and the consent
-// screen would look identical.
-func resourceApps() map[string]string {
-	apps := map[string]string{}
-	// Split on the separators rather than parsing: a malformed entry should
-	// be ignored, not take the manager down at boot over a fleet env var.
-	for _, pair := range strings.Split(os.Getenv("PRIVASYS_RESOURCE_APPS"), ",") {
-		kind, app, ok := strings.Cut(strings.TrimSpace(pair), "=")
-		kind, app = strings.TrimSpace(kind), strings.TrimSpace(app)
-		if ok && kind != "" && app != "" {
-			apps[kind] = app
-		}
-	}
-	return apps
 }
 
 // signerOrNil keeps a nil *Signer out of the interface field: a typed nil

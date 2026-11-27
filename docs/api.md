@@ -450,10 +450,6 @@ kernel. `200 {"status":"closed"}` once the kernel reports the key absent;
 in use (the key is then "incompletely removed" and those files stay readable
 until the processes end).
 
-### GET /api/v1/resources/{resource}/holders
-
-`{"holders":[{"key":"<holder>","state":"open|locked","used_bytes":...,"unattended":...}]}`
-
 ### GET /api/v1/resources/{resource}/subjects
 
 The subjects with a recorded outcome for the resource, so an app keeps no
@@ -462,7 +458,7 @@ record of its own: `{"subjects":[{"subject":...,"status":"approved|denied|revoke
 ### GET /api/v1/resources/events
 
 `text/event-stream`. `event:` is one of `capability.approved`,
-`capability.denied`, `capability.revoked`, `holder.opened`, `holder.closed`;
+`capability.denied`, `capability.revoked`;
 `data:` is `{"resource","subject","capability_id","at"}`. There is no replay:
 a client reads status on connect and then listens.
 

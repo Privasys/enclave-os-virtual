@@ -5,12 +5,12 @@ import (
 	"strings"
 )
 
-// MountInfoReadOnly reports whether, in a /proc/<pid>/mountinfo listing,
+// mountInfoReadOnly reports whether, in a /proc/<pid>/mountinfo listing,
 // the topmost mount AT mountPoint exists and carries the per-mount "ro"
 // option. A path that is not its own mount point is not read-only by this
 // test, whatever its parent is: the read-only bind is always its own mount.
 // The last matching line wins (the kernel lists stacked mounts in order).
-func MountInfoReadOnly(mountinfo []byte, mountPoint string) bool {
+func mountInfoReadOnly(mountinfo []byte, mountPoint string) bool {
 	ro, found := false, false
 	for _, line := range strings.Split(string(mountinfo), "\n") {
 		f := strings.Fields(line)

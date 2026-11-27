@@ -27,11 +27,11 @@ func TestMountInfoReadOnlyReadsTheMountItself(t *testing.T) {
 		"a longer path is not this folder":     {otherKey, false},
 		"empty":                                {"", false},
 	} {
-		if got := MountInfoReadOnly([]byte(c.info), at); got != c.want {
+		if got := mountInfoReadOnly([]byte(c.info), at); got != c.want {
 			t.Errorf("%s: %v, want %v", name, got, c.want)
 		}
 	}
-	if !MountInfoReadOnly([]byte("1 2 0:1 / /data/a\\040b ro - tmpfs x rw\n"), "/data/a b") {
+	if !mountInfoReadOnly([]byte("1 2 0:1 / /data/a\\040b ro - tmpfs x rw\n"), "/data/a b") {
 		t.Error("an escaped space in the mount point was not read")
 	}
 }

@@ -60,14 +60,11 @@ type HolderFolders struct {
 	// live under Mount/holders): every key, ownership and file operation of
 	// the runtime goes through it. Exposed is the volume's own mount point,
 	// which the container sees at /data (rslave): a read-only grant's bind is
-	// made there. Device is the decrypted block device (for the ext4 feature
-	// check).
-	Mount, Exposed, Device string
+	// made there.
+	Mount, Exposed string
 	// WrapKey is the key that wraps holder keys for this app (32 bytes),
 	// derived from the DEK branch. Never the DEK.
 	WrapKey []byte
-	// AppID is the platform app id (hex).
-	AppID string
 }
 
 // declaresAppStorage reports whether a manifest declares holder folders.
@@ -107,9 +104,7 @@ func (l *Launcher) HolderFolders(name string) (HolderFolders, error) {
 	return HolderFolders{
 		Mount:   view,
 		Exposed: exposed,
-		Device:  "/dev/mapper/container-" + name,
 		WrapKey: wrap,
-		AppID:   appID,
 	}, nil
 }
 

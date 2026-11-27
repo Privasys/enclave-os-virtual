@@ -163,29 +163,19 @@ func TestCapabilityResultAfterHolderMintAndWithoutIt(t *testing.T) {
 }
 
 // The resource service is stamped by the CONTROL PLANE onto the declaration
-// and merely relayed here. The runtime knows no product: which app serves
-// "mail.mailbox" is not an operating system's business, and a table of them
-// compiled in would make shipping a connector a runtime release.
-//
-// The env map is an operator override for a control plane that does not stamp
-// yet. A kind resolved by neither must be unaskable rather than defaulted to
-// something plausible.
-func TestResourceAppComesFromTheFleetAndUnknownKindsRefuse(t *testing.T) {
-	s := &Server{cfg: Config{ResourceApps: map[string]string{
-		"storage.folder": "cf7a0d58",
-		"mail.mailbox":   "7958ba28",
-	}}}
-	if got := s.resourceAppFor(capabilityDecl{Kind: "storage.folder"}); got != "cf7a0d58" {
-		t.Fatalf("folder: %q", got)
+// and only relayed here: the runtime knows no product. An unstamped kind
+// resolves to nothing, so it cannot be asked for; the app's own storage is
+// the runtime's.
+func TestResourceAppIsTheControlPlanesStamp(t *testing.T) {
+	s := &Server{}
+	if got := s.resourceAppFor(capabilityDecl{Kind: "mail.mailbox", ResourceApp: "7958ba28"}); got != "7958ba28" {
+		t.Fatalf("stamped: %q", got)
 	}
-	if got := s.resourceAppFor(capabilityDecl{Kind: "mail.mailbox"}); got != "7958ba28" {
-		t.Fatalf("mailbox: %q", got)
+	if got := s.resourceAppFor(capabilityDecl{Kind: "mail.mailbox"}); got != "" {
+		t.Fatalf("an unstamped kind must resolve to nothing, got %q", got)
 	}
-	if got := s.resourceAppFor(capabilityDecl{Kind: "calendar.events"}); got != "" {
-		t.Fatalf("an undeployed kind must resolve to nothing, got %q", got)
-	}
-	if got := (&Server{}).resourceAppFor(capabilityDecl{Kind: "storage.folder"}); got != "" {
-		t.Fatalf("a fleet with no mapping must refuse everything, got %q", got)
+	if got := s.resourceAppFor(capabilityDecl{Kind: launcher.AppStorageKind}); got != resourceAppSelf {
+		t.Fatalf("app storage: %q", got)
 	}
 }
 
@@ -209,29 +199,6 @@ func TestCapabilityRequestCarriesTheLabelAndNoProductVocabulary(t *testing.T) {
 	// Nothing to say is said as nothing, not as an empty label.
 	if got := capabilityRequestFor(capabilityDecl{Kind: "mail.mailbox"}); len(got) != 0 {
 		t.Fatalf("an unlabelled declaration must name nothing, got %v", got)
-	}
-}
-
-// The control plane's stamp is the source of truth, and the runtime carries no
-// product knowledge of its own. The override exists for fleets whose control
-// plane predates the stamp, and must never win over it: if it did, an operator
-// env var set once would silently outlive the deployment that corrected it.
-func TestStampedResourceServiceWinsOverTheOperatorOverride(t *testing.T) {
-	s := &Server{cfg: Config{ResourceApps: map[string]string{
-		"mail.mailbox": "the-override",
-	}}}
-	stamped := capabilityDecl{Kind: "mail.mailbox", ResourceApp: "from-the-control-plane"}
-	if got := s.resourceAppFor(stamped); got != "from-the-control-plane" {
-		t.Fatalf("the stamp must win, got %q", got)
-	}
-	unstamped := capabilityDecl{Kind: "mail.mailbox"}
-	if got := s.resourceAppFor(unstamped); got != "the-override" {
-		t.Fatalf("an unstamped declaration should fall back to the override, got %q", got)
-	}
-	// A runtime with neither knows nothing about any product, which is the
-	// state a generic OS should be in.
-	if got := (&Server{}).resourceAppFor(unstamped); got != "" {
-		t.Fatalf("a bare runtime must know no resource services, got %q", got)
 	}
 }
 

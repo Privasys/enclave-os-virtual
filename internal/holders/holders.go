@@ -170,7 +170,7 @@ func Create(mount, holderKey string, rawKey []byte, guard func() error) (keyID s
 		if err := runGuard(); err != nil {
 			return "", err
 		}
-		id, err := AddKey(mount, rawKey)
+		id, err := addKey(mount, rawKey)
 		if err != nil {
 			return "", err
 		}
@@ -193,7 +193,7 @@ func Create(mount, holderKey string, rawKey []byte, guard func() error) (keyID s
 			return err
 		}
 		var aErr error
-		if id, aErr = AddKey(mount, rawKey); aErr != nil {
+		if id, aErr = addKey(mount, rawKey); aErr != nil {
 			return aErr
 		}
 		return setPolicy(folder, id)
@@ -215,7 +215,7 @@ func Open(mount, holderKey string, rawKey []byte, hostUID int) (keyID string, er
 	if fi, statErr := os.Stat(folder); statErr != nil || !fi.IsDir() {
 		return "", fmt.Errorf("holders: no folder for %s", holderKey)
 	}
-	id, err := AddKey(mount, rawKey)
+	id, err := addKey(mount, rawKey)
 	if err != nil {
 		return "", err
 	}
@@ -283,10 +283,10 @@ func Usage(mount, holderKey string) (int64, error) {
 
 // ---- the ioctls ---------------------------------------------------------
 
-// AddKey loads rawKey into the filesystem's keyring and returns the
+// addKey loads rawKey into the filesystem's keyring and returns the
 // identifier the kernel derives from it (hex). Loading the same key twice
 // is a no-op with the same identifier.
-func AddKey(mount string, rawKey []byte) (string, error) {
+func addKey(mount string, rawKey []byte) (string, error) {
 	if len(rawKey) != RawKeySize {
 		return "", fmt.Errorf("holders: key must be %d bytes", RawKeySize)
 	}

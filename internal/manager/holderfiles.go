@@ -132,7 +132,6 @@ func (s *Server) ensureHolderOpen(container, appID, resource, sub string, g *cap
 	s.holdersOpen.set(key, holderOpenState{KeyID: keyID, HostUID: -1, OpenedAt: time.Now().UTC(), ReadOnly: readOnly,
 		Container: container, HolderKey: g.HolderKey, Resource: resource, Subject: sub, CapabilityID: g.CapabilityID,
 		Mount: hf.Mount, Exposed: hf.Exposed})
-	s.events.emit(container, resourceEvent{Type: "holder.opened", Resource: resource, Subject: sub, CapabilityID: g.CapabilityID})
 	return nil
 }
 

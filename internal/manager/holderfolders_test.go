@@ -102,7 +102,7 @@ func TestEventHubFansOutAndDropsSlowListeners(t *testing.T) {
 	default:
 	}
 	for i := 0; i < 100; i++ {
-		h.emit("ctr", resourceEvent{Type: "holder.opened"})
+		h.emit("ctr", resourceEvent{Type: "capability.revoked"})
 	}
 }
 

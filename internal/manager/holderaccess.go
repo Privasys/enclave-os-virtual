@@ -92,9 +92,6 @@ func (s *Server) closeFoldersNotReadOnly(container string, pid int, open map[str
 		}
 		s.releaseHolderBind(launcher.HolderFolders{Mount: st.Mount, Exposed: st.Exposed}, st.HolderKey)
 		s.holdersOpen.drop(key)
-		if s.events != nil {
-			s.events.emit(container, resourceEvent{Type: "holder.closed", Resource: st.Resource, Subject: st.Subject, CapabilityID: st.CapabilityID})
-		}
 	}
 }
 
