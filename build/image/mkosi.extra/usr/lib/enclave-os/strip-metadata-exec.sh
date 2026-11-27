@@ -45,7 +45,8 @@ set_host_keys = false
 CFG
 
 for unit in google-guest-agent.service google-guest-agent-manager.service \
-            google-startup-scripts.service google-shutdown-scripts.service google-oslogin-cache.timer; do
+            google-startup-scripts.service google-shutdown-scripts.service \
+            google-oslogin-cache.service google-oslogin-cache.timer; do
     if [ -e "/usr/lib/systemd/system/$unit" ] && [ "$(readlink -f "/etc/systemd/system/$unit" 2>/dev/null)" != "/dev/null" ]; then
         echo "FATAL: $unit is not masked in the image" >&2
         exit 1
