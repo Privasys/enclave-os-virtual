@@ -86,3 +86,27 @@ func TestCheckImageMountSource(t *testing.T) {
 		}
 	}
 }
+
+// The control plane copies the label's devices into the request, so the two
+// lists overlap: each device is granted once, request order first.
+func TestMergeDevicesGrantsEachDeviceOnce(t *testing.T) {
+	got, err := mergeDevices("app", []string{"/dev/nvidia0", "/dev/nvidiactl"}, "/dev/nvidia0, /dev/nvidiactl,/dev/nvidia-uvm,")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/dev/nvidia0", "/dev/nvidiactl", "/dev/nvidia-uvm"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+	if _, err := mergeDevices("app", nil, "/dev/sda"); err == nil {
+		t.Fatal("an image label granted a non-GPU device")
+	}
+	if got, _ := mergeDevices("app", nil, ""); len(got) != 0 {
+		t.Fatalf("no devices asked, got %v", got)
+	}
+}

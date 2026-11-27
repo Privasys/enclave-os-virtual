@@ -53,6 +53,46 @@ func isAllowedImageDevice(path string) bool {
 	return nvidiaFixedDevices[path] || nvidiaNumberedDevice.MatchString(path)
 }
 
+// mergeDevices returns the host devices a container gets: the deploy
+// request's, then the image label's (comma-separated host paths), each path
+// once. The control plane already copies the label's devices into the
+// request, so without the de-duplication each one was granted twice.
+//
+// The label is read from the image's own config, so honouring it
+// unconditionally put the authority to grant host device access with the
+// image rather than with the deploy request: an image declaring /dev/sda,
+// /dev/mem or /dev/kvm received it, with rwm (read, write and mknod). That
+// matters most where the image publisher is not the deployer, as with a store
+// app. So an image may ask only for the GPU nodes the label exists to serve;
+// any other device must come from the request, which the control plane
+// stamps.
+func mergeDevices(name string, requested []string, label string) ([]string, error) {
+	var devices []string
+	seen := map[string]bool{}
+	add := func(d string) {
+		if !seen[d] {
+			seen[d] = true
+			devices = append(devices, d)
+		}
+	}
+	for _, d := range requested {
+		add(d)
+	}
+	for _, d := range strings.Split(label, ",") {
+		if d = strings.TrimSpace(d); d == "" {
+			continue
+		}
+		if !isAllowedImageDevice(d) {
+			return nil, fmt.Errorf(
+				"container: %s image label ai.privasys.devices requests %q, which is not a GPU device node; "+
+					"host devices other than the NVIDIA set must be granted by the deploy request",
+				name, d)
+		}
+		add(d)
+	}
+	return devices, nil
+}
+
 // checkImageMountSource reports whether an image may bind-mount this host path
 // through its "ai.privasys.volume" label.
 //

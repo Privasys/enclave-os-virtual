@@ -712,31 +712,9 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	// image declares the hardware it needs the same way it declares its
 	// volume mount ("ai.privasys.volume"). This lets a plain deploy of a GPU
 	// image get passthrough with no per-deploy input.
-	devices := append([]string(nil), spec.Devices...)
-	if v, ok := imgSpec.Config.Labels["ai.privasys.devices"]; ok {
-		for _, d := range strings.Split(v, ",") {
-			if d = strings.TrimSpace(d); d == "" {
-				continue
-			}
-			// The label is read from the image's own config, so honouring it
-			// unconditionally put the authority to grant host device access
-			// with the image rather than with the deploy request. An image
-			// declaring /dev/sda, /dev/mem or /dev/kvm received it, with rwm
-			// (read, write and mknod). That matters most where the image
-			// publisher is not the deployer, as with a store app.
-			//
-			// Until that authority moves to the deploy request, restrict what
-			// an image may ask for to the GPU nodes the label exists to serve.
-			// A device outside that set must come from spec.Devices, which the
-			// control plane stamps.
-			if !isAllowedImageDevice(d) {
-				return nil, fmt.Errorf(
-					"container: %s image label ai.privasys.devices requests %q, which is not a GPU device node; "+
-						"host devices other than the NVIDIA set must be granted by the deploy request",
-					spec.Name, d)
-			}
-			devices = append(devices, d)
-		}
+	devices, err := mergeDevices(spec.Name, spec.Devices, imgSpec.Config.Labels["ai.privasys.devices"])
+	if err != nil {
+		return nil, err
 	}
 	// A device-passthrough app under userns remap is a contradiction: GPU/host
 	// devices belong on dedicated VMs, which never enable the flag, and the
