@@ -80,6 +80,12 @@ func ResolveDataDEK(ctx context.Context, log *zap.Logger, cfg Config, device str
 
 	if isLuks(ctx, device) {
 		locator, err := exportLocator(ctx, device)
+		if err != nil && !errors.Is(err, errNoLocator) {
+			// A locator that is there but unreadable, incomplete or not
+			// pinned fails the boot: it must never fall back to a key from
+			// metadata.
+			return "", fmt.Errorf("dek: %w", err)
+		}
 		if err != nil {
 			if BootstrapToken() != "" {
 				// A formatted volume with no locator but a bootstrap token in
@@ -235,19 +241,28 @@ func enclaveIDBytes(id string) ([]byte, error) {
 	return b, nil
 }
 
-func isLuks(ctx context.Context, device string) bool {
+// isLuks and exportToken read the LUKS2 header (tests replace them).
+var isLuks = func(ctx context.Context, device string) bool {
 	return exec.CommandContext(ctx, "cryptsetup", "isLuks", device).Run() == nil
 }
+
+var exportToken = func(ctx context.Context, device, id string) ([]byte, error) {
+	return exec.CommandContext(ctx, "cryptsetup", "token", "export", "--token-id", id, device).Output()
+}
+
+// errNoLocator: the header holds no locator token at all (a BYOK volume).
+// Every other exportLocator error is about a token that is there.
+var errNoLocator = errors.New("no locator token")
 
 // exportLocator reads the privasys-vault locator token from the LUKS2 header:
 // token 7, or the spare a renewal stages the new locator in, when a crash left
 // token 7 removed but not yet replaced (renew.go).
 func exportLocator(ctx context.Context, device string) (*vaultLocator, error) {
-	out, err := exec.CommandContext(ctx, "cryptsetup", "token", "export", "--token-id", luksTokenID, device).Output()
+	out, err := exportToken(ctx, device, luksTokenID)
 	if err != nil {
-		spare, serr := exec.CommandContext(ctx, "cryptsetup", "token", "export", "--token-id", luksSpareTokenID, device).Output()
+		spare, serr := exportToken(ctx, device, luksSpareTokenID)
 		if serr != nil {
-			return nil, fmt.Errorf("no locator token: %w", err)
+			return nil, fmt.Errorf("%w: %v", errNoLocator, err)
 		}
 		out = spare
 	}

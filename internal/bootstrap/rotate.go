@@ -75,10 +75,8 @@ func (b *RotateBundle) validate(loc *vaultLocator) error {
 	case b.Mrenclave == "":
 		return errors.New("rotate: bundle carries no mrenclave")
 	}
-	if b.AttestationServer != "" {
-		if err := checkAttestationServer(b.AttestationServer); err != nil {
-			return fmt.Errorf("rotate: bundle: %w", err)
-		}
+	if err := b.checkAttestationServer(); err != nil {
+		return fmt.Errorf("rotate: %w", err)
 	}
 	// The handle must be the one this volume already uses. A rotation that
 	// re-pointed /data at a different key would abandon the data.
@@ -89,6 +87,28 @@ func (b *RotateBundle) validate(loc *vaultLocator) error {
 		return fmt.Errorf("rotate: bundle is for enclave %s, this volume belongs to %s", b.EnclaveID, loc.EnclaveID)
 	}
 	return nil
+}
+
+// checkAttestationServer refuses a bundle naming an attestation server the
+// image does not pin. An empty one is allowed: the header's, already pinned,
+// is kept (attestationServer).
+func (b *RotateBundle) checkAttestationServer() error {
+	if b.AttestationServer == "" {
+		return nil
+	}
+	if err := checkAttestationServer(b.AttestationServer); err != nil {
+		return fmt.Errorf("bundle: %w", err)
+	}
+	return nil
+}
+
+// attestationServer is the one the new constellation is verified with: the
+// bundle's, or the header's (pinned on read) when the bundle names none.
+func (b *RotateBundle) attestationServer(loc *vaultLocator) string {
+	if b.AttestationServer != "" {
+		return b.AttestationServer
+	}
+	return loc.AttestationServer
 }
 
 // sameConstellation reports whether the bundle addresses the constellation the
@@ -161,7 +181,7 @@ func RotateDataDEK(ctx context.Context, log *zap.Logger, cfg Config, device stri
 		Endpoints:            b.Endpoints,
 		Threshold:            threshold,
 		MrenclaveHex:         b.Mrenclave,
-		AttestationServerURL: b.AttestationServer,
+		AttestationServerURL: b.attestationServer(loc),
 		AttestationToken:     b.AttestationToken,
 	}, loc.Handle, loc.Handle, b.Grant, nil, appID)
 	if err != nil {
@@ -186,9 +206,7 @@ func RotateDataDEK(ctx context.Context, log *zap.Logger, cfg Config, device stri
 	newLoc.Endpoints = b.Endpoints
 	newLoc.Mrenclave = b.Mrenclave
 	newLoc.Threshold = threshold
-	if b.AttestationServer != "" {
-		newLoc.AttestationServer = b.AttestationServer
-	}
+	newLoc.AttestationServer = b.attestationServer(loc)
 	if err := importLocator(ctx, device, &newLoc); err != nil {
 		// The new keyslot is harmless on its own — the old locator still
 		// resolves the old key, so the volume still boots.

@@ -71,10 +71,8 @@ func RenewDataDEK(ctx context.Context, log *zap.Logger, cfg Config, device strin
 	case b.EnclaveID != "" && !strings.EqualFold(b.EnclaveID, loc.EnclaveID):
 		return "", "", fmt.Errorf("renew: bundle is for enclave %s, this volume belongs to %s", b.EnclaveID, loc.EnclaveID)
 	}
-	if b.AttestationServer != "" {
-		if err := checkAttestationServer(b.AttestationServer); err != nil {
-			return "", "", fmt.Errorf("renew: bundle: %w", err)
-		}
+	if err := b.checkAttestationServer(); err != nil {
+		return "", "", fmt.Errorf("renew: %w", err)
 	}
 	if b.Handle == loc.Handle {
 		return loc.Handle, loc.Handle, nil // already renewed
@@ -115,7 +113,7 @@ func RenewDataDEK(ctx context.Context, log *zap.Logger, cfg Config, device strin
 		Endpoints:            b.Endpoints,
 		Threshold:            threshold,
 		MrenclaveHex:         b.Mrenclave,
-		AttestationServerURL: b.AttestationServer,
+		AttestationServerURL: b.attestationServer(loc),
 		AttestationToken:     b.AttestationToken,
 	}
 	newHex, origin, err := vaultkey.Renew(ctx, log, src, dst, loc.Handle, b.Handle, b.Grant, oldDEK, nil, appID)
@@ -128,9 +126,7 @@ func RenewDataDEK(ctx context.Context, log *zap.Logger, cfg Config, device strin
 
 	newLoc := *loc
 	newLoc.Handle, newLoc.Endpoints, newLoc.Mrenclave, newLoc.Threshold = b.Handle, b.Endpoints, b.Mrenclave, threshold
-	if b.AttestationServer != "" {
-		newLoc.AttestationServer = b.AttestationServer
-	}
+	newLoc.AttestationServer = b.attestationServer(loc)
 	if err := replaceLocator(ctx, device, &newLoc); err != nil {
 		return "", "", fmt.Errorf("renew: point the header at %s (the old handle still opens the volume): %w", b.Handle, err)
 	}

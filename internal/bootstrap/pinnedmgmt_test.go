@@ -1,11 +1,15 @@
 package bootstrap
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 // withProfile points the bootstrap at an image-profile file holding profile,
@@ -103,5 +107,76 @@ func TestBundleAttestationServerIsPinned(t *testing.T) {
 	b.AttestationServer = "https://as.privasys.org/verify"
 	if err := b.validate(locFixture()); err != nil {
 		t.Fatalf("a pinned attestation server was refused: %v", err)
+	}
+}
+
+// withHeader makes device a LUKS volume whose header holds blob as its
+// locator token, or no token at all when blob is nil.
+func withHeader(t *testing.T, blob []byte) {
+	t.Helper()
+	oldLuks, oldExport := isLuks, exportToken
+	t.Cleanup(func() { isLuks, exportToken = oldLuks, oldExport })
+	isLuks = func(context.Context, string) bool { return true }
+	exportToken = func(_ context.Context, _, id string) ([]byte, error) {
+		if blob == nil || id != luksTokenID {
+			return nil, errors.New("token not found")
+		}
+		return blob, nil
+	}
+}
+
+// A locator that is there but refused fails the boot. It must never read as
+// "no locator", which falls back to a passphrase from instance metadata.
+func TestARefusedLocatorFailsTheBootInsteadOfFallingBack(t *testing.T) {
+	withProfile(t, "production")
+	t.Setenv("BOOTSTRAP_TOKEN", "unused")
+	for name, blob := range map[string][]byte{
+		"unpinned attestation server": locatorBlob(t, func(l *vaultLocator) { l.AttestationServer = "https://evil.example/verify" }),
+		"incomplete":                  locatorBlob(t, func(l *vaultLocator) { l.Handle = "" }),
+		"unreadable":                  []byte("{"),
+	} {
+		withHeader(t, blob)
+		_, err := ResolveDataDEK(context.Background(), zap.NewNop(), Config{}, "/dev/fake")
+		if err == nil || errors.Is(err, ErrNotVaultManaged) {
+			t.Fatalf("%s: err = %v, want a boot failure", name, err)
+		}
+	}
+	// No token at all is a BYOK volume.
+	withHeader(t, nil)
+	if _, err := ResolveDataDEK(context.Background(), zap.NewNop(), Config{}, "/dev/fake"); !errors.Is(err, ErrNotVaultManaged) {
+		t.Fatalf("no token: err = %v, want ErrNotVaultManaged", err)
+	}
+}
+
+// A renewal bundle naming an unpinned attestation server is refused before
+// any vault is contacted.
+func TestRenewBundleAttestationServerIsPinned(t *testing.T) {
+	withProfile(t, "production")
+	withHeader(t, locatorBlob(t, nil))
+	b := bundleFixture()
+	b.Handle = "apps.privasys.org/1efff2acfa6745bd9fd10c9ecbbcb9a4/manager/data/v2"
+	b.AttestationServer = "https://evil.example/verify"
+	_, _, err := RenewDataDEK(context.Background(), zap.NewNop(), Config{}, "/dev/fake", b)
+	if err == nil || !strings.Contains(err.Error(), "not pinned") {
+		t.Fatalf("err = %v, want a refusal", err)
+	}
+}
+
+// A bundle naming no attestation server uses the header's, pinned on read.
+func TestBundleWithoutAttestationServerKeepsTheHeaders(t *testing.T) {
+	b := bundleFixture()
+	if got := b.attestationServer(locFixture()); got != "https://as.privasys.org/verify" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+// On a dev image the header may name either pinned control plane; it is kept.
+func TestDevHeaderKeepsEitherPinnedControlPlane(t *testing.T) {
+	withProfile(t, "dev")
+	for _, u := range []string{"https://api-test.developer.privasys.org", "https://api.developer.test.privasys.org"} {
+		loc, err := parseLocator(locatorBlob(t, func(l *vaultLocator) { l.MgmtURL = u }))
+		if err != nil || loc.MgmtURL != u {
+			t.Fatalf("%q -> %+v %v", u, loc, err)
+		}
 	}
 }
