@@ -50,3 +50,19 @@ func checkDevices(name string, requested []string) ([]string, error) {
 	}
 	return devices, nil
 }
+
+// ImageVolumeLabel is the label an image declares its own host mount with.
+const ImageVolumeLabel = "ai.privasys.volume"
+
+// checkImageVolume refuses an image that declares its own host mount. The
+// control plane turns the label into a request volume, which the runtime
+// mounts as given, and no model disk is assigned to a deployment yet: nothing
+// could say which disk the image may have, so a label of "/mnt" would reach
+// every model disk on the host. A mount an app needs comes from its
+// deployment's own volumes until disks are assigned.
+func checkImageVolume(name string, labels map[string]string) error {
+	if v, ok := labels[ImageVolumeLabel]; ok {
+		return fmt.Errorf("container: %s declares its own host mount (%s=%q); no model disk is assigned to this deployment, so none is mounted", name, ImageVolumeLabel, v)
+	}
+	return nil
+}

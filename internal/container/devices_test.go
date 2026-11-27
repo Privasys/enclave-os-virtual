@@ -56,3 +56,19 @@ func TestCheckDevicesGrantsEachGPUNodeOnceAndRefusesTheRest(t *testing.T) {
 		t.Fatalf("no devices: %v %v", got, err)
 	}
 }
+
+// An image naming its own host mount is refused, whatever it names: no disk
+// is assigned to a deployment, so none can be checked against it.
+func TestImageDeclaredVolumeIsRefused(t *testing.T) {
+	for _, v := range []string{"/mnt:/models:ro", "/mnt/model-x:/models:ro", "/:/host:rw", ""} {
+		if checkImageVolume("app", map[string]string{ImageVolumeLabel: v}) == nil {
+			t.Fatalf("%q was accepted", v)
+		}
+	}
+	if err := checkImageVolume("app", map[string]string{"org.privasys.manifest": "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkImageVolume("app", nil); err != nil {
+		t.Fatal(err)
+	}
+}

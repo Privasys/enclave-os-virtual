@@ -699,6 +699,14 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		opts = append(opts, oci.WithProcessArgs(spec.Command...))
 	}
 
+	imgSpec, err := img.Spec(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("container: failed to read image spec for %s: %w", spec.Name, err)
+	}
+	if err := checkImageVolume(spec.Name, imgSpec.Config.Labels); err != nil {
+		return nil, err
+	}
+
 	// Host device passthrough: GPU nodes only (devices.go). The control plane
 	// turns an image's ai.privasys.devices label into spec.Devices.
 	devices, err := checkDevices(spec.Name, spec.Devices)
