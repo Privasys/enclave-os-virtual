@@ -17,7 +17,7 @@ func TestFeeAckNeedsTheManagerRole(t *testing.T) {
 	log := zap.NewNop()
 	s := New(Config{}, log, launcher.New(launcher.Config{}, log), nil)
 	s.apiFees = apifees.Open("", log)
-	s.apiFees.Record("app", "f", "sub", 1)
+	s.apiFees.RecordLedger("app", "f", "sub", "", "", 1)
 	ackURL := "/api/v1/api-fees?ack=99&epoch=" + s.apiFees.Epoch()
 
 	w := httptest.NewRecorder()
