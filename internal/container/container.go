@@ -699,20 +699,9 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		opts = append(opts, oci.WithProcessArgs(spec.Command...))
 	}
 
-	// Read the image spec once; it drives both image-declared devices and
-	// the image-declared volume below.
-	imgSpec, err := img.Spec(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("container: failed to read image spec for %s: %w", spec.Name, err)
-	}
-
-	// Host device passthrough (e.g. /dev/nvidia0). Devices come from the
-	// deploy request (spec.Devices) and/or the image's own
-	// "ai.privasys.devices" label (comma-separated host paths), so a GPU
-	// image declares the hardware it needs the same way it declares its
-	// volume mount ("ai.privasys.volume"). This lets a plain deploy of a GPU
-	// image get passthrough with no per-deploy input.
-	devices, err := mergeDevices(spec.Name, spec.Devices, imgSpec.Config.Labels["ai.privasys.devices"])
+	// Host device passthrough: GPU nodes only (devices.go). The control plane
+	// turns an image's ai.privasys.devices label into spec.Devices.
+	devices, err := checkDevices(spec.Name, spec.Devices)
 	if err != nil {
 		return nil, err
 	}
@@ -737,52 +726,6 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 		// the legacy nvidia-container-runtime hook and works cleanly
 		// with raw containerd (no CRI required).
 		opts = append(opts, containerdcdi.WithCDIDevices("nvidia.com/gpu=all"))
-	}
-
-	// Image-declared volumes via the "ai.privasys.volume" label.
-	// This lets each container image declare its own disk mount
-	// (e.g. LABEL ai.privasys.volume="/mnt/model-gemma4-31b:/models:ro").
-	if v, ok := imgSpec.Config.Labels["ai.privasys.volume"]; ok {
-		parts := strings.SplitN(v, ":", 3)
-		if len(parts) < 2 {
-			return nil, fmt.Errorf("container: invalid ai.privasys.volume label %q (expected host:container[:ro])", v)
-		}
-		mountOpts := "ro"
-		if len(parts) == 3 {
-			mountOpts = strings.TrimSpace(parts[2])
-		}
-		// As with the device label, this is the image naming what it gets from
-		// the host. Validation used to be len(parts) < 2 and nothing else: no
-		// allowlist on the source and no check that mountOpts was one of
-		// ro/rw, so a label of "/:/host:rw" mounted the entire host
-		// filesystem, writable, into the container.
-		//
-		// An image-declared mount is now read-only and confined to the model
-		// root. A writable mount, or one from anywhere else, has to come from
-		// the deploy request.
-		if mountOpts != "ro" {
-			return nil, fmt.Errorf(
-				"container: %s image label ai.privasys.volume requests %q mount options; "+
-					"an image-declared mount is read-only, use the deploy request for anything else",
-				spec.Name, mountOpts)
-		}
-		// No model disk is assigned to any deployment yet (the load request
-		// will carry the assignment), so every image-declared mount is refused.
-		if err := checkImageMountSource(parts[0], nil); err != nil {
-			return nil, fmt.Errorf("container: %s image label ai.privasys.volume: %w", spec.Name, err)
-		}
-		opts = append(opts, oci.WithMounts(idmapMounts([]specs.Mount{{
-			Destination: parts[1],
-			Source:      parts[0],
-			Type:        "bind",
-			Options:     []string{"rbind", mountOpts},
-		}}, userns)))
-		m.log.Info("image-declared volume mount",
-			zap.String("name", spec.Name),
-			zap.String("source", parts[0]),
-			zap.String("destination", parts[1]),
-			zap.String("options", mountOpts),
-		)
 	}
 
 	// Model roothash registry: expose disk-mounter's verified dm-verity

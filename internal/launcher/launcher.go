@@ -351,7 +351,8 @@ type LoadRequest struct {
 	Hostname string `json:"hostname,omitempty"`
 
 	// Devices is a list of host device paths to pass into the container
-	// (e.g. "/dev/nvidia0"). Each path must exist on the host.
+	// (e.g. "/dev/nvidia0"): GPU device nodes only, refused otherwise
+	// (container devices.go).
 	Devices []string `json:"devices,omitempty"`
 
 	// WaitReady, when true, causes Load() to block until the container's
