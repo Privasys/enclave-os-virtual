@@ -123,3 +123,29 @@ func TestDeclUnattendedOnlyWhenDeclared(t *testing.T) {
 		t.Fatal("unattended true must be honoured")
 	}
 }
+
+// One holder's opens, mints and closes run one at a time: a second caller on
+// the same folder waits for the first to record its state; another folder
+// does not wait.
+func TestHolderFolderLockSerialisesOneFolder(t *testing.T) {
+	h := newHolderState()
+	release := h.lock("a")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.lock("a")()
+	}()
+	other := make(chan struct{})
+	go func() {
+		defer close(other)
+		h.lock("b")()
+	}()
+	<-other
+	select {
+	case <-done:
+		t.Fatal("a second caller on the same folder did not wait")
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+	<-done
+}

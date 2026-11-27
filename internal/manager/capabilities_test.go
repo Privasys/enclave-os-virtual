@@ -323,7 +323,7 @@ func TestCapabilityAsksAndPushesAreBounded(t *testing.T) {
 // read-only bind. The same mint on a folder open read-only, or not open,
 // goes past this check.
 func TestReadOnlyMintOnAWritableOpenFolderIsRefused(t *testing.T) {
-	s := &Server{log: zap.NewNop(), caps: newCapabilityBroker("", nil), holdersOpen: newHolderState()}
+	s := &Server{log: zap.NewNop(), caps: newCapabilityBroker("", nil), holdersOpen: newHolderState(), launcher: launcher.New(launcher.Config{}, zap.NewNop())}
 	decl := testDecl
 	decl.Kind = launcher.AppStorageKind
 	decl.Name = "workspace"

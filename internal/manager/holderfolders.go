@@ -155,15 +155,53 @@ func (h *holderState) readOnlyOf(container string) map[string]holderOpenState {
 type holderState struct {
 	mu   sync.Mutex
 	open map[string]holderOpenState // grantKey -> state
+	// busy serialises the opens, mints and closes of one holder's folder:
+	// each checks the state, works on the folder and records the result,
+	// and two of them interleaved could record a mode the folder is not in
+	// (a read-only mint over a writable open, 2026-11-27 review).
+	busy map[string]*sync.Mutex
 }
 
-func newHolderState() *holderState { return &holderState{open: map[string]holderOpenState{}} }
+func newHolderState() *holderState {
+	return &holderState{open: map[string]holderOpenState{}, busy: map[string]*sync.Mutex{}}
+}
+
+// lock takes the folder lock of key and returns its release. Never taken
+// from the task pre-start hook, which runs under the launcher's lock.
+func (h *holderState) lock(key string) func() {
+	h.mu.Lock()
+	m := h.busy[key]
+	if m == nil {
+		m = &sync.Mutex{}
+		h.busy[key] = m
+	}
+	h.mu.Unlock()
+	m.Lock()
+	return m.Unlock
+}
 
 func (h *holderState) get(key string) (holderOpenState, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	st, ok := h.open[key]
 	return st, ok
+}
+
+// holderStateStale reports whether a recorded open of key is stale: its key
+// is no longer loaded (a volume remounted under the state), which the kernel
+// says. A stale state is dropped. Unsure (no folder service, no answer) is
+// not stale.
+func (s *Server) holderStateStale(container, key string, st holderOpenState) bool {
+	hf, err := s.launcher.HolderFolders(container)
+	if err != nil {
+		return false
+	}
+	ks, err := holders.KeyStatus(hf.Mount, st.KeyID)
+	if err != nil || ks == holders.Present {
+		return false
+	}
+	s.holdersOpen.drop(key)
+	return true
 }
 
 func (h *holderState) set(key string, st holderOpenState) {
@@ -366,14 +404,16 @@ func (s *Server) mintHolderCapability(w http.ResponseWriter, r *http.Request, co
 	// A writable open cannot become read-only in place, here as on the open
 	// path: a writable fd the app already holds would survive the read-only
 	// bind. The folder must be closed (which ends whatever holds its files)
-	// before a read-only grant is minted on it.
+	// before a read-only grant is minted on it. The folder lock is held from
+	// this check to the recorded state, so an open cannot slip in between.
+	defer s.holdersOpen.lock(grantKey(appID, p.resource, sub))()
 	if st, open := s.holdersOpen.get(grantKey(appID, p.resource, sub)); open && !st.ReadOnly {
 		readOnly, aerr := holderReadOnly(p.Capability.Permissions)
 		if aerr != nil {
 			s.jsonError(w, http.StatusForbidden, aerr.Error())
 			return
 		}
-		if readOnly {
+		if readOnly && !s.holderStateStale(container, grantKey(appID, p.resource, sub), st) {
 			s.jsonError(w, http.StatusConflict, "the folder is open writable; close it before it can open read-only")
 			return
 		}
@@ -619,6 +659,7 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := grantKey(appID, resource, body.Subject)
+	defer s.holdersOpen.lock(key)()
 	hostUID := -1
 	if body.UID != nil {
 		hostUID = s.launcher.HostUID(*body.UID)
@@ -753,6 +794,7 @@ func (s *Server) handleResourceClose(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := grantKey(appID, resource, body.Subject)
+	defer s.holdersOpen.lock(key)()
 	st, open := s.holdersOpen.get(key)
 	if !open {
 		s.writeJSON(w, http.StatusOK, map[string]any{"status": "closed"})

@@ -105,6 +105,7 @@ func (s *Server) holderResource(container string) (string, capabilityDecl, bool)
 // copy when the folder is closed and the app works unattended.
 func (s *Server) ensureHolderOpen(container, appID, resource, sub string, g *capabilityGrant, hf launcher.HolderFolders) error {
 	key := grantKey(appID, resource, sub)
+	defer s.holdersOpen.lock(key)()
 	if st, open := s.holdersOpen.get(key); open {
 		if ks, err := holders.KeyStatus(hf.Mount, st.KeyID); err == nil && ks == holders.Present {
 			return nil
