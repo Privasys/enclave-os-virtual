@@ -69,7 +69,7 @@ func hostTestLauncher(t *testing.T, appDomain string) (*Launcher, string, *fakeD
 	}, zap.NewNop())
 	l.caddyClient = caddy.NewClient(caddy.Config{AdminAddr: strings.TrimPrefix(admin.URL, "http://")}, zap.NewNop())
 	l.direct = directtls.New(directtls.Config{
-		StorageRoot:    t.TempDir(),
+		StorageRoot:    certStorageDir(t),
 		CA:             "http://127.0.0.1:1/directory",
 		CTSearch:       "http://127.0.0.1:1/",
 		LookupHost:     func(context.Context, string) ([]string, error) { return nil, errors.New("no resolver in tests") },
@@ -91,6 +91,27 @@ func hostTestLauncher(t *testing.T, appDomain string) (*Launcher, string, *fakeD
 		}
 	})
 	return l, extDir, store
+}
+
+// certStorageDir is the certificate storage of a test launcher. Removing an
+// app cancels its certificate manager without waiting for it, so a goroutine
+// can still be writing a lock file here when the test ends: the cleanup
+// retries rather than fail the test (t.TempDir would).
+func certStorageDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "directtls-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		for i := 0; i < 50; i++ {
+			if os.RemoveAll(dir) == nil {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+	return dir
 }
 
 // addHostTestApp puts a loaded, vault-backed app on the launcher with its
