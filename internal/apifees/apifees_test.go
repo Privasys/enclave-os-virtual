@@ -104,14 +104,14 @@ func TestParseManifestDefaultPayerIsCaller(t *testing.T) {
 
 func TestStoreRecordAndRing(t *testing.T) {
 	s := Open("", zap.NewNop())
-	ev := s.Record("app", "browse", "sub-1", 5000)
+	ev := s.RecordLedger("app", "browse", "sub-1", "", "", 5000)
 	if ev.Seq != 1 || ev.App != "app" || ev.Function != "browse" || ev.CallerSub != "sub-1" || ev.Credits != 5000 {
 		t.Fatalf("unexpected event: %#v", ev)
 	}
 	if len(ev.CallID) != 32 {
 		t.Fatalf("call_id should be 32 hex chars, got %q", ev.CallID)
 	}
-	ev2 := s.Record("app", "browse", "", 5000)
+	ev2 := s.RecordLedger("app", "browse", "", "", "", 5000)
 	if ev2.Seq != 2 || ev2.CallID == ev.CallID {
 		t.Fatalf("seq/call_id not advancing: %#v vs %#v", ev, ev2)
 	}
@@ -124,7 +124,7 @@ func TestStoreRecordAndRing(t *testing.T) {
 func TestStoreRingBound(t *testing.T) {
 	s := Open("", zap.NewNop())
 	for i := 0; i < maxEvents+10; i++ {
-		s.Record("app", "f", "", 1)
+		s.RecordLedger("app", "f", "", "", "", 1)
 	}
 	// The bound is enforced by refusing calls (Full), never by ageing events
 	// out: every unacknowledged event survives, oldest first.
@@ -142,13 +142,13 @@ func TestStorePersistence(t *testing.T) {
 	path := filepath.Join(dir, "manager-api-fees.json")
 
 	s := Open(path, zap.NewNop())
-	s.Record("app", "f", "sub", 100)
+	s.RecordLedger("app", "f", "sub", "", "", 100)
 	s.Pull(nil, "") // persists
 
 	// Reopen: seq continues past the persisted value, so a puller cursor
 	// from a pre-restart snapshot never skips fresh events.
 	s2 := Open(path, zap.NewNop())
-	ev := s2.Record("app", "f", "sub", 100)
+	ev := s2.RecordLedger("app", "f", "sub", "", "", 100)
 	if ev.Seq != 2 {
 		t.Fatalf("seq did not survive restart: %d", ev.Seq)
 	}

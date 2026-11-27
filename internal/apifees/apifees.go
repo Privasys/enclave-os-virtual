@@ -21,8 +21,9 @@
 // refuses a priced request without the exact X-Billing-Approved consent
 // header (mirroring the wasm runtime's byte-exact match), stamps
 // X-Billing-Charged on the successful response, and records a fee event in
-// a bounded ring that the management-service pulls and settles through the
-// credit ledger (85/15). Sponsor-priced tools are NOT supported on the
+// a persisted store that the management-service pulls, acknowledges and
+// settles through the credit ledger (85/15); an event leaves the store only
+// once acknowledged, and a priced call is refused while the store is full. Sponsor-priced tools are NOT supported on the
 // container runtime and are skipped at parse time (never mis-priced,
 // never half-enforced).
 package apifees
@@ -37,7 +38,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"go.uber.org/zap"
 )
@@ -149,16 +149,9 @@ func decodeManifest(raw string) (*manifestDoc, error) {
 // tools are skipped. A parse error prices nothing: unpriced is always safe,
 // mis-priced never is.
 func ParseManifest(raw string) (Table, error) {
-	data := []byte(raw)
-	var doc manifestDoc
-	if err := json.Unmarshal(data, &doc); err != nil {
-		decoded, derr := base64.StdEncoding.DecodeString(raw)
-		if derr != nil {
-			return nil, fmt.Errorf("apifees: manifest label is neither JSON nor base64 JSON: %w", err)
-		}
-		if err := json.Unmarshal(decoded, &doc); err != nil {
-			return nil, fmt.Errorf("apifees: manifest label parse: %w", err)
-		}
+	doc, err := decodeManifest(raw)
+	if err != nil {
+		return nil, err
 	}
 
 	tbl := make(Table)
@@ -206,13 +199,12 @@ type Event struct {
 	Credits  uint64 `json:"credits"`
 }
 
-// Store is the bounded, persisted fee-event ring. Events are appended on
-// each successful priced call and pulled (never drained) by the
-// management-service; the persisted seq survives a manager restart so the
-// puller's cursor stays monotonic. Persistence is best-effort and happens
-// on Pull, mirroring the wasm runtime's save-on-read: a
-// crash loses at most one pull interval of fees — lossy by design, and the
-// ledger's call_id idempotency absorbs re-reads.
+// Store is the persisted fee-event store. Events are appended on each
+// successful priced call and stay until the management-service acknowledges
+// them; the persisted seq survives a manager restart so the puller's cursor
+// stays monotonic. The store is written on each pull, so a crash loses at
+// most the events recorded since the last one; the ledger's call_id
+// idempotency absorbs re-reads.
 type Store struct {
 	path string
 	log  *zap.Logger
@@ -247,10 +239,8 @@ func (s *Store) Epoch() string {
 
 // Open loads (or initialises) a fee store at path. An empty path keeps the
 // store memory-only (dev/test). A corrupt file is discarded with a warning
-// — fees are lossy by design, but the seq restarts at 0 then, so the
-// management-service's in-memory cursor (rebuilt on ITS restart) may skip
-// events until seq catches up; keep the file on the encrypted /data volume
-// alongside the app registry.
+// and a new epoch, so the puller starts the new sequence afresh; keep the
+// file on the encrypted /data volume alongside the app registry.
 func Open(path string, log *zap.Logger) *Store {
 	// A new sequence until a persisted one is loaded.
 	s := &Store{path: path, log: log.Named("apifees"), epoch: newCallID()}
@@ -271,7 +261,7 @@ func Open(path string, log *zap.Logger) *Store {
 	}
 	if p.Epoch != "" {
 		s.epoch = p.Epoch
-	} // a store written before epochs keeps its seq under a fresh epoch
+	} // a store written before epochs (v0.40.x and earlier) keeps its seq under a fresh epoch
 	s.seq = p.Seq
 	s.acked = p.Acked
 	s.events = p.Events
@@ -298,19 +288,10 @@ func (s *Store) trimLocked() {
 	}
 }
 
-// Record appends one fee event and returns it.
-func (s *Store) Record(app, function, callerSub string, credits uint64) Event {
-	return s.RecordFor(app, function, callerSub, "", credits)
-}
-
-// RecordFor is Record with the spender app (the spend token's azp, undashed
-// hex) the fee counts against for the payer's per-app monthly cap.
-func (s *Store) RecordFor(app, function, callerSub, payerApp string, credits uint64) Event {
-	return s.RecordLedger(app, function, callerSub, "", payerApp, credits)
-}
-
-// RecordLedger is RecordFor with the payer's ledger handle (the spend
-// token's), which the platform debits by.
+// RecordLedger appends one fee event and returns it: payerLedger is the
+// spend token's ledger handle, which the platform debits by, and payerApp the
+// spender app (its azp, undashed hex) the fee counts against for the payer's
+// per-app monthly cap.
 func (s *Store) RecordLedger(app, function, callerSub, payerLedger, payerApp string, credits uint64) Event {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -395,15 +376,9 @@ func save(path string, p persisted) error {
 }
 
 // newCallID returns a 32-char lowercase-hex random id — the ledger's
-// idempotency key for this charge. On an RNG failure the id is salted with
-// the current time rather than colliding on a constant.
+// idempotency key for this charge.
 func newCallID() string {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		now := time.Now().UnixNano()
-		for i := 0; i < 8; i++ {
-			b[i] = byte(now >> (8 * i))
-		}
-	}
+	_, _ = rand.Read(b[:]) // never fails: crypto/rand panics instead
 	return hex.EncodeToString(b[:])
 }

@@ -13,12 +13,12 @@ import (
 func TestUnacknowledgedFeesAreNeverDropped(t *testing.T) {
 	s := Open("", zap.NewNop())
 	for i := 0; i < maxEvents; i++ {
-		s.Record("app", "f", "sub", 1)
+		s.RecordLedger("app", "f", "sub", "", "", 1)
 	}
 	if !s.Full() {
 		t.Fatal("not Full at maxEvents unacknowledged events")
 	}
-	s.Record("app", "f", "sub", 1) // a call already admitted is still recorded
+	s.RecordLedger("app", "f", "sub", "", "", 1) // a call already admitted is still recorded
 	if got := s.Pull(nil, ""); len(got) != maxEvents+1 || got[0].Seq != 1 {
 		t.Fatalf("pull: %d events, first seq %d", len(got), got[0].Seq)
 	}
@@ -28,7 +28,7 @@ func TestUnacknowledgedFeesAreNeverDropped(t *testing.T) {
 func TestExplicitAckTrimsOnlyApplied(t *testing.T) {
 	s := Open("", zap.NewNop())
 	for i := 0; i < 10; i++ {
-		s.Record("app", "f", "sub", 1)
+		s.RecordLedger("app", "f", "sub", "", "", 1)
 	}
 	ack := uint64(4)
 	got := s.Pull(&ack, s.Epoch())
@@ -51,12 +51,12 @@ func TestExplicitAckTrimsOnlyApplied(t *testing.T) {
 // unapplied events across a manager restart; GHSA-xh8w-wxhv-99fp).
 func TestPullWithoutAckTrimsNothing(t *testing.T) {
 	s := Open("", zap.NewNop())
-	s.Record("app", "f", "sub", 1)
-	s.Record("app", "f", "sub", 1)
+	s.RecordLedger("app", "f", "sub", "", "", 1)
+	s.RecordLedger("app", "f", "sub", "", "", 1)
 	if got := s.Pull(nil, ""); len(got) != 2 {
 		t.Fatalf("first pull: %d", len(got))
 	}
-	s.Record("app", "f", "sub", 1)
+	s.RecordLedger("app", "f", "sub", "", "", 1)
 	if got := s.Pull(nil, ""); len(got) != 3 || got[0].Seq != 1 {
 		t.Fatalf("second pull trimmed: %+v", got)
 	}
@@ -68,15 +68,15 @@ func TestAckCountsOnlyForItsEpoch(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "manager-api-fees.json")
 	s := Open(path, zap.NewNop())
 	for i := 0; i < 5; i++ {
-		s.Record("app", "f", "sub", 1)
+		s.RecordLedger("app", "f", "sub", "", "", 1)
 	}
 	epoch := s.Epoch()
-	s.Pull(nil, "") // persists
+	s.Pull(nil, "")               // persists
 	r := Open(path, zap.NewNop()) // a manager restart
 	if r.Epoch() != epoch {
 		t.Fatalf("epoch changed across restart: %q -> %q", epoch, r.Epoch())
 	}
-	r.Record("app", "f", "sub", 1)
+	r.RecordLedger("app", "f", "sub", "", "", 1)
 	if got := r.Pull(nil, ""); got[len(got)-1].Seq != 6 {
 		t.Fatalf("seq did not continue across restart: last %d", got[len(got)-1].Seq)
 	}
