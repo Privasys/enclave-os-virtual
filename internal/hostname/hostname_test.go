@@ -11,7 +11,8 @@ func TestValid(t *testing.T) {
 			t.Errorf("%q refused", h)
 		}
 	}
-	for _, h := range []string{"", "localhost", "*.apps.privasys.org", "App.example.com", "a.b.", "-a.b", "a-.b", "a..b", "a b.c", "a_b.c"} {
+	for _, h := range []string{"", "localhost", "*.apps.privasys.org", "App.example.com", "a.b.", "-a.b", "a-.b", "a..b", "a b.c", "a_b.c",
+		"34.155.1.2", "127.0.0.1", "10.0.0.9", "a.123"} {
 		if Valid(h) {
 			t.Errorf("%q accepted", h)
 		}

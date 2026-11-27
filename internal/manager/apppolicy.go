@@ -15,6 +15,7 @@ package manager
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 
@@ -52,7 +53,23 @@ func (s *Server) handleSetAppPolicy(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusBadRequest, "could not read the policy document")
 		return
 	}
+	// Direct domains are checked before the document is accepted, so a
+	// claim this host would refuse is never stored (a stored claim would
+	// re-apply at every load). The store then checks, atomically and
+	// durably, that no other app's accepted policy names them.
+	if pre, _, _, perr := apppolicy.Parse(raw); perr == nil && len(pre.Domains) > 0 {
+		if err := s.launcher.CheckDirectDomains(name, pre.Domains); err != nil {
+			s.log.Warn("app policy refused: direct domains", zap.String("container", name), zap.Error(err))
+			s.jsonError(w, http.StatusConflict, err.Error())
+			return
+		}
+	}
 	doc, rawDoc, err := s.policy.Accept(raw, appID)
+	if errors.Is(err, apppolicy.ErrDomainTaken) {
+		s.log.Warn("app policy refused", zap.String("container", name), zap.Error(err))
+		s.jsonError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if err != nil {
 		s.log.Warn("app policy refused", zap.String("container", name), zap.Error(err))
 		s.jsonError(w, http.StatusForbidden, err.Error())

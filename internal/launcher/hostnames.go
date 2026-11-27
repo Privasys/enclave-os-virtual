@@ -99,6 +99,46 @@ func (l *Launcher) hostOwnerLocked(name string) string {
 	return ""
 }
 
+// CheckDirectDomains checks, without changing anything, that container may
+// serve these direct domains as far as this host can tell now: their shape,
+// the names the platform keeps and the app domain's, and no other app
+// holding them. The policy route calls it before accepting a document, so a
+// claim that would be refused is never stored. Who owns a domain durably is
+// the policy store's check (apppolicy.Store.Accept); SetDirectDomains runs
+// both again before anything is served.
+func (l *Launcher) CheckDirectDomains(containerName string, domains []string) error {
+	if len(domains) == 0 || !l.DirectSupported() {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	spec, ok := l.specs[containerName]
+	if !ok {
+		return fmt.Errorf("container %q not loaded", containerName)
+	}
+	return l.checkDirectDomainsLocked(containerName, spec.Hostname, domains)
+}
+
+// checkDirectDomainsLocked refuses a direct domain that is the app's own
+// hostname, a platform or app-domain name, not one concrete hostname, or
+// held by another container.
+//
+// Must be called with l.mu held.
+func (l *Launcher) checkDirectDomainsLocked(containerName, canonical string, domains []string) error {
+	for _, d := range domains {
+		if strings.EqualFold(d, canonical) {
+			return fmt.Errorf("direct domain %s is the app's own hostname", d)
+		}
+		if err := l.validateDirectDomain(d); err != nil {
+			return err
+		}
+		if err := l.claimHostLocked(containerName, d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // claimHostLocked refuses name for owner when another container holds it.
 //
 // Must be called with l.mu held.

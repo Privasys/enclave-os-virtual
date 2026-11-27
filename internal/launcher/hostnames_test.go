@@ -2,6 +2,7 @@ package launcher
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"net"
 	"net/http"
@@ -26,10 +27,36 @@ const (
 	testManager   = "m6-dev-mgr.apps.test.privasys.org"
 )
 
+// fakeDomainStore stands in for the policy store: which app owns which
+// direct domain on this host.
+type fakeDomainStore struct{ owners map[string]string }
+
+func (f *fakeDomainStore) DomainsFor(appID string) []string {
+	var out []string
+	for d, o := range f.owners {
+		if o == appID {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+func (f *fakeDomainStore) DomainOwner(name string) string { return f.owners[name] }
+
+// approve records name as owned by the container's app, as an accepted
+// policy would.
+func approve(store *fakeDomainStore, container string, names ...string) {
+	for _, n := range names {
+		store.owners[n] = testAppID(container)
+	}
+}
+
+// testAppID is a container's app id in these tests: its name, hex-encoded.
+func testAppID(container string) string { return hex.EncodeToString([]byte(container)) }
+
 // hostTestLauncher builds a launcher with direct domains wired to nothing
 // reachable: Caddy's admin API is a stub that accepts every config, and the
 // ACME, CT and probe endpoints fail, so no certificate is ever ordered.
-func hostTestLauncher(t *testing.T, appDomain string) (*Launcher, string) {
+func hostTestLauncher(t *testing.T, appDomain string) (*Launcher, string, *fakeDomainStore) {
 	t.Helper()
 	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	t.Cleanup(admin.Close)
@@ -50,6 +77,8 @@ func hostTestLauncher(t *testing.T, appDomain string) (*Launcher, string) {
 		ProbeFirstWait: time.Hour,
 		ProbeMaxWait:   time.Hour,
 	}, zap.NewNop())
+	store := &fakeDomainStore{owners: map[string]string{}}
+	l.SetApprovedDomains(store)
 	t.Cleanup(func() {
 		l.mu.Lock()
 		names := make([]string, 0, len(l.directDomains))
@@ -61,7 +90,7 @@ func hostTestLauncher(t *testing.T, appDomain string) (*Launcher, string) {
 			l.direct.Remove(n)
 		}
 	})
-	return l, extDir
+	return l, extDir, store
 }
 
 // addHostTestApp puts a loaded, vault-backed app on the launcher with its
@@ -72,6 +101,7 @@ func addHostTestApp(t *testing.T, l *Launcher, name, host string, port int) {
 	l.specs[name] = manifest.Container{Name: name, Image: "example.invalid/" + name, Hostname: host, Port: port}
 	l.containerTrees[name] = merkle.New([]merkle.Leaf{{Name: name, Data: []byte(name)}})
 	l.directBranches[name] = []byte(strings.Repeat(name[:1], 32))
+	l.appIDs[name] = []byte(name)
 	l.mu.Unlock()
 	if err := l.caddyClient.AddRoute(host, "localhost:8080", false); err != nil {
 		t.Fatal(err)
@@ -87,10 +117,11 @@ func readOrEmpty(path string) string {
 // domain in their own signed policy. The second claim is refused, and the
 // victim's extensions file is left exactly as it was.
 func TestDirectDomainOfAnotherAppIsRefused(t *testing.T) {
-	l, extDir := hostTestLauncher(t, testAppDomain)
+	l, extDir, store := hostTestLauncher(t, testAppDomain)
 	addHostTestApp(t, l, "victim", "victim."+testAppDomain, 10001)
 	addHostTestApp(t, l, "attacker", "attacker."+testAppDomain, 10002)
 
+	approve(store, "victim", "shop.example.com")
 	if err := l.SetDirectDomains("victim", []string{"shop.example.com"}); err != nil {
 		t.Fatalf("the victim's own domain: %v", err)
 	}
@@ -100,6 +131,12 @@ func TestDirectDomainOfAnotherAppIsRefused(t *testing.T) {
 		t.Fatal("the victim's direct domain has no extensions file")
 	}
 
+	// Refused by the policy route's pre-check, and by the launcher even if
+	// the store were wrong.
+	if err := l.CheckDirectDomains("attacker", []string{"shop.example.com"}); err == nil || !strings.Contains(err.Error(), `already served by "victim"`) {
+		t.Fatalf("the pre-check let the claim through: %v", err)
+	}
+	approve(store, "attacker", "shop.example.com")
 	err := l.SetDirectDomains("attacker", []string{"shop.example.com"})
 	if err == nil || !strings.Contains(err.Error(), `already served by "victim"`) {
 		t.Fatalf("a second claim on the victim's domain was not refused: %v", err)
@@ -119,11 +156,34 @@ func TestDirectDomainOfAnotherAppIsRefused(t *testing.T) {
 	}
 }
 
+// The review of the fix (2026-11-27): who is loaded must not decide who
+// owns a name. While the victim is not loaded (boot replay, a redeploy, a
+// stop) the attacker still cannot take a name the store gives the victim,
+// and the victim gets it back when it loads. A name the store gives no one
+// is served by no one.
+func TestDirectDomainOwnerIsTheStoresNotWhoIsLoaded(t *testing.T) {
+	l, _, store := hostTestLauncher(t, testAppDomain)
+	addHostTestApp(t, l, "attacker", "attacker."+testAppDomain, 10002)
+	approve(store, "victim", "shop.example.com")
+
+	if err := l.SetDirectDomains("attacker", []string{"shop.example.com"}); err == nil || !strings.Contains(err.Error(), "not approved for this app") {
+		t.Fatalf("the attacker took an absent victim's name: %v", err)
+	}
+	addHostTestApp(t, l, "victim", "victim."+testAppDomain, 10001)
+	if err := l.SetDirectDomains("victim", []string{"shop.example.com"}); err != nil {
+		t.Fatalf("the victim's name after its load: %v", err)
+	}
+	if err := l.SetDirectDomains("attacker", []string{"free.example.com"}); err == nil {
+		t.Fatal("a name no accepted policy approved was served")
+	}
+}
+
 // A name no one holds is accepted; its owner can apply the same list again,
 // add a name, and drop one (whose file then goes).
 func TestDirectDomainOwnerKeepsAndUpdatesItsNames(t *testing.T) {
-	l, extDir := hostTestLauncher(t, testAppDomain)
+	l, extDir, store := hostTestLauncher(t, testAppDomain)
 	addHostTestApp(t, l, "app", "app."+testAppDomain, 10001)
+	approve(store, "app", "a.example.com", "b.example.com")
 
 	if err := l.SetDirectDomains("app", []string{"a.example.com"}); err != nil {
 		t.Fatalf("a unique name: %v", err)
@@ -143,8 +203,10 @@ func TestDirectDomainOwnerKeepsAndUpdatesItsNames(t *testing.T) {
 	if readOrEmpty(filepath.Join(extDir, "b.example.com.json")) == "" {
 		t.Fatal("the kept name has no extensions file")
 	}
-	// Once dropped, the name is free for another app.
+	// Once its owner's policy drops it, another app may take it.
+	delete(store.owners, "a.example.com")
 	addHostTestApp(t, l, "other", "other."+testAppDomain, 10002)
+	approve(store, "other", "a.example.com")
 	if err := l.SetDirectDomains("other", []string{"a.example.com"}); err != nil {
 		t.Fatalf("a released name: %v", err)
 	}
@@ -152,9 +214,11 @@ func TestDirectDomainOwnerKeepsAndUpdatesItsNames(t *testing.T) {
 
 // The names the platform keeps and the app domain's names are never direct
 // domains: another app's canonical hostname, the manager's name, the
-// platform hostname, the app's own name, the app domain itself.
+// platform hostname, the app's own name, the app domain itself, and an IP
+// address (the control plane reaches the enclave by its IP). Even with the
+// store approving them.
 func TestDirectDomainCannotTakeAssignedNames(t *testing.T) {
-	l, _ := hostTestLauncher(t, testAppDomain)
+	l, _, store := hostTestLauncher(t, testAppDomain)
 	addHostTestApp(t, l, "victim", "victim."+testAppDomain, 10001)
 	addHostTestApp(t, l, "attacker", "attacker."+testAppDomain, 10002)
 	for _, d := range []string{
@@ -164,7 +228,13 @@ func TestDirectDomainCannotTakeAssignedNames(t *testing.T) {
 		testPlatform,
 		testAppDomain,
 		"deeper.victim." + testAppDomain,
+		"34.155.1.2",
+		"127.0.0.1",
 	} {
+		approve(store, "attacker", d)
+		if err := l.CheckDirectDomains("attacker", []string{d}); err == nil {
+			t.Errorf("pre-check: direct domain %s was accepted", d)
+		}
 		if err := l.SetDirectDomains("attacker", []string{d}); err == nil {
 			t.Errorf("direct domain %s was accepted", d)
 		}
@@ -178,12 +248,14 @@ func TestDirectDomainCannotTakeAssignedNames(t *testing.T) {
 // owner per name: a direct domain cannot be another app's canonical name,
 // and a load cannot take another app's direct domain.
 func TestOneOwnerWithoutAnAppDomain(t *testing.T) {
-	l, _ := hostTestLauncher(t, "")
+	l, _, store := hostTestLauncher(t, "")
 	addHostTestApp(t, l, "victim", "victim.example.org", 10001)
 	addHostTestApp(t, l, "attacker", "attacker.example.org", 10002)
+	approve(store, "attacker", "victim.example.org")
 	if err := l.SetDirectDomains("attacker", []string{"victim.example.org"}); err == nil {
 		t.Fatal("a direct domain naming another app's hostname was accepted")
 	}
+	approve(store, "victim", "shop.example.com")
 	if err := l.SetDirectDomains("victim", []string{"shop.example.com"}); err != nil {
 		t.Fatal(err)
 	}
@@ -207,6 +279,7 @@ func TestLoadHostnameIsOneConcreteName(t *testing.T) {
 		testPlatform,
 		testManager,
 		"app." + testAppDomain + ".",
+		"34.155.1.2",
 	} {
 		if err := l.ValidateLoadHostname(h); err == nil {
 			t.Errorf("load hostname %q was accepted", h)
@@ -228,8 +301,9 @@ func TestLoadHostnameIsOneConcreteName(t *testing.T) {
 // itself needs containerd; this is its direct-domain step, run as Unload
 // runs it, after the spec is gone.)
 func TestUnloadRemovesOnlyItsOwnNames(t *testing.T) {
-	l, extDir := hostTestLauncher(t, testAppDomain)
+	l, extDir, store := hostTestLauncher(t, testAppDomain)
 	addHostTestApp(t, l, "a", "a."+testAppDomain, 10001)
+	approve(store, "a", "a.example.com", "b.example.com")
 	if err := l.SetDirectDomains("a", []string{"a.example.com", "b.example.com"}); err != nil {
 		t.Fatal(err)
 	}

@@ -5,6 +5,7 @@ package apppolicy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -130,6 +131,15 @@ func (s *Store) Accept(raw []byte, appID string) (*Document, []byte, error) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// One app per direct domain on this host, durably: the first accepted
+	// policy that names a domain owns it until that app's own policy drops
+	// it. Who happens to be loaded at the moment (boot replay, a redeploy, a
+	// stopped app) never decides it.
+	for _, d := range doc.Domains {
+		if owner := s.domainOwnerLocked(d); owner != "" && owner != doc.AppID {
+			return nil, nil, fmt.Errorf("%w: %s", ErrDomainTaken, d)
+		}
+	}
 	current, pinned := s.pins[doc.AppID]
 	if pinned {
 		if sub != current.Approver {
@@ -241,6 +251,30 @@ func (s *Store) SignedFor(appID string) (callers, deps json.RawMessage, owners [
 	defer s.mu.Unlock()
 	p := s.pins[appID]
 	return append(json.RawMessage(nil), p.AllowedCallers...), append(json.RawMessage(nil), p.Dependencies...), append([]string(nil), p.Owners...)
+}
+
+// ErrDomainTaken refuses a document naming a direct domain that another
+// app's accepted policy holds on this host.
+var ErrDomainTaken = errors.New("apppolicy: the domain is approved for another app on this host")
+
+// DomainOwner returns the app whose accepted policy names the direct domain
+// name, or "" when none does. It is the record of who owns a direct domain
+// on this host; the launcher serves a domain only for its owner.
+func (s *Store) DomainOwner(name string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.domainOwnerLocked(name)
+}
+
+func (s *Store) domainOwnerLocked(name string) string {
+	for appID, p := range s.pins {
+		for _, d := range p.Domains {
+			if d == name {
+				return appID
+			}
+		}
+	}
+	return ""
 }
 
 // DomainsFor returns the direct adopter hostnames the app's owner approved,

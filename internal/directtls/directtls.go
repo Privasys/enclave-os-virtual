@@ -30,7 +30,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -198,25 +200,31 @@ func (s *Service) CA() string { return s.cfg.CA }
 // Apply sets the direct names of a container: writes their markers, and
 // starts obtaining and renewing their certificates. An empty list removes
 // them. Calling it again with the same names is cheap.
+//
+// A name the container drops here is released: its marker goes, and so do
+// its certificate and key, so the next owner of the name (the policy store
+// decides who) never serves this app's certificate. A name whose marker
+// belongs to another app is purged the same way before it is taken. An
+// unload is not a release (Remove keeps the certificates for the redeploy).
 func (s *Service) Apply(container, canonical string, domains []string, key *ecdsa.PrivateKey) error {
 	domains = normalise(domains)
-	s.mu.Lock()
-	old := s.apps[container]
-	if old != nil && old.canonical == canonical && equal(old.domains, domains) && sameKey(old.key, key) {
-		s.mu.Unlock()
+	old, unchanged := s.stopApp(container, canonical, domains, key)
+	if unchanged {
 		return nil
 	}
-	if old != nil {
-		old.stop()
-		delete(s.apps, container)
-	}
-	s.mu.Unlock()
-
 	for _, d := range removed(old, domains) {
 		_ = os.Remove(s.markerPath(d))
+		s.purge(d)
 	}
 	if len(domains) == 0 {
 		return nil
+	}
+	for _, d := range domains {
+		if m, err := s.marker(d); err == nil && m.Canonical != canonical {
+			s.log.Warn("direct name held another app's certificate; purged before it is taken",
+				zap.String("name", d), zap.String("container", container))
+			s.purge(d)
+		}
 	}
 	if key == nil {
 		return fmt.Errorf("directtls: %s has no account key", container)
@@ -225,7 +233,7 @@ func (s *Service) Apply(container, canonical string, domains []string, key *ecds
 		return fmt.Errorf("directtls: marker dir: %w", err)
 	}
 	for _, d := range domains {
-		b, _ := json.Marshal(map[string]string{"canonical": canonical})
+		b, _ := json.Marshal(directMarker{Canonical: canonical})
 		if err := os.WriteFile(s.markerPath(d), b, 0o600); err != nil {
 			return fmt.Errorf("directtls: marker for %s: %w", d, err)
 		}
@@ -288,9 +296,55 @@ func (s *Service) Apply(container, canonical string, domains []string, key *ecds
 	return nil
 }
 
-// Remove drops every direct name of a container.
+// Remove stops serving a container's direct names at unload: their markers
+// go, their certificates stay in storage for the same app's next load (a
+// redeploy must not order new certificates). Releasing a name is Apply's.
 func (s *Service) Remove(container string) {
-	_ = s.Apply(container, "", nil, nil)
+	old, _ := s.stopApp(container, "", nil, nil)
+	for _, d := range removed(old, nil) {
+		_ = os.Remove(s.markerPath(d))
+	}
+}
+
+// stopApp stops the container's certificate management and forgets it,
+// unless it already manages exactly these names with this key (unchanged).
+// It returns what was managed before.
+func (s *Service) stopApp(container, canonical string, domains []string, key *ecdsa.PrivateKey) (old *app, unchanged bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old = s.apps[container]
+	if old != nil && old.canonical == canonical && equal(old.domains, domains) && sameKey(old.key, key) {
+		return old, true
+	}
+	if old != nil {
+		old.stop()
+		delete(s.apps, container)
+	}
+	return old, false
+}
+
+// directMarker is a direct name's marker file: the canonical hostname of the
+// app serving it (caddy/ratls/direct.go reads the same file).
+type directMarker struct {
+	Canonical string `json:"canonical"`
+}
+
+// marker reads the marker of a direct name.
+func (s *Service) marker(name string) (directMarker, error) {
+	var m directMarker
+	data, err := os.ReadFile(s.markerPath(name))
+	if err != nil {
+		return m, err
+	}
+	return m, json.Unmarshal(data, &m)
+}
+
+// purge deletes a name's certificate, key and metadata from the shared
+// storage, which the ra_tls getter reads on every handshake.
+func (s *Service) purge(name string) {
+	if err := s.storage.Delete(context.Background(), certmagic.StorageKeys.CertsSitePrefix(s.issuerKey, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		s.log.Warn("direct certificate not purged", zap.String("name", name), zap.Error(err))
+	}
 }
 
 // resolveAccount learns the account URL the CA assigned to the app's key, the

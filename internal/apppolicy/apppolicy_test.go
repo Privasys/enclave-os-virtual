@@ -2,6 +2,7 @@ package apppolicy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -328,5 +329,61 @@ func TestDocumentForAnotherAppPinsNothing(t *testing.T) {
 	}
 	if _, _, err := s.Accept(raw, testApp); err != nil {
 		t.Fatalf("the same document for its own app: %v", err)
+	}
+}
+
+// A direct domain has one owner on a host, durably: the first accepted
+// policy naming it owns it, another app's policy naming it is refused (and
+// pins nothing), the owner keeps it across its own updates, and once the
+// owner's policy drops it another app may take it. Ownership survives a
+// reload of the store.
+func TestDirectDomainHasOneOwnerInTheStore(t *testing.T) {
+	idp := newIdP()
+	path := filepath.Join(t.TempDir(), "pins.json")
+	s, err := NewStore(path, idp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const other = "99998888777766665555444433332222"
+	docFor := func(app string, seq uint64, domains string) string {
+		return fmt.Sprintf(`{"v":1,"app_id":%q,"seq":%d,"domains":%s}`, app, seq, domains)
+	}
+	accept := func(app string, seq uint64, domains string) error {
+		d := docFor(app, seq, domains)
+		_, _, err := s.Accept(envelope(t, d, idp.approve(t, "owner-"+app[:4], d)), app)
+		return err
+	}
+
+	if err := accept(testApp, 1, `["shop.example.com"]`); err != nil {
+		t.Fatal(err)
+	}
+	if err := accept(other, 1, `["shop.example.com","mine.example.com"]`); !errors.Is(err, ErrDomainTaken) {
+		t.Fatalf("another app's claim: %v", err)
+	}
+	if s.Pinned(other) {
+		t.Fatal("a refused claim pinned its app")
+	}
+	if got := s.DomainOwner("shop.example.com"); got != testApp {
+		t.Fatalf("owner = %q", got)
+	}
+	if err := accept(testApp, 2, `["shop.example.com","b.example.com"]`); err != nil {
+		t.Fatalf("the owner's own update: %v", err)
+	}
+
+	s, err = NewStore(path, idp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := accept(other, 2, `["shop.example.com"]`); !errors.Is(err, ErrDomainTaken) {
+		t.Fatalf("after a reload: %v", err)
+	}
+	if err := accept(testApp, 3, `["b.example.com"]`); err != nil {
+		t.Fatal(err)
+	}
+	if err := accept(other, 3, `["shop.example.com"]`); err != nil {
+		t.Fatalf("a released domain: %v", err)
+	}
+	if got := s.DomainOwner("shop.example.com"); got != other {
+		t.Fatalf("owner after release = %q", got)
 	}
 }

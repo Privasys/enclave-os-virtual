@@ -11,13 +11,16 @@ import "strings"
 
 // Valid reports whether h is a lowercase fully qualified hostname of at least
 // two labels, each 1 to 63 letters, digits or hyphens, not starting or ending
-// with a hyphen.
+// with a hyphen, whose last label is not all digits. That last rule keeps an
+// IP address out: no top-level domain is numeric, and the control plane
+// reaches an enclave by its IP address, so an app holding the IP as a name
+// would receive the platform's calls.
 func Valid(h string) bool {
 	if len(h) == 0 || len(h) > 253 || strings.HasSuffix(h, ".") {
 		return false
 	}
 	labels := strings.Split(h, ".")
-	if len(labels) < 2 {
+	if len(labels) < 2 || strings.Trim(labels[len(labels)-1], "0123456789") == "" {
 		return false
 	}
 	for _, l := range labels {

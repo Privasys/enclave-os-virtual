@@ -22,7 +22,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"go.uber.org/zap"
 
@@ -38,9 +37,11 @@ import (
 const directBranchInfo = "privasys-direct-tls/v1"
 
 // ApprovedDomains reports the direct adopter hostnames an app's owner
-// approved (the policy store).
+// approved (the policy store), and which app owns a name: the store is the
+// durable record of direct-domain ownership on this host.
 type ApprovedDomains interface {
 	DomainsFor(appIDHex string) []string
+	DomainOwner(name string) string
 }
 
 // SignedPolicy reports the members of an app's accepted owner-signed policy
@@ -208,6 +209,10 @@ func (l *Launcher) SetDirectDomains(containerName string, domains []string) erro
 	l.directMu.Lock()
 	defer l.directMu.Unlock()
 
+	l.approvedMu.Lock()
+	src := l.approvedDomains
+	l.approvedMu.Unlock()
+
 	l.mu.Lock()
 	spec, ok := l.specs[containerName]
 	if !ok {
@@ -225,18 +230,22 @@ func (l *Launcher) SetDirectDomains(containerName string, domains []string) erro
 	}
 	// One owner per hostname (hostnames.go), checked and recorded under the
 	// same lock: nothing is written for a name this container may not take.
-	for _, d := range domains {
-		if strings.EqualFold(d, spec.Hostname) {
+	// The policy store must name this app as each domain's owner.
+	if err := l.checkDirectDomainsLocked(containerName, spec.Hostname, domains); err != nil {
+		l.mu.Unlock()
+		return err
+	}
+	if len(domains) > 0 {
+		appID := hex.EncodeToString(l.appIDs[containerName])
+		if src == nil || appID == "" {
 			l.mu.Unlock()
-			return fmt.Errorf("direct domain %s is the app's own hostname", d)
+			return fmt.Errorf("direct domains need the owner-approved policy store and an app id")
 		}
-		if err := l.validateDirectDomain(d); err != nil {
-			l.mu.Unlock()
-			return err
-		}
-		if err := l.claimHostLocked(containerName, d); err != nil {
-			l.mu.Unlock()
-			return err
+		for _, d := range domains {
+			if owner := src.DomainOwner(d); owner != appID {
+				l.mu.Unlock()
+				return fmt.Errorf("direct domain %s is not approved for this app on this host", d)
+			}
 		}
 	}
 	previous := l.directDomains[containerName]
