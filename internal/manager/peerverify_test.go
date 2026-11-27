@@ -200,8 +200,9 @@ func TestVerdictSweepIsRateLimited(t *testing.T) {
 }
 
 // A full table of live verdicts refuses a new connection's evidence and keeps
-// every live caller; the connection's own verdict is still replaced, and a
-// full table of expired verdicts sweeps at once, inside the interval.
+// every live caller; the connection's own verdict is still replaced. A full
+// table sweeps no more often than any other (once per interval), and a
+// sweep after the interval frees the expired verdicts.
 func TestVerdictTableRefusesWhenFull(t *testing.T) {
 	v := newTestVerifier()
 	v.mu.Lock()
@@ -225,6 +226,10 @@ func TestVerdictTableRefusesWhenFull(t *testing.T) {
 		v.verdicts[k] = &peerVerdict{mono: old}
 	}
 	v.lastSweep = time.Now()
+	if err := v.recordVerdictLocked("new", &peerVerdict{mono: time.Now()}); err != errVerdictTableFull {
+		t.Fatalf("a full table swept inside the interval: %v", err)
+	}
+	v.lastSweep = time.Now().Add(-2 * verdictSweepInterval)
 	if err := v.recordVerdictLocked("new", &peerVerdict{mono: time.Now()}); err != nil {
 		t.Fatalf("a full table of expired verdicts was not swept: %v", err)
 	}

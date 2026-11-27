@@ -53,7 +53,10 @@ const (
 type peerVerdict struct {
 	certFP [32]byte
 	host   string
-	info   ratls.CertInfo
+	// The verified caller's identity, as the X-Privasys-Peer-* headers carry
+	// it. Only these few strings are kept, never the evidence itself (a
+	// caller's quote and GPU evidence run to hundreds of KB per entry).
+	appID, imageDigest, measurement string
 	// at is the trusted time of the verification, mono the local monotonic
 	// instant. The window must hold on both: trusted time cannot be rolled
 	// back by the host, and the monotonic clock keeps moving while trusted
@@ -110,14 +113,15 @@ var errVerdictTableFull = fmt.Errorf("too many attested connections on this host
 
 // recordVerdictLocked stores a connection's verdict, first dropping expired
 // verdicts when the table is large and the last sweep is older than
-// verdictSweepInterval, or at once when it is full. A connection's own
+// verdictSweepInterval. A connection's own
 // verdict is always replaced; a new one is refused while the table is full.
 // Callers hold v.mu.
 func (v *ingressVerifier) recordVerdictLocked(conn string, pv *peerVerdict) error {
 	now := time.Now()
 	_, known := v.verdicts[conn]
-	full := !known && len(v.verdicts) >= verdictMax
-	if full || len(v.verdicts) > verdictSweepAbove && now.Sub(v.lastSweep) >= verdictSweepInterval {
+	// At most one sweep per interval, full or not: a full table must not make
+	// every new caller walk it under the lock every host's requests wait on.
+	if len(v.verdicts) > verdictSweepAbove && now.Sub(v.lastSweep) >= verdictSweepInterval {
 		v.lastSweep = now
 		for k, vd := range v.verdicts {
 			if now.Sub(vd.mono) > verdictTTL {
@@ -249,17 +253,15 @@ func (v *ingressVerifier) enforce(r *http.Request) error {
 		return fmt.Errorf("caller evidence was verified for host %q, not %q", verdict.host, host)
 	}
 
-	info := verdict.info
 	r.Header.Set(hdrPeerVerified, "true")
-	if id := oidFromInfo(info, ratls.OidWorkloadAppID); id != "" {
-		r.Header.Set(hdrPeerAppID, id)
+	if verdict.appID != "" {
+		r.Header.Set(hdrPeerAppID, verdict.appID)
 	}
-	if dg := oidFromInfo(info, ratls.OidWorkloadCodeHash); dg != "" {
-		r.Header.Set(hdrPeerImageDigest, dg)
+	if verdict.imageDigest != "" {
+		r.Header.Set(hdrPeerImageDigest, verdict.imageDigest)
 	}
-	if info.Quote != nil && len(info.Quote.Raw) >= ratls.TDXQuoteMRTDEnd {
-		r.Header.Set(hdrPeerMeasurement,
-			hex.EncodeToString(info.Quote.Raw[ratls.TDXQuoteMRTDOff:ratls.TDXQuoteMRTDEnd]))
+	if verdict.measurement != "" {
+		r.Header.Set(hdrPeerMeasurement, verdict.measurement)
 	}
 	return nil
 }
@@ -389,7 +391,12 @@ func (v *ingressVerifier) verifyPeerEvidence(req *peerEvidenceRequest) error {
 		return fmt.Errorf("cannot record the caller's verdict: %w", err)
 	}
 	v.mu.Lock()
-	err = v.recordVerdictLocked(req.Conn, &peerVerdict{certFP: sha256.Sum256(certDER), host: host, info: info, at: at, mono: time.Now()})
+	pv := &peerVerdict{certFP: sha256.Sum256(certDER), host: host, at: at, mono: time.Now(),
+		appID: oidFromInfo(info, ratls.OidWorkloadAppID), imageDigest: oidFromInfo(info, ratls.OidWorkloadCodeHash)}
+	if info.Quote != nil && len(info.Quote.Raw) >= ratls.TDXQuoteMRTDEnd {
+		pv.measurement = hex.EncodeToString(info.Quote.Raw[ratls.TDXQuoteMRTDOff:ratls.TDXQuoteMRTDEnd])
+	}
+	err = v.recordVerdictLocked(req.Conn, pv)
 	v.mu.Unlock()
 	if err != nil {
 		return err
