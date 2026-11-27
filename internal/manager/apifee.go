@@ -297,6 +297,12 @@ func (s *Server) handleAPIFees(w http.ResponseWriter, r *http.Request) {
 	// of that epoch; only those are trimmed. Without an ack nothing is.
 	var ack *uint64
 	if v := r.URL.Query().Get("ack"); v != "" {
+		// An ack drops events for good: reading needs monitoring access,
+		// acknowledging needs the control plane's own (manager) role.
+		if !result.HasManagerAccess() {
+			s.jsonError(w, http.StatusForbidden, "manager role required to acknowledge fees")
+			return
+		}
 		n, err := strconv.ParseUint(v, 10, 64)
 		if err != nil {
 			s.jsonError(w, http.StatusBadRequest, "ack must be a sequence number")
