@@ -100,14 +100,8 @@ type Config struct {
 	// /data), which replaces ProxyProtocolFrom once present.
 	ProxyProtocolStatePath string
 
-	// MachineName is the instance machine name (e.g. "prod1").  Together
-	// with Hostname it determines container RA-TLS hostnames:
-	//   Container: <name>.<MachineName>.<Hostname>
+	// MachineName is the instance machine name (e.g. "prod1").
 	MachineName string
-
-	// Hostname is the domain suffix for RA-TLS hostnames
-	// (e.g. "example.com").
-	Hostname string
 
 	// PlatformHostname is the FQDN for the management API route in Caddy
 	// (e.g. "v-fr-1.example.com").  Set by the caller via --platform-hostname.

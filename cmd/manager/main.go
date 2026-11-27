@@ -279,7 +279,6 @@ func runServe(args []string) error {
 		// The list the control plane pushes replaces the flag once present.
 		ProxyProtocolStatePath: "/data/manager-proxy-protocol.json",
 		MachineName:            *machineName,
-		Hostname:               *hostname,
 		PlatformHostname:       platformHostname,
 		AppDomain:              pinnedAppDomain(pinned.ProfileFile),
 		ManagementPort:         "9443",
