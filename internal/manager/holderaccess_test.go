@@ -60,7 +60,7 @@ func (u *unlockRecorder) server() *Server {
 		}
 		return nil
 	}
-	s.holderLoadFn = func(mount, holderKey string, raw []byte, uid int, create bool, guard func() error) (string, error) {
+	s.holderLoadFn = func(mount, holderKey string, raw []byte, create bool, guard func() error) (string, error) {
 		op := "open"
 		if create {
 			op = "create"
@@ -110,14 +110,14 @@ func TestUnlockBindsReadOnlyBeforeTheKey(t *testing.T) {
 		u := &unlockRecorder{}
 		s := u.server()
 
-		_, ro, err := s.unlockHolderFolder("app", hf, key, []string{"read"}, nil, -1, create)
+		_, ro, err := s.unlockHolderFolder("app", hf, key, []string{"read"}, nil, create)
 		if err != nil || !ro {
 			t.Fatalf("%s read-only: ro %v err %v", op, ro, err)
 		}
 		u.check(t, op+" read-only", "bind-ro "+folder, view, "load-key "+op+" /view")
 
 		u.loadErr = errors.New("no key")
-		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"read"}, nil, -1, create); err == nil {
+		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"read"}, nil, create); err == nil {
 			t.Fatalf("%s: a failed key load reported success", op)
 		}
 		u.check(t, op+" failed read-only", "bind-ro "+folder, view, "load-key "+op+" /view", "unbind "+folder)
@@ -126,18 +126,18 @@ func TestUnlockBindsReadOnlyBeforeTheKey(t *testing.T) {
 		// The bind looked fine but the container still sees the folder
 		// writable (what 145-dev showed live): refused before the key loads.
 		u.viewWritable = true
-		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"read"}, nil, -1, create); err == nil {
+		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"read"}, nil, create); err == nil {
 			t.Fatalf("%s: a writable container view was accepted", op)
 		}
 		u.check(t, op+" writable view", "bind-ro "+folder, view, "unbind "+folder)
 		u.viewWritable = false
 
-		if _, ro, err := s.unlockHolderFolder("app", hf, key, []string{"read", "write"}, nil, -1, create); err != nil || ro {
+		if _, ro, err := s.unlockHolderFolder("app", hf, key, []string{"read", "write"}, nil, create); err != nil || ro {
 			t.Fatalf("%s writable: ro %v err %v", op, ro, err)
 		}
 		u.check(t, op+" writable", "unbind "+folder, "load-key "+op+" /view")
 
-		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"write"}, nil, -1, create); !errors.Is(err, errHolderAccess) {
+		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"write"}, nil, create); !errors.Is(err, errHolderAccess) {
 			t.Fatalf("%s unknown permissions: %v", op, err)
 		}
 		u.check(t, op+" unknown permissions")
@@ -271,7 +271,7 @@ func TestUnlockRefusesALoadThatSkippedTheGuard(t *testing.T) {
 	for _, perms := range [][]string{{"read"}, {"read", "write"}} {
 		u := &unlockRecorder{skipGuard: true}
 		s := u.server()
-		if _, _, err := s.unlockHolderFolder("app", hf, key, perms, nil, -1, true); err == nil {
+		if _, _, err := s.unlockHolderFolder("app", hf, key, perms, nil, true); err == nil {
 			t.Fatalf("%v: an unguarded unlock was accepted", perms)
 		}
 		u.check(t, strings.Join(perms, ","), "load-key create /view", "close-key kid /view", "unbind "+folder)
@@ -365,7 +365,7 @@ func TestMintUnlocksInTheApprovedMode(t *testing.T) {
 	}
 	body := string(src[mint.Body.Pos()-1 : mint.Body.End()-1])
 	for _, want := range []string{
-		"s.unlockHolderFolder(container, hf, holderKey, p.Capability.Permissions, raw, -1, true)",
+		"s.unlockHolderFolder(container, hf, holderKey, p.Capability.Permissions, raw, true)",
 		"ReadOnly: readOnly",
 	} {
 		if !strings.Contains(body, want) {

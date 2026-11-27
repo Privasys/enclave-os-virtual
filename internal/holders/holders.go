@@ -205,9 +205,9 @@ func Create(mount, holderKey string, rawKey []byte, guard func() error) (keyID s
 	return id, nil
 }
 
-// Open loads a holder's key and hands the folder to hostUID. The folder must
+// Open loads a holder's key. The folder must
 // exist and be bound to this key.
-func Open(mount, holderKey string, rawKey []byte, hostUID int) (keyID string, err error) {
+func Open(mount, holderKey string, rawKey []byte) (keyID string, err error) {
 	if !ValidHolderKey(holderKey) {
 		return "", errors.New("holders: invalid holder key")
 	}
@@ -226,11 +226,6 @@ func Open(mount, holderKey string, rawKey []byte, hostUID int) (keyID string, er
 	if have != id {
 		_, _ = removeKey(mount, id)
 		return "", fmt.Errorf("holders: folder %s is bound to another key", holderKey)
-	}
-	if hostUID >= 0 {
-		if err := os.Chown(folder, hostUID, hostUID); err != nil {
-			return "", fmt.Errorf("holders: chown: %w", err)
-		}
 	}
 	return id, nil
 }

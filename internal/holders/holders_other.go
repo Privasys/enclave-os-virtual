@@ -48,7 +48,7 @@ func Enable(mount, device string) error { return errUnsupported }
 func Create(mount, holderKey string, rawKey []byte, guard func() error) (string, error) {
 	return "", errUnsupported
 }
-func Open(mount, holderKey string, rawKey []byte, hostUID int) (string, error) {
+func Open(mount, holderKey string, rawKey []byte) (string, error) {
 	return "", errUnsupported
 }
 func Close(mount, holderKey, keyID string) (Status, []int, error) { return 0, nil, errUnsupported }

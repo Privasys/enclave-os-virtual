@@ -143,7 +143,7 @@ func (s *Server) unbindHolder(dir string) error {
 // manager reads the CONTAINER's own mount view and requires the folder to be
 // a read-only mount there. With no running task to check against, or a view
 // that is not read-only, nothing is unlocked.
-func (s *Server) unlockHolderFolder(container string, hf launcher.HolderFolders, holderKey string, perms []string, raw []byte, hostUID int, create bool) (keyID string, readOnly bool, err error) {
+func (s *Server) unlockHolderFolder(container string, hf launcher.HolderFolders, holderKey string, perms []string, raw []byte, create bool) (keyID string, readOnly bool, err error) {
 	readOnly, err = holderReadOnly(perms)
 	if err != nil {
 		return "", false, err
@@ -170,7 +170,7 @@ func (s *Server) unlockHolderFolder(container string, hf launcher.HolderFolders,
 		}
 		return nil
 	}
-	keyID, err = s.holderLoad(hf.Mount, holderKey, raw, hostUID, create, guard)
+	keyID, err = s.holderLoad(hf.Mount, holderKey, raw, create, guard)
 	if err == nil && !guarded {
 		// A loader that never ran the guard must not leave a folder open in
 		// a mode nobody checked: the key it loaded is removed again, and any
@@ -199,9 +199,9 @@ func (s *Server) holderClose(mount, holderKey, keyID string) {
 
 // holderLoad creates (mint) or opens the folder, running guard after the
 // folder exists and before its key is loaded. Tests replace it.
-func (s *Server) holderLoad(mount, holderKey string, raw []byte, hostUID int, create bool, guard func() error) (string, error) {
+func (s *Server) holderLoad(mount, holderKey string, raw []byte, create bool, guard func() error) (string, error) {
 	if s.holderLoadFn != nil {
-		return s.holderLoadFn(mount, holderKey, raw, hostUID, create, guard)
+		return s.holderLoadFn(mount, holderKey, raw, create, guard)
 	}
 	if create {
 		return holders.Create(mount, holderKey, raw, guard)
@@ -209,7 +209,7 @@ func (s *Server) holderLoad(mount, holderKey string, raw []byte, hostUID int, cr
 	if err := guard(); err != nil {
 		return "", err
 	}
-	return holders.Open(mount, holderKey, raw, hostUID)
+	return holders.Open(mount, holderKey, raw)
 }
 
 // releaseHolderBind drops a read-only bind once the folder is closed.

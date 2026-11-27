@@ -214,7 +214,7 @@ type Server struct {
 	// holderBind, holderLoadFn and holderCloseFn replace the holder-folder
 	// mount and key operations (tests only).
 	holderBind    func(dir string, readOnly bool) error
-	holderLoadFn  func(mount, holderKey string, raw []byte, hostUID int, create bool, guard func() error) (string, error)
+	holderLoadFn  func(mount, holderKey string, raw []byte, create bool, guard func() error) (string, error)
 	holderCloseFn func(mount, holderKey, keyID string)
 	holderViewFn  func(container, inContainer string) (bool, error)
 	server        *http.Server

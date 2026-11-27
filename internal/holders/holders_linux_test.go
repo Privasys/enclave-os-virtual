@@ -115,7 +115,7 @@ func TestHolderFoldersOnALoopDevice(t *testing.T) {
 	}
 
 	// Open again, then the busy case: a file held open keeps the key.
-	if _, err := Open(mount, holderA, keyA, -1); err != nil {
+	if _, err := Open(mount, holderA, keyA); err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	f, err := os.Open(secret)

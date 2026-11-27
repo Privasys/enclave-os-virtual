@@ -439,7 +439,7 @@ func (s *Server) mintHolderCapability(w http.ResponseWriter, r *http.Request, co
 	// The grant records exactly the ask's permission set (resolveHolder), so
 	// the folder is unlocked in that mode now: read-only is bound before the
 	// key loads, as on every other open.
-	keyID, readOnly, err := s.unlockHolderFolder(container, hf, holderKey, p.Capability.Permissions, raw, -1, true)
+	keyID, readOnly, err := s.unlockHolderFolder(container, hf, holderKey, p.Capability.Permissions, raw, true)
 	if errors.Is(err, errHolderAccess) {
 		s.jsonError(w, http.StatusForbidden, err.Error())
 		return
@@ -722,7 +722,7 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusInternalServerError, "the stored key could not be unwrapped")
 		return
 	}
-	keyID, readOnly, err := s.unlockHolderFolder(name, hf, g.HolderKey, g.Permissions, raw, hostUID, false)
+	keyID, readOnly, err := s.unlockHolderFolder(name, hf, g.HolderKey, g.Permissions, raw, false)
 	zeroBytes(raw)
 	if errors.Is(err, errHolderAccess) {
 		s.jsonError(w, http.StatusForbidden, err.Error())
@@ -732,6 +732,11 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 		s.log.Error("holder open", zap.String("container", name), zap.String("holder", g.HolderKey), zap.Error(err))
 		s.jsonError(w, http.StatusInternalServerError, "the folder could not be opened")
 		return
+	}
+	if hostUID >= 0 {
+		if err := holders.Chown(hf.Mount, g.HolderKey, hostUID); err != nil {
+			s.log.Warn("holder chown", zap.Error(err))
+		}
 	}
 	s.holdersOpen.set(key, holderOpenState{KeyID: keyID, HostUID: hostUID, OpenedAt: time.Now().UTC(), ReadOnly: readOnly,
 		Container: name, HolderKey: g.HolderKey, Resource: resource, Subject: body.Subject, CapabilityID: g.CapabilityID,

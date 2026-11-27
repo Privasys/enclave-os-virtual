@@ -121,7 +121,7 @@ func (s *Server) ensureHolderOpen(container, appID, resource, sub string, g *cap
 	}
 	// The same open as the app's: the folder is exposed to the container in
 	// the mode its grant allows (read-only bound first), whoever opens it.
-	keyID, readOnly, err := s.unlockHolderFolder(container, hf, g.HolderKey, g.Permissions, raw, -1, false)
+	keyID, readOnly, err := s.unlockHolderFolder(container, hf, g.HolderKey, g.Permissions, raw, false)
 	zeroBytes(raw)
 	if errors.Is(err, errHolderAccess) {
 		return err
