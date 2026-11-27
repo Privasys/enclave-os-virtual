@@ -856,16 +856,11 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	// last moment to check what the container will see (the manager re-checks
 	// its read-only folders here) before the app can reach anything. A hook
 	// error fails closed: the task is never started.
-	m.mu.RLock()
-	preStart := m.preStart
-	m.mu.RUnlock()
-	if preStart != nil {
-		if err := preStart(spec.Name, int(task.Pid())); err != nil {
-			network.Detach(spec.Port)
-			_, _ = task.Delete(ctx)
-			_ = container.Delete(ctx)
-			return nil, fmt.Errorf("container: pre-start check refused %s: %w", spec.Name, err)
-		}
+	if _, err := m.RunPreStart(spec.Name, int(task.Pid())); err != nil {
+		network.Detach(spec.Port)
+		_, _ = task.Delete(ctx)
+		_ = container.Delete(ctx)
+		return nil, fmt.Errorf("container: pre-start check refused %s: %w", spec.Name, err)
 	}
 
 	if err := task.Start(ctx); err != nil {
@@ -945,7 +940,7 @@ func (m *Manager) SetPreStart(f func(name string, pid int) error) {
 }
 
 // RunPreStart runs the installed pre-start hook, if any, reporting whether
-// there was one and its error (the launcher's wiring test drives it).
+// there was one and its error. Create runs it for every new task.
 func (m *Manager) RunPreStart(name string, pid int) (bool, error) {
 	m.mu.RLock()
 	f := m.preStart
