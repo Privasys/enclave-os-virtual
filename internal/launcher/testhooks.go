@@ -47,3 +47,12 @@ func RegisterAppForTest(l *Launcher, name, hostname string, st FreezeState, pric
 	l.prices[name] = prices
 	l.freezeMu.Unlock()
 }
+
+// SetHolderFoldersForTest gives name the resource declarations decls and the
+// holder wrap key wrap, as a load of a vault-backed volume leaves them.
+func SetHolderFoldersForTest(l *Launcher, name string, decls []ResourceDecl, wrap []byte) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.resourceDecls[name] = decls
+	l.holderWrapKeys[name] = wrap
+}

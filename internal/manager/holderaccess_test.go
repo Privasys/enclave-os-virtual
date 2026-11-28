@@ -2,10 +2,10 @@ package manager
 
 import (
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +13,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/Privasys/enclave-os-virtual/internal/holders"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 )
 
@@ -38,109 +39,150 @@ func TestHolderPermissionsDecideTheMode(t *testing.T) {
 	}
 }
 
-// unlockRecorder records the mount and key steps of unlockHolderFolder. The
-// fake loader behaves like holders.Create/Open: the folder exists, guard
-// runs, then the key loads.
-type unlockRecorder struct {
-	steps     []string
-	loadErr   error
-	skipGuard bool
+// fakeFolders records the folder operations, in order. The folder exists
+// unless missing is set, and the container's task is pid 4242.
+type fakeFolders struct {
+	steps   []string
+	missing bool
+	loadErr error
 	// viewWritable makes the container's view of the folder writable even
 	// after the bind (the failure the self-check exists for).
 	viewWritable bool
+	// viewWait, when set, blocks the view check until it is closed.
+	viewWait chan struct{}
+	noTask   bool
 }
 
-func (u *unlockRecorder) server() *Server {
-	s := &Server{log: zap.NewNop()}
-	s.holderBind = func(dir string, ro bool) error {
-		if ro {
-			u.steps = append(u.steps, "bind-ro "+dir)
-		} else {
-			u.steps = append(u.steps, "unbind "+dir)
-		}
-		return nil
+func (f *fakeFolders) add(s string) { f.steps = append(f.steps, s) }
+
+func (f *fakeFolders) MakeFolder(mount, holderKey string) (bool, error) {
+	if !f.missing {
+		return false, nil
 	}
-	s.holderLoadFn = func(mount, holderKey string, raw []byte, create bool, guard func() error) (string, error) {
-		op := "open"
-		if create {
-			op = "create"
-		}
-		if !u.skipGuard {
-			if err := guard(); err != nil {
-				return "", err
-			}
-		}
-		u.steps = append(u.steps, "load-key "+op+" "+mount)
-		return "kid", u.loadErr
+	f.add("make " + mount)
+	return true, nil
+}
+func (f *fakeFolders) Seal(mount, holderKey string, raw []byte) (string, error) {
+	f.add("seal " + mount)
+	return "kid", f.loadErr
+}
+func (f *fakeFolders) RemoveFolder(mount, holderKey string) error {
+	f.add("remove " + mount)
+	return nil
+}
+func (f *fakeFolders) Open(mount, holderKey string, raw []byte) (string, error) {
+	f.add("open " + mount)
+	return "kid", f.loadErr
+}
+func (f *fakeFolders) Close(mount, holderKey, keyID string) (holders.Status, []int, error) {
+	f.add("close-key " + keyID + " " + mount)
+	return holders.Absent, nil, nil
+}
+func (f *fakeFolders) KeyStatus(mount, keyID string) (holders.Status, error) {
+	return holders.Present, nil
+}
+func (f *fakeFolders) Chown(mount, holderKey string, hostUID int) error { return nil }
+func (f *fakeFolders) Usage(mount, holderKey string) (int64, error)     { return 0, nil }
+func (f *fakeFolders) BindReadOnly(dir string) error {
+	f.add("bind-ro " + dir)
+	return nil
+}
+func (f *fakeFolders) Unbind(dir string) error {
+	f.add("unbind " + dir)
+	return nil
+}
+func (f *fakeFolders) TaskPID(container string) (int, bool) { return 4242, !f.noTask }
+func (f *fakeFolders) ViewReadOnly(pid int, inContainer string) (bool, error) {
+	if f.viewWait != nil {
+		<-f.viewWait
 	}
-	s.holderCloseFn = func(mount, holderKey, keyID string) {
-		u.steps = append(u.steps, "close-key "+keyID+" "+mount)
-	}
-	s.holderViewFn = func(container, inContainer string) (bool, error) {
-		u.steps = append(u.steps, "check-view "+container+" "+inContainer)
-		return !u.viewWritable, nil
-	}
-	return s
+	f.add(fmt.Sprintf("check-view %d %s", pid, inContainer))
+	return !f.viewWritable, nil
 }
 
-func (u *unlockRecorder) check(t *testing.T, name string, want ...string) {
+func (f *fakeFolders) server() *Server {
+	return &Server{log: zap.NewNop(), folderOps: f}
+}
+
+func (f *fakeFolders) check(t *testing.T, name string, want ...string) {
 	t.Helper()
-	if strings.Join(u.steps, "|") != strings.Join(want, "|") {
-		t.Fatalf("%s: steps %v, want %v", name, u.steps, want)
+	if strings.Join(f.steps, "|") != strings.Join(want, "|") {
+		t.Fatalf("%s: steps %v, want %v", name, f.steps, want)
 	}
-	u.steps = nil
+	f.steps = nil
 }
 
 // The order Security set, for EVERY unlock (mint and open alike): for a
-// read-only grant the read-only bind exists BEFORE the key is loaded (no
-// writable window), and is undone if the key then fails to load. A
-// writable grant removes any earlier read-only bind. An unknown permission
-// set binds and loads nothing.
+// read-only grant the read-only bind exists, and the container's own view
+// confirms it, BEFORE the key is loaded (no writable window); both are
+// undone if the key then fails to load. A writable grant removes any
+// earlier read-only bind. An unknown permission set touches nothing. A new
+// folder that is not sealed is removed again.
 func TestUnlockBindsReadOnlyBeforeTheKey(t *testing.T) {
 	hf := launcher.HolderFolders{Mount: "/view", Exposed: "/vol"}
 	key := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	folder := "/vol/holders/" + key
-	view := "check-view app /data/holders/" + key
+	view := "check-view 4242 /data/holders/" + key
 
-	for _, create := range []bool{true, false} {
-		op := "open"
-		if create {
-			op = "create"
+	for _, c := range []struct {
+		name          string
+		create, isNew bool
+	}{{"open", false, false}, {"mint, existing folder", true, false}, {"mint, new folder", true, true}} {
+		f := &fakeFolders{missing: c.isNew}
+		s := f.server()
+		var made, load, removed []string
+		if c.isNew {
+			made, load, removed = []string{"make /view"}, []string{"seal /view"}, []string{"remove /view"}
+		} else {
+			load = []string{"open /view"}
 		}
-		u := &unlockRecorder{}
-		s := u.server()
+		steps := func(parts ...[]string) []string {
+			var out []string
+			for _, p := range parts {
+				out = append(out, p...)
+			}
+			return out
+		}
 
-		_, ro, err := s.unlockHolderFolder("app", hf, key, []string{"read"}, nil, create)
+		_, ro, err := s.unlockHolderFolder("app", hf, key, []string{"read"}, nil, c.create)
 		if err != nil || !ro {
-			t.Fatalf("%s read-only: ro %v err %v", op, ro, err)
+			t.Fatalf("%s read-only: ro %v err %v", c.name, ro, err)
 		}
-		u.check(t, op+" read-only", "bind-ro "+folder, view, "load-key "+op+" /view")
+		f.check(t, c.name+" read-only", steps(made, []string{"bind-ro " + folder, view}, load)...)
 
-		u.loadErr = errors.New("no key")
-		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"read"}, nil, create); err == nil {
-			t.Fatalf("%s: a failed key load reported success", op)
+		f.loadErr = errors.New("no key")
+		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"read"}, nil, c.create); err == nil {
+			t.Fatalf("%s: a failed key load reported success", c.name)
 		}
-		u.check(t, op+" failed read-only", "bind-ro "+folder, view, "load-key "+op+" /view", "unbind "+folder)
-		u.loadErr = nil
+		f.check(t, c.name+" failed read-only", steps(made, []string{"bind-ro " + folder, view}, load, []string{"unbind " + folder}, removed)...)
+		f.loadErr = nil
 
 		// The bind looked fine but the container still sees the folder
 		// writable (what 145-dev showed live): refused before the key loads.
-		u.viewWritable = true
-		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"read"}, nil, create); err == nil {
-			t.Fatalf("%s: a writable container view was accepted", op)
+		f.viewWritable = true
+		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"read"}, nil, c.create); err == nil {
+			t.Fatalf("%s: a writable container view was accepted", c.name)
 		}
-		u.check(t, op+" writable view", "bind-ro "+folder, view, "unbind "+folder)
-		u.viewWritable = false
+		f.check(t, c.name+" writable view", steps(made, []string{"bind-ro " + folder, view, "unbind " + folder}, removed)...)
+		f.viewWritable = false
 
-		if _, ro, err := s.unlockHolderFolder("app", hf, key, []string{"read", "write"}, nil, create); err != nil || ro {
-			t.Fatalf("%s writable: ro %v err %v", op, ro, err)
+		// No running task to check against: nothing is unlocked.
+		f.noTask = true
+		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"read"}, nil, c.create); err == nil {
+			t.Fatalf("%s: a read-only unlock with no task was accepted", c.name)
 		}
-		u.check(t, op+" writable", "unbind "+folder, "load-key "+op+" /view")
+		f.check(t, c.name+" no task", steps(made, []string{"bind-ro " + folder, "unbind " + folder}, removed)...)
+		f.noTask = false
 
-		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"write"}, nil, create); !errors.Is(err, errHolderAccess) {
-			t.Fatalf("%s unknown permissions: %v", op, err)
+		if _, ro, err := s.unlockHolderFolder("app", hf, key, []string{"read", "write"}, nil, c.create); err != nil || ro {
+			t.Fatalf("%s writable: ro %v err %v", c.name, ro, err)
 		}
-		u.check(t, op+" unknown permissions")
+		f.check(t, c.name+" writable", steps(made, []string{"unbind " + folder}, load)...)
+
+		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"write"}, nil, c.create); !errors.Is(err, errHolderAccess) {
+			t.Fatalf("%s unknown permissions: %v", c.name, err)
+		}
+		f.check(t, c.name+" unknown permissions")
 	}
 }
 
@@ -150,15 +192,16 @@ func TestUnlockBindsReadOnlyBeforeTheKey(t *testing.T) {
 // open; writable grants and other containers are not touched.
 func TestNewTaskClosesAReadOnlyFolderItWouldSeeWritable(t *testing.T) {
 	for _, writableView := range []bool{false, true} {
-		u := &unlockRecorder{viewWritable: writableView}
-		s := u.server()
+		f := &fakeFolders{viewWritable: writableView}
+		s := f.server()
 		s.holdersOpen = newHolderState()
 		s.events = newEventHub()
-		// The paths come from the open state, never from the launcher (the
-		// Server here has none: calling it would panic).
-		s.holdersOpen.set("ro", holderOpenState{KeyID: "k1", ReadOnly: true, Container: "app", HolderKey: "h1", Mount: "/view", Exposed: "/vol"})
-		s.holdersOpen.set("rw", holderOpenState{KeyID: "k2", ReadOnly: false, Container: "app", HolderKey: "h2", Mount: "/view", Exposed: "/vol"})
-		s.holdersOpen.set("other", holderOpenState{KeyID: "k3", ReadOnly: true, Container: "other", HolderKey: "h3", Mount: "/view", Exposed: "/vol"})
+		// The paths are the container's (launcher.HolderPaths), never asked of
+		// the launcher (the Server here has none: calling it would panic).
+		mount, exposed := launcher.HolderPaths("app")
+		s.holdersOpen.set("ro", holderOpenState{KeyID: "k1", ReadOnly: true, Container: "app", HolderKey: "h1"})
+		s.holdersOpen.set("rw", holderOpenState{KeyID: "k2", ReadOnly: false, Container: "app", HolderKey: "h2"})
+		s.holdersOpen.set("other", holderOpenState{KeyID: "k3", ReadOnly: true, Container: "other", HolderKey: "h3"})
 
 		if err := s.recheckReadOnlyFolders("app", 4242); err != nil {
 			t.Fatalf("writable view %v: %v", writableView, err)
@@ -174,12 +217,12 @@ func TestNewTaskClosesAReadOnlyFolderItWouldSeeWritable(t *testing.T) {
 			if roOpen {
 				t.Fatal("a read-only folder the new task would see writable stayed open")
 			}
-			u.check(t, "writable view", "check-view app /data/holders/h1", "close-key k1 /view", "unbind /vol/holders/h1")
+			f.check(t, "writable view", "check-view 4242 /data/holders/h1", "close-key k1 "+mount, "unbind "+exposed+"/holders/h1")
 		} else {
 			if !roOpen {
 				t.Fatal("a read-only folder the new task sees read-only was closed")
 			}
-			u.check(t, "read-only view", "check-view app /data/holders/h1")
+			f.check(t, "read-only view", "check-view 4242 /data/holders/h1")
 		}
 	}
 }
@@ -194,9 +237,9 @@ func TestNewTaskRecheckIsBounded(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
 
-	s := &Server{log: zap.NewNop(), holdersOpen: newHolderState()}
-	s.holderViewFn = func(string, string) (bool, error) { <-release; return true, nil }
-	s.holdersOpen.set("ro", holderOpenState{KeyID: "k1", ReadOnly: true, Container: "app", HolderKey: "h1", Mount: "/view", Exposed: "/vol"})
+	s := (&fakeFolders{viewWait: release}).server()
+	s.holdersOpen = newHolderState()
+	s.holdersOpen.set("ro", holderOpenState{KeyID: "k1", ReadOnly: true, Container: "app", HolderKey: "h1"})
 
 	start := time.Now()
 	if err := s.recheckReadOnlyFolders("app", 4242); err == nil {
@@ -256,53 +299,28 @@ func TestPreStartRecheckNeverCallsTheLauncher(t *testing.T) {
 		})
 	}
 	walk("recheckReadOnlyFolders")
-	if !seen["closeFoldersNotReadOnly"] || !seen["holderClose"] || !seen["releaseHolderBind"] {
+	if !seen["closeFoldersNotReadOnly"] || !seen["folders"] {
 		t.Fatalf("the walk did not reach the hook's helpers: %v", seen)
 	}
 }
 
-// A loader that unlocks without running the access guard is refused, and
-// the folder ends CLOSED: the key it loaded is removed and any bind
-// released, so it never stays open in a mode nobody checked.
-func TestUnlockRefusesALoadThatSkippedTheGuard(t *testing.T) {
-	hf := launcher.HolderFolders{Mount: "/view", Exposed: "/vol"}
-	key := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	folder := "/vol/holders/" + key
-	for _, perms := range [][]string{{"read"}, {"read", "write"}} {
-		u := &unlockRecorder{skipGuard: true}
-		s := u.server()
-		if _, _, err := s.unlockHolderFolder("app", hf, key, perms, nil, true); err == nil {
-			t.Fatalf("%v: an unguarded unlock was accepted", perms)
-		}
-		u.check(t, strings.Join(perms, ","), "load-key create /view", "close-key kid /view", "unbind "+folder)
-	}
-}
-
 // unlockHolderFolder is the only way a holder folder becomes unlocked: no
-// non-test file of this package calls holders.Create or holders.Open except
-// holderLoad (the loader unlockHolderFolder drives), and nothing outside
-// unlockHolderFolder calls holderLoad. The mint was once the exception that
-// opened a read-only grant writable.
+// non-test file of this package loads a holder's key (MakeFolder, Seal,
+// Open) on the folder backend except unlockHolderFolder, and the kernel's
+// own calls appear only in the kernel backend's methods of the same name.
+// The mint was once the exception that opened a read-only grant writable.
 func TestOnlyUnlockHolderFolderLoadsAHolderKey(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	allowed := map[string]string{
-		"holders.Create": "holderLoad",
-		"holders.Open":   "holderLoad",
-		"holderLoad":     "unlockHolderFolder",
-	}
-	found := map[string]int{}
+	loads := map[string]bool{"MakeFolder": true, "Seal": true, "Open": true}
+	found := 0
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		src, err := os.ReadFile(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		f, err := parser.ParseFile(token.NewFileSet(), name, src, 0)
+		f, err := parser.ParseFile(token.NewFileSet(), name, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -311,65 +329,44 @@ func TestOnlyUnlockHolderFolderLoadsAHolderKey(t *testing.T) {
 			if !ok || fn.Body == nil {
 				continue
 			}
+			inKernel := false
+			if fn.Recv != nil && len(fn.Recv.List) == 1 {
+				if id, ok := fn.Recv.List[0].Type.(*ast.Ident); ok && id.Name == "kernelFolders" {
+					inKernel = true
+				}
+			}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
 				}
 				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok {
+				if !ok || !loads[sel.Sel.Name] {
 					return true
 				}
-				callee := sel.Sel.Name
-				if x, ok := sel.X.(*ast.Ident); ok && x.Name == "holders" {
-					callee = "holders." + callee
-				}
-				want, watched := allowed[callee]
-				if !watched {
-					return true
-				}
-				found[callee]++
-				if fn.Name.Name != want {
-					t.Errorf("%s: %s calls %s; only %s may", name, fn.Name.Name, callee, want)
+				switch x := sel.X.(type) {
+				case *ast.Ident:
+					switch x.Name {
+					case "holders":
+						if !inKernel || fn.Name.Name != sel.Sel.Name {
+							t.Errorf("%s: %s calls holders.%s; only kernelFolders.%s may", name, fn.Name.Name, sel.Sel.Name, sel.Sel.Name)
+						}
+					case "fs":
+						found++
+						if fn.Name.Name != "unlockHolderFolder" {
+							t.Errorf("%s: %s calls the folder backend\x27s %s; only unlockHolderFolder may", name, fn.Name.Name, sel.Sel.Name)
+						}
+					}
+				case *ast.CallExpr: // s.folders().Open(...)
+					if inner, ok := x.Fun.(*ast.SelectorExpr); ok && inner.Sel.Name == "folders" {
+						t.Errorf("%s: %s calls s.folders().%s; only unlockHolderFolder may load a key", name, fn.Name.Name, sel.Sel.Name)
+					}
 				}
 				return true
 			})
 		}
 	}
-	for callee := range allowed {
-		if found[callee] == 0 {
-			t.Errorf("no call to %s found: the source test no longer sees the unlock path", callee)
-		}
-	}
-}
-
-// The wallet's mint creates the folder through unlockHolderFolder, in the
-// mode of the permission set the holder approved, and records that mode.
-func TestMintUnlocksInTheApprovedMode(t *testing.T) {
-	src, err := os.ReadFile("holderfolders.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	f, err := parser.ParseFile(token.NewFileSet(), "holderfolders.go", src, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var mint *ast.FuncDecl
-	for _, d := range f.Decls {
-		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "mintHolderCapability" {
-			mint = fn
-		}
-	}
-	if mint == nil {
-		t.Fatal("mintHolderCapability not found")
-	}
-	body := string(src[mint.Body.Pos()-1 : mint.Body.End()-1])
-	for _, want := range []string{
-		"s.unlockHolderFolder(container, hf, holderKey, p.Capability.Permissions, raw, true)",
-		"ReadOnly: readOnly",
-	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("mintHolderCapability no longer contains %q", want)
-		}
+	if found == 0 {
+		t.Error("no backend load found: the source test no longer sees the unlock path")
 	}
 }

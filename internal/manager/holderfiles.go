@@ -107,7 +107,7 @@ func (s *Server) ensureHolderOpen(container, appID, resource, sub string, g *cap
 	key := grantKey(appID, resource, sub)
 	defer s.holdersOpen.lock(key)()
 	if st, open := s.holdersOpen.get(key); open {
-		if ks, err := holders.KeyStatus(hf.Mount, st.KeyID); err == nil && ks == holders.Present {
+		if ks, err := s.folders().KeyStatus(hf.Mount, st.KeyID); err == nil && ks == holders.Present {
 			return nil
 		}
 		s.holdersOpen.drop(key)
@@ -129,9 +129,7 @@ func (s *Server) ensureHolderOpen(container, appID, resource, sub string, g *cap
 	if err != nil {
 		return errors.New("the folder could not be opened")
 	}
-	s.holdersOpen.set(key, holderOpenState{KeyID: keyID, HostUID: -1, OpenedAt: time.Now().UTC(), ReadOnly: readOnly,
-		Container: container, HolderKey: g.HolderKey, Resource: resource, Subject: sub, CapabilityID: g.CapabilityID,
-		Mount: hf.Mount, Exposed: hf.Exposed})
+	s.holdersOpen.set(key, holderOpenState{Container: container, HolderKey: g.HolderKey, KeyID: keyID, ReadOnly: readOnly, HostUID: -1})
 	return nil
 }
 

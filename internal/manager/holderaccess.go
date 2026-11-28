@@ -76,140 +76,108 @@ func (s *Server) recheckReadOnlyFolders(container string, pid int) error {
 var preStartBound = 10 * time.Second
 
 // closeFoldersNotReadOnly closes every folder in open that the task whose
-// init is pid does not see read-only.
+// init is pid does not see read-only. The paths are the container's
+// (launcher.HolderPaths): a pure function, so nothing here asks the
+// launcher, whose lock the caller holds.
 func (s *Server) closeFoldersNotReadOnly(container string, pid int, open map[string]holderOpenState) {
+	fs := s.folders()
+	mount, exposed := launcher.HolderPaths(container)
 	for key, st := range open {
 		inContainer := path.Join(holderContainerMount, holders.Dir, st.HolderKey)
-		ro, err := s.viewReadOnlyAt(container, pid, inContainer)
+		ro, err := fs.ViewReadOnly(pid, inContainer)
 		if err == nil && ro {
 			continue
 		}
 		s.log.Error("holder read-only folder not read-only in a new task: closing it",
 			zap.String("container", container), zap.String("holder", st.HolderKey),
 			zap.Bool("read_only_view", ro), zap.Error(err))
-		if st.Mount != "" {
-			s.holderClose(st.Mount, st.HolderKey, st.KeyID)
-		}
-		s.releaseHolderBind(launcher.HolderFolders{Mount: st.Mount, Exposed: st.Exposed}, st.HolderKey)
+		_, _, _ = fs.Close(mount, st.HolderKey, st.KeyID)
+		_ = fs.Unbind(holders.FolderPath(exposed, st.HolderKey))
 		s.holdersOpen.drop(key)
 	}
-}
-
-// viewReadOnlyAt reads the mount view of the task whose init is pid.
-func (s *Server) viewReadOnlyAt(container string, pid int, inContainer string) (bool, error) {
-	if s.holderViewFn != nil {
-		return s.holderViewFn(container, inContainer)
-	}
-	return holders.ContainerViewReadOnly(pid, inContainer)
-}
-
-// containerSeesReadOnly reads the container's own mount view (tests replace
-// it). No running task means nothing to check against: not confirmed.
-func (s *Server) containerSeesReadOnly(container, inContainer string) (bool, error) {
-	if s.holderViewFn != nil {
-		return s.holderViewFn(container, inContainer)
-	}
-	pid, ok := s.launcher.ContainerTaskPID(container)
-	if !ok {
-		return false, errors.New("the container has no running task to check against")
-	}
-	return holders.ContainerViewReadOnly(pid, inContainer)
-}
-
-// bindReadOnly and unbind are the mount operations (tests replace them).
-func (s *Server) bindReadOnly(dir string) error {
-	if s.holderBind != nil {
-		return s.holderBind(dir, true)
-	}
-	return holders.BindReadOnly(dir)
-}
-
-func (s *Server) unbindHolder(dir string) error {
-	if s.holderBind != nil {
-		return s.holderBind(dir, false)
-	}
-	return holders.Unbind(dir)
 }
 
 // unlockHolderFolder is the ONLY way a holder folder becomes unlocked: the
 // wallet's mint (create), the app's open, the runtime's own file access and
 // any reopen after a restart all come here (a source test enforces it). It
-// decides the mode from what the holder approved; for read-only it makes the
-// container's view of the folder read-only BEFORE the key is loaded, and
-// undoes the bind if the key then fails to load (fail closed: no folder).
-// A writable grant removes any earlier read-only bind first.
+// decides the mode from what the holder approved, makes the container's
+// view of the folder match it, and only then loads the key:
 //
-// For read-only, the bind alone is not trusted: before the key loads, the
-// manager reads the CONTAINER's own mount view and requires the folder to be
-// a read-only mount there. With no running task to check against, or a view
-// that is not read-only, nothing is unlocked.
+//  1. a mint makes the folder, empty and unkeyed, when it does not exist;
+//  2. read-only: the folder is bound read-only, and the container's own
+//     mount view must confirm it (no running task, or a view that is not
+//     read-only, unlocks nothing); writable: any earlier read-only bind is
+//     removed;
+//  3. the key loads: a new folder is sealed to it, an existing one must
+//     already be bound to it.
+//
+// Any failure undoes the steps before it: no folder is left open in a mode
+// nobody checked, and a new folder that was not sealed is removed.
 func (s *Server) unlockHolderFolder(container string, hf launcher.HolderFolders, holderKey string, perms []string, raw []byte, create bool) (keyID string, readOnly bool, err error) {
 	readOnly, err = holderReadOnly(perms)
 	if err != nil {
 		return "", false, err
 	}
-	exposed := holders.FolderPath(hf.Exposed, holderKey)
-	inContainer := path.Join(holderContainerMount, holders.Dir, holderKey)
-	guarded := false
-	guard := func() error {
-		guarded = true
-		if !readOnly {
-			return s.unbindHolder(exposed)
+	fs := s.folders()
+	created := false
+	if create {
+		if created, err = fs.MakeFolder(hf.Mount, holderKey); err != nil {
+			return "", readOnly, err
 		}
-		if err := s.bindReadOnly(exposed); err != nil {
-			return err
-		}
-		ro, err := s.containerSeesReadOnly(container, inContainer)
-		if err == nil && !ro {
-			err = fmt.Errorf("the container sees %s writable", inContainer)
-		}
-		if err != nil {
-			s.log.Error("holder read-only check failed: the folder stays locked",
-				zap.String("container", container), zap.String("holder", holderKey), zap.Error(err))
-			return fmt.Errorf("holders: read-only view not confirmed: %w", err)
-		}
-		return nil
 	}
-	keyID, err = s.holderLoad(hf.Mount, holderKey, raw, create, guard)
-	if err == nil && !guarded {
-		// A loader that never ran the guard must not leave a folder open in
-		// a mode nobody checked: the key it loaded is removed again, and any
-		// bind released, before the refusal.
-		s.holderClose(hf.Mount, holderKey, keyID)
-		_ = s.unbindHolder(exposed)
-		return "", readOnly, errors.New("holders: the folder was unlocked without its access guard")
+	removeNew := func() {
+		if created {
+			_ = fs.RemoveFolder(hf.Mount, holderKey)
+		}
+	}
+	exposed := holders.FolderPath(hf.Exposed, holderKey)
+	if err := s.exposeInMode(fs, container, holderKey, exposed, readOnly); err != nil {
+		removeNew()
+		return "", readOnly, err
+	}
+	if created {
+		keyID, err = fs.Seal(hf.Mount, holderKey, raw)
+	} else {
+		keyID, err = fs.Open(hf.Mount, holderKey, raw)
 	}
 	if err != nil {
-		if readOnly && guarded {
-			_ = s.unbindHolder(exposed)
+		if readOnly {
+			_ = fs.Unbind(exposed)
 		}
+		removeNew()
 		return "", readOnly, err
 	}
 	return keyID, readOnly, nil
 }
 
-// holderClose removes a holder's key (tests replace it).
-func (s *Server) holderClose(mount, holderKey, keyID string) {
-	if s.holderCloseFn != nil {
-		s.holderCloseFn(mount, holderKey, keyID)
-		return
+// exposeInMode makes the container's view of the folder at exposed the
+// grant's mode, before any key loads. For read-only the bind alone is not
+// trusted: the container's own mount view must show a read-only mount, or
+// the bind is undone and the unlock refused.
+func (s *Server) exposeInMode(fs folderBackend, container, holderKey, exposed string, readOnly bool) error {
+	if !readOnly {
+		return fs.Unbind(exposed)
 	}
-	_, _, _ = holders.Close(mount, holderKey, keyID)
-}
-
-// holderLoad creates (mint) or opens the folder, running guard after the
-// folder exists and before its key is loaded. Tests replace it.
-func (s *Server) holderLoad(mount, holderKey string, raw []byte, create bool, guard func() error) (string, error) {
-	if s.holderLoadFn != nil {
-		return s.holderLoadFn(mount, holderKey, raw, create, guard)
+	if err := fs.BindReadOnly(exposed); err != nil {
+		return err
 	}
-	if create {
-		return holders.Create(mount, holderKey, raw, guard)
+	inContainer := path.Join(holderContainerMount, holders.Dir, holderKey)
+	var ro bool
+	pid, ok := fs.TaskPID(container)
+	err := errors.New("the container has no running task to check against")
+	if ok {
+		ro, err = fs.ViewReadOnly(pid, inContainer)
 	}
-	if err := guard(); err != nil {
-		return "", err
+	if err == nil && !ro {
+		err = fmt.Errorf("the container sees %s writable", inContainer)
 	}
-	return holders.Open(mount, holderKey, raw)
+	if err != nil {
+		_ = fs.Unbind(exposed)
+		s.log.Error("holder read-only check failed: the folder stays locked",
+			zap.String("container", container), zap.String("holder", holderKey), zap.Error(err))
+		return fmt.Errorf("holders: read-only view not confirmed: %w", err)
+	}
+	return nil
 }
 
 // releaseHolderBind drops a read-only bind once the folder is closed.
@@ -217,5 +185,5 @@ func (s *Server) releaseHolderBind(hf launcher.HolderFolders, holderKey string) 
 	if hf.Exposed == "" {
 		return
 	}
-	_ = s.unbindHolder(holders.FolderPath(hf.Exposed, holderKey))
+	_ = s.folders().Unbind(holders.FolderPath(hf.Exposed, holderKey))
 }

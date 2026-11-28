@@ -44,10 +44,10 @@ func ValidHolderKey(k string) bool {
 	return true
 }
 
-func Enable(mount, device string) error { return errUnsupported }
-func Create(mount, holderKey string, rawKey []byte, guard func() error) (string, error) {
-	return "", errUnsupported
-}
+func Enable(mount, device string) error                           { return errUnsupported }
+func MakeFolder(mount, holderKey string) (bool, error)            { return false, errUnsupported }
+func Seal(mount, holderKey string, rawKey []byte) (string, error) { return "", errUnsupported }
+func RemoveFolder(mount, holderKey string) error                  { return errUnsupported }
 func Open(mount, holderKey string, rawKey []byte) (string, error) {
 	return "", errUnsupported
 }

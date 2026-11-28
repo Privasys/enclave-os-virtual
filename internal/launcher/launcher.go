@@ -629,10 +629,10 @@ type Launcher struct {
 	// die with the VM and silently defeat its purpose.
 	sovereignBranches map[string][]byte
 
-	// holderBranches holds, per container, the one-way branch of the same DEK
-	// from which the manager derives the key wrapping each holder's folder
-	// key (holderfolders.go). Same rule: vault-backed volumes only.
-	holderBranches map[string][]byte
+	// holderWrapKeys holds, per container, the key wrapping each holder's
+	// folder key (holderfolders.go), derived at load from a one-way branch of
+	// the same DEK. Same rule: vault-backed volumes only.
+	holderWrapKeys map[string][]byte
 
 	// storageFacts is the attested storage statement per container (OID
 	// 6.2, oids.WorkloadStorage): what the manager attached, never what the
@@ -794,7 +794,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		mintedIdentities:   make(map[string]map[[32]byte]time.Time),
 		attestationTokens:  make(map[string]string),
 		sovereignBranches:  make(map[string][]byte),
-		holderBranches:     make(map[string][]byte),
+		holderWrapKeys:     make(map[string][]byte),
 		directBranches:     make(map[string][]byte),
 		directDomains:      make(map[string][]string),
 		storageFacts:       make(map[string]string),
@@ -1835,7 +1835,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// VM).
 	var volEncryption string
 	var sovereignBranch []byte
-	var holderBranch []byte
+	var holderBranch, holderWrap []byte
 	var directBranch []byte
 	if req.Storage != "" {
 		if l.volMgr == nil {
@@ -1926,7 +1926,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		spec.Volumes = append(spec.Volumes, vi.MountPath+":/data")
 		// Holder folders (holderfolders.go): the layout an app_storage
 		// declaration needs, or a failed load.
-		if err := l.enableHolderFolders(req.Name, req.ResourceDecls, holderBranch); err != nil {
+		if holderWrap, err = l.enableHolderFolders(req.Name, req.ResourceDecls, holderBranch, hex.EncodeToString(oids.IDBytes(req.AppId))); err != nil {
 			return nil, err
 		}
 	}
@@ -2092,8 +2092,8 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	if sovereignBranch != nil {
 		l.sovereignBranches[req.Name] = sovereignBranch
 	}
-	if holderBranch != nil {
-		l.holderBranches[req.Name] = holderBranch
+	if holderWrap != nil {
+		l.holderWrapKeys[req.Name] = holderWrap
 	}
 	if directBranch != nil {
 		l.directBranches[req.Name] = directBranch
@@ -2277,7 +2277,7 @@ func (l *Launcher) Unload(ctx context.Context, name string) error {
 	l.disarmBackupSchedule(name)
 	delete(l.oidExts, name)
 	delete(l.sovereignBranches, name)
-	delete(l.holderBranches, name)
+	delete(l.holderWrapKeys, name)
 	delete(l.storageFacts, name)
 	l.freezeMu.Lock()
 	delete(l.configAPI, name)

@@ -143,70 +143,63 @@ func ensureEncryptFeature(device string) error {
 	return nil
 }
 
-// Create makes a holder's folder under an enabled volume and binds it to
-// rawKey: the folder is created, guard runs, then the key is loaded and the
-// policy set. A folder that already exists must carry a policy for this very
-// key; a different key is refused rather than silently opening nothing.
-// Returns the kernel's identifier of the key (16 bytes, hex), which the
-// policy carries.
-//
-// guard (may be nil) runs once the folder exists and BEFORE its key is
-// loaded: the manager makes the container's view of the folder read-only
-// there, so a read-only grant never has a writable window. Anything written
-// into a new folder before guard ran makes the policy fail (an encryption
-// policy needs an empty directory), so the create fails closed.
-func Create(mount, holderKey string, rawKey []byte, guard func() error) (keyID string, err error) {
+// A new folder is made in three steps, so the caller can act between them
+// with nothing loaded: MakeFolder creates it empty, the caller prepares how
+// the container will see it, then Seal loads the key and binds the folder to
+// it. A folder that already exists is opened with Open instead.
+
+// MakeFolder creates holderKey's folder, empty and unkeyed, unless it
+// exists. created reports whether it made it (and so whether a failure
+// after it should RemoveFolder).
+func MakeFolder(mount, holderKey string) (created bool, err error) {
+	if !ValidHolderKey(holderKey) {
+		return false, errors.New("holders: invalid holder key")
+	}
+	folder := FolderPath(mount, holderKey)
+	if fi, err := os.Stat(folder); err == nil {
+		if !fi.IsDir() {
+			return false, fmt.Errorf("holders: %s is not a folder", holderKey)
+		}
+		return false, nil
+	}
+	if err := withMutableDir(filepath.Join(mount, Dir), func() error { return os.Mkdir(folder, 0o700) }); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// Seal loads rawKey and binds the new folder made by MakeFolder to it. An
+// encryption policy needs an empty directory, so anything written into the
+// folder before this fails it closed. On any failure the key is removed
+// again. Returns the kernel's identifier of the key (16 bytes, hex), which
+// the policy carries.
+func Seal(mount, holderKey string, rawKey []byte) (keyID string, err error) {
 	if !ValidHolderKey(holderKey) {
 		return "", errors.New("holders: invalid holder key")
 	}
-	runGuard := func() error {
-		if guard == nil {
-			return nil
-		}
-		return guard()
-	}
 	folder := FolderPath(mount, holderKey)
-	if fi, statErr := os.Stat(folder); statErr == nil && fi.IsDir() {
-		if err := runGuard(); err != nil {
-			return "", err
-		}
-		id, err := addKey(mount, rawKey)
-		if err != nil {
-			return "", err
-		}
-		have, pErr := policyIdentifier(folder)
-		if pErr != nil {
-			return "", pErr
-		}
-		if have != id {
-			return "", fmt.Errorf("holders: folder %s is bound to another key", holderKey)
-		}
-		return id, nil
-	}
-	dir := filepath.Join(mount, Dir)
-	var id string
-	err = withMutableDir(dir, func() error {
-		if err := os.Mkdir(folder, 0o700); err != nil {
-			return err
-		}
-		if err := runGuard(); err != nil {
-			return err
-		}
-		var aErr error
-		if id, aErr = addKey(mount, rawKey); aErr != nil {
-			return aErr
-		}
-		return setPolicy(folder, id)
-	})
+	id, err := addKey(mount, rawKey)
 	if err != nil {
-		_ = os.Remove(folder)
+		return "", err
+	}
+	if err := withMutableDir(filepath.Join(mount, Dir), func() error { return setPolicy(folder, id) }); err != nil {
+		_, _ = removeKey(mount, id)
 		return "", err
 	}
 	return id, nil
 }
 
-// Open loads a holder's key. The folder must
-// exist and be bound to this key.
+// RemoveFolder removes a folder MakeFolder made, after a failure to seal it:
+// whatever it holds was never under a key.
+func RemoveFolder(mount, holderKey string) error {
+	if !ValidHolderKey(holderKey) {
+		return errors.New("holders: invalid holder key")
+	}
+	return withMutableDir(filepath.Join(mount, Dir), func() error { return os.RemoveAll(FolderPath(mount, holderKey)) })
+}
+
+// Open loads a holder's key for a folder that exists: it must be bound to
+// this key, or the key is removed again and the open refused.
 func Open(mount, holderKey string, rawKey []byte) (keyID string, err error) {
 	if !ValidHolderKey(holderKey) {
 		return "", errors.New("holders: invalid holder key")

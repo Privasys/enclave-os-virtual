@@ -77,35 +77,29 @@ func declaresAppStorage(decls []ResourceDecl) bool {
 	return false
 }
 
+// HolderPaths are the runtime's private view of a container's volume and
+// the volume's own mount point (HolderFolders.Mount and Exposed): a pure
+// function of the name, so it needs no lock and no state.
+func HolderPaths(name string) (mount, exposed string) {
+	return volume.HolderViewBase + "/" + name, volume.MountBase + "/" + name
+}
+
 // HolderFolders returns the holder-folder context of a loaded container, or
-// an error saying why the container cannot have any: no encrypted volume,
-// no vault-backed key, or no declaration.
+// an error saying why the container cannot have any: no declaration, or no
+// vault-backed encrypted volume.
 func (l *Launcher) HolderFolders(name string) (HolderFolders, error) {
 	l.mu.RLock()
-	branch := l.holderBranches[name]
+	wrap := l.holderWrapKeys[name]
 	decls := l.resourceDecls[name]
-	appID := hex.EncodeToString(l.appIDs[name])
 	l.mu.RUnlock()
 	if !declaresAppStorage(decls) {
 		return HolderFolders{}, fmt.Errorf("launcher: container %q declares no %s resource", name, AppStorageKind)
 	}
-	if len(branch) == 0 {
+	if len(wrap) == 0 {
 		return HolderFolders{}, fmt.Errorf("launcher: container %q has no vault-backed encrypted volume; holder folders require one", name)
 	}
-	wrap, err := hkdf.Key(sha256.New, branch, nil, holderFolderInfo+"|wrap|"+appID, 32)
-	if err != nil {
-		return HolderFolders{}, fmt.Errorf("launcher: derive wrap key: %w", err)
-	}
-	exposed := volume.MountBase + "/" + name
-	view := volume.HolderViewBase + "/" + name
-	if err := holders.EnsureView(exposed, view); err != nil {
-		return HolderFolders{}, fmt.Errorf("launcher: holder view for %q: %w", name, err)
-	}
-	return HolderFolders{
-		Mount:   view,
-		Exposed: exposed,
-		WrapKey: wrap,
-	}, nil
+	mount, exposed := HolderPaths(name)
+	return HolderFolders{Mount: mount, Exposed: exposed, WrapKey: append([]byte(nil), wrap...)}, nil
 }
 
 // HostUID maps a uid inside the container to the host uid that owns its
@@ -117,17 +111,31 @@ func (l *Launcher) HostUID(containerUID int) int {
 	return containerUID
 }
 
-// enableHolderFolders prepares the volume layout at load for an app that
-// declares app_storage. A failure fails the load: an app that declared
-// holder folders and got a plain volume would keep holder data unkeyed.
-func (l *Launcher) enableHolderFolders(name string, decls []ResourceDecl, branch []byte) error {
+// enableHolderFolders prepares the volume at load for an app that declares
+// app_storage: the layout (holders/, the ext4 feature, the immutable flags),
+// the runtime's private view, and the key that wraps each holder's key,
+// which it returns (nil for an app that declares none). A failure fails the
+// load: an app that declared holder folders and got a plain volume would
+// keep holder data unkeyed.
+func (l *Launcher) enableHolderFolders(name string, decls []ResourceDecl, branch []byte, appIDHex string) ([]byte, error) {
 	if !declaresAppStorage(decls) {
-		return nil
+		return nil, nil
 	}
 	if len(branch) == 0 {
-		return fmt.Errorf("launcher: %s declares %s but has no vault-backed encrypted volume", name, AppStorageKind)
+		return nil, fmt.Errorf("launcher: %s declares %s but has no vault-backed encrypted volume", name, AppStorageKind)
 	}
-	return holders.Enable(volume.MountBase+"/"+name, "/dev/mapper/container-"+name)
+	mount, exposed := HolderPaths(name)
+	if err := holders.Enable(exposed, "/dev/mapper/container-"+name); err != nil {
+		return nil, err
+	}
+	if err := holders.EnsureView(exposed, mount); err != nil {
+		return nil, fmt.Errorf("launcher: holder view for %q: %w", name, err)
+	}
+	wrap, err := hkdf.Key(sha256.New, branch, nil, holderFolderInfo+"|wrap|"+appIDHex, 32)
+	if err != nil {
+		return nil, fmt.Errorf("launcher: derive wrap key: %w", err)
+	}
+	return wrap, nil
 }
 
 // storageFact is the value of oids.WorkloadStorage for a container: empty

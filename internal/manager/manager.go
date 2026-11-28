@@ -218,13 +218,10 @@ type Server struct {
 	// freezeStateOf overrides the container → FreezeState lookup for the
 	// logs owner gate (tests only).
 	freezeStateOf func(name string) launcher.FreezeState
-	// holderBind, holderLoadFn and holderCloseFn replace the holder-folder
-	// mount and key operations (tests only).
-	holderBind    func(dir string, readOnly bool) error
-	holderLoadFn  func(mount, holderKey string, raw []byte, create bool, guard func() error) (string, error)
-	holderCloseFn func(mount, holderKey, keyID string)
-	holderViewFn  func(container, inContainer string) (bool, error)
-	server        *http.Server
+	// folderOps replaces the holder-folder operations (tests only; nil is
+	// the kernel, folders.go).
+	folderOps folderBackend
+	server    *http.Server
 	// registry persists every successful Load so the manager can replay
 	// them on restart. nil when Config.RegistryPath is empty.
 	registry *registry
@@ -351,6 +348,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 	s.spend = newSpendGate(s.log, cfg.IdpIssuer, cfg.MgmtBaseURL, cfg.EnclaveToken)
 	s.caps = newCapabilityBroker(cfg.CapabilityStateDir, s.log)
 	s.holdersOpen = newHolderState()
+	s.folderOps = kernelFolders{launcher: l}
 	s.events = newEventHub()
 	// Every new task of an app re-proves its open read-only folders against
 	// the task's own mount view before the task starts (holderaccess.go).

@@ -78,12 +78,34 @@ func TestHolderFoldersOnALoopDevice(t *testing.T) {
 	holderB := strings.Repeat("b", 32)
 	keyA, _ := NewRawKey()
 	keyB, _ := NewRawKey()
-	idA, err := Create(mount, holderA, keyA, nil)
-	if err != nil {
-		t.Fatalf("create A: %v", err)
+	create := func(holder string, key []byte) string {
+		t.Helper()
+		if created, err := MakeFolder(mount, holder); err != nil || !created {
+			t.Fatalf("make %s: %v %v", holder, created, err)
+		}
+		id, err := Seal(mount, holder, key)
+		if err != nil {
+			t.Fatalf("seal %s: %v", holder, err)
+		}
+		return id
 	}
-	if _, err := Create(mount, holderB, keyB, nil); err != nil {
-		t.Fatalf("create B: %v", err)
+	idA := create(holderA, keyA)
+	create(holderB, keyB)
+	// A folder that is not empty when sealed is refused: nothing unkeyed
+	// ever sits under a policy.
+	holderC := strings.Repeat("c", 32)
+	if _, err := MakeFolder(mount, holderC); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(FolderPath(mount, holderC), "early"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	keyC, _ := NewRawKey()
+	if _, err := Seal(mount, holderC, keyC); err == nil {
+		t.Fatal("a folder written before its seal was sealed")
+	}
+	if err := RemoveFolder(mount, holderC); err != nil {
+		t.Fatal(err)
 	}
 	secret := filepath.Join(FolderPath(mount, holderA), "notes.md")
 	if err := os.WriteFile(secret, []byte("alice"), 0o600); err != nil {
@@ -92,11 +114,16 @@ func TestHolderFoldersOnALoopDevice(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(FolderPath(mount, holderB), "b.txt"), []byte("bob"), 0o600); err != nil {
 		t.Fatalf("write in B: %v", err)
 	}
-	// The same key again is the same identifier, another key is refused.
-	if id2, err := Create(mount, holderA, keyA, nil); err != nil || id2 != idA {
-		t.Fatalf("create A again: %v %q", err, id2)
+	// An existing folder is opened: the same key is the same identifier,
+	// another key is refused and does not stay loaded.
+	if created, err := MakeFolder(mount, holderA); err != nil || created {
+		t.Fatalf("make A again: %v %v", created, err)
 	}
-	if _, err := Create(mount, holderA, keyB, nil); err == nil {
+	if id2, err := Open(mount, holderA, keyA); err != nil || id2 != idA {
+		t.Fatalf("open A again: %v %q", err, id2)
+	}
+	wrong, _ := NewRawKey()
+	if _, err := Open(mount, holderA, wrong); err == nil {
 		t.Fatal("a folder must not accept another key")
 	}
 

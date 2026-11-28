@@ -46,10 +46,8 @@ func TestBootOrderInstallsTheTaskChecks(t *testing.T) {
 func TestTaskChecksFinishUnderTheLoadLock(t *testing.T) {
 	for _, writableView := range []bool{false, true} {
 		s, l, mgr := bootAsMainDoes(t)
-		s.holdersOpen.set("ro", holderOpenState{KeyID: "k1", ReadOnly: true, Container: "app", HolderKey: "h1", Mount: "/view", Exposed: "/vol"})
-		s.holderViewFn = func(string, string) (bool, error) { return !writableView, nil }
-		s.holderCloseFn = func(string, string, string) {}
-		s.holderBind = func(string, bool) error { return nil }
+		s.holdersOpen.set("ro", holderOpenState{KeyID: "k1", ReadOnly: true, Container: "app", HolderKey: "h1"})
+		s.folderOps = &fakeFolders{viewWritable: writableView}
 
 		release := launcher.HoldLoadLockForTest(l)
 		done := make(chan error, 1)

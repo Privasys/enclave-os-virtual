@@ -116,25 +116,18 @@ func zeroBytes(b []byte) {
 
 // ---- open folders, in memory ---------------------------------------------
 
+// holderOpenState is a folder this process has unlocked: whose it is (the
+// container and the holder's folder), the key loaded for it, and the mode
+// and owner it was opened with. A new task of the container re-checks a
+// read-only one from this alone (recheckReadOnlyFolders).
 type holderOpenState struct {
-	KeyID    string
-	HostUID  int
-	OpenedAt time.Time
+	Container string
+	HolderKey string
+	KeyID     string
 	// ReadOnly: the folder is open read-only (its grant is [read]).
 	ReadOnly bool
-	// Container, HolderKey and Resource/Subject/CapabilityID name the open
-	// folder, so a new task of the container can re-check it
-	// (recheckReadOnlyFolders).
-	Container    string
-	HolderKey    string
-	Resource     string
-	Subject      string
-	CapabilityID string
-	// Mount and Exposed are the volume's paths (launcher.HolderFolders) at
-	// open time, so the re-check can close the folder without asking the
-	// launcher, whose lock its caller holds.
-	Mount   string
-	Exposed string
+	// HostUID owns the folder's files (-1: root, until the app names a uid).
+	HostUID int
 }
 
 // readOnlyOf lists the open read-only folders of container, by grant key.
@@ -192,11 +185,8 @@ func (h *holderState) get(key string) (holderOpenState, bool) {
 // says. A stale state is dropped. Unsure (no folder service, no answer) is
 // not stale.
 func (s *Server) holderStateStale(container, key string, st holderOpenState) bool {
-	hf, err := s.launcher.HolderFolders(container)
-	if err != nil {
-		return false
-	}
-	ks, err := holders.KeyStatus(hf.Mount, st.KeyID)
+	mount, _ := launcher.HolderPaths(container)
+	ks, err := s.folders().KeyStatus(mount, st.KeyID)
 	if err != nil || ks == holders.Present {
 		return false
 	}
@@ -455,7 +445,7 @@ func (s *Server) mintHolderCapability(w http.ResponseWriter, r *http.Request, co
 		if wasOpen {
 			return
 		}
-		_, _, _ = holders.Close(hf.Mount, holderKey, keyID)
+		_, _, _ = s.folders().Close(hf.Mount, holderKey, keyID)
 		s.releaseHolderBind(hf, holderKey)
 	}
 	capID := newCapabilityID()
@@ -477,9 +467,7 @@ func (s *Server) mintHolderCapability(w http.ResponseWriter, r *http.Request, co
 	}
 	// The mint loaded the key: the folder is open, owned by root until the
 	// app's first open names a uid.
-	s.holdersOpen.set(grantKey(appID, p.resource, sub), holderOpenState{KeyID: keyID, HostUID: -1, OpenedAt: time.Now().UTC(), ReadOnly: readOnly,
-		Container: container, HolderKey: holderKey, Resource: p.resource, Subject: sub, CapabilityID: capID,
-		Mount: hf.Mount, Exposed: hf.Exposed})
+	s.holdersOpen.set(grantKey(appID, p.resource, sub), holderOpenState{Container: container, HolderKey: holderKey, KeyID: keyID, ReadOnly: readOnly, HostUID: -1})
 	s.log.Info("holder folder minted", zap.String("container", container), zap.String("resource", p.resource),
 		zap.String("holder", holderKey), zap.Bool("unattended", unattended), zap.Bool("read_only", readOnly),
 		zap.String("capability_id", capID))
@@ -597,7 +585,7 @@ func (s *Server) closeHolderVerified(container, key string, g *capabilityGrant) 
 	}
 	time.Sleep(revokeGrace)
 	for attempt := 0; attempt < 3; attempt++ {
-		status, pids, err := holders.Close(hf.Mount, g.HolderKey, keyID)
+		status, pids, err := s.folders().Close(hf.Mount, g.HolderKey, keyID)
 		if err == nil && status == holders.Absent {
 			s.holdersOpen.drop(key)
 			s.releaseHolderBind(hf, g.HolderKey)
@@ -669,7 +657,7 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 		// would hand the app a folder every write answers ENOKEY on. Trust
 		// the state only when the kernel agrees; otherwise load the key
 		// again below.
-		if ks, err := holders.KeyStatus(hf.Mount, st.KeyID); err != nil || ks != holders.Present {
+		if ks, err := s.folders().KeyStatus(hf.Mount, st.KeyID); err != nil || ks != holders.Present {
 			s.log.Warn("holder folder recorded open but its key is not loaded; reopening",
 				zap.String("container", name), zap.String("holder", g.HolderKey), zap.Error(err))
 			s.holdersOpen.drop(key)
@@ -690,7 +678,7 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if !readOnly && st.ReadOnly {
-				if err := s.unbindHolder(holders.FolderPath(hf.Exposed, g.HolderKey)); err != nil {
+				if err := s.folders().Unbind(holders.FolderPath(hf.Exposed, g.HolderKey)); err != nil {
 					s.jsonError(w, http.StatusInternalServerError, "the folder could not be made writable")
 					return
 				}
@@ -698,7 +686,7 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 				s.holdersOpen.set(key, st)
 			}
 			if hostUID >= 0 && hostUID != st.HostUID {
-				if err := holders.Chown(hf.Mount, g.HolderKey, hostUID); err != nil {
+				if err := s.folders().Chown(hf.Mount, g.HolderKey, hostUID); err != nil {
 					s.log.Warn("holder chown", zap.Error(err))
 				}
 				st.HostUID = hostUID
@@ -733,18 +721,16 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if hostUID >= 0 {
-		if err := holders.Chown(hf.Mount, g.HolderKey, hostUID); err != nil {
+		if err := s.folders().Chown(hf.Mount, g.HolderKey, hostUID); err != nil {
 			s.log.Warn("holder chown", zap.Error(err))
 		}
 	}
-	s.holdersOpen.set(key, holderOpenState{KeyID: keyID, HostUID: hostUID, OpenedAt: time.Now().UTC(), ReadOnly: readOnly,
-		Container: name, HolderKey: g.HolderKey, Resource: resource, Subject: body.Subject, CapabilityID: g.CapabilityID,
-		Mount: hf.Mount, Exposed: hf.Exposed})
+	s.holdersOpen.set(key, holderOpenState{Container: name, HolderKey: g.HolderKey, KeyID: keyID, ReadOnly: readOnly, HostUID: hostUID})
 	s.answerOpen(w, name, hf.Mount, g, containerPath)
 }
 
 func (s *Server) answerOpen(w http.ResponseWriter, container, mount string, g *capabilityGrant, containerPath string) {
-	used, _ := holders.Usage(mount, g.HolderKey)
+	used, _ := s.folders().Usage(mount, g.HolderKey)
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"status": "open", "path": containerPath, "capability_id": g.CapabilityID,
 		"used_bytes": used, "unattended": g.Unattended,
@@ -807,7 +793,7 @@ func (s *Server) handleResourceClose(w http.ResponseWriter, r *http.Request) {
 		s.jsonError(w, http.StatusNotImplemented, err.Error())
 		return
 	}
-	status, pids, err := holders.Close(hf.Mount, g.HolderKey, st.KeyID)
+	status, pids, err := s.folders().Close(hf.Mount, g.HolderKey, st.KeyID)
 	if err != nil && !errors.Is(err, holders.ErrBusy) {
 		s.jsonError(w, http.StatusInternalServerError, "the folder could not be closed")
 		return
