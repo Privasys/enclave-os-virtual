@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
-	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 )
 
 // A caller's platform bearer is the runtime's to consume (the API-fee payer,
@@ -171,18 +170,6 @@ func stripPlatformTokens(h http.Header, roleClaim, appID string) {
 	}
 }
 
-// appIDForHost is the platform app id of the container serving host, or "".
-func (s *Server) appIDForHost(host string) string {
-	if s.launcher == nil {
-		return ""
-	}
-	name := s.launcher.AppHostnameToContainer(host)
-	if name == "" {
-		return ""
-	}
-	return s.launcher.ContainerFreezeState(name).AppID
-}
-
 // rewriteAppRequest is the app proxy's Rewrite: every leg (sealed, gateway,
 // direct) reaches a container through it.
 func (s *Server) rewriteAppRequest(pr *httputil.ProxyRequest) {
@@ -195,13 +182,7 @@ func (s *Server) rewriteAppRequest(pr *httputil.ProxyRequest) {
 	restoreDirectForwardedHost(pr)
 	// A platform bearer is the runtime's, not the app's. The outbound copy
 	// only: the runtime's own gates keep reading pr.In.
-	appID := ""
-	if s.appIDOf != nil {
-		appID = s.appIDOf(host)
-	} else {
-		appID = s.appIDForHost(host)
-	}
-	stripPlatformTokens(pr.Out.Header, s.verifier.RoleClaim(), appID)
+	stripPlatformTokens(pr.Out.Header, s.verifier.RoleClaim(), s.appID(host))
 	setConfigureGrant(pr)
 }
 
@@ -235,27 +216,8 @@ func setConfigureGrant(pr *httputil.ProxyRequest) {
 // host (auth.ToolFor), or "". Only Authorization and
 // X-App-Auth are read.
 func (s *Server) toolCaller(r *http.Request) (sub, via string) {
-	if s.verifier == nil {
-		return "", ""
-	}
-	host := hostOnly(r.Host)
-	appID := ""
-	if s.appIDOf != nil {
-		appID = s.appIDOf(host)
-	} else {
-		appID = s.appIDForHost(host)
-	}
-	appHex := launcher.AppIDHex(appID)
-	if appHex == "" {
-		return "", ""
-	}
-	for _, tok := range []string{bearerToken(r.Header.Get("Authorization")), strings.TrimSpace(r.Header.Get("X-App-Auth"))} {
-		if tok == "" {
-			continue
-		}
-		if c, err := s.verifier.Verify(tok, auth.ToolFor(appHex)); err == nil {
-			return c.Sub, c.ActClientID
-		}
+	if t := s.callerOf(r).Tool(); t != nil {
+		return t.Sub, t.ActClientID
 	}
 	return "", ""
 }

@@ -65,9 +65,15 @@ func TestWhichTokensEachGateAccepts(t *testing.T) {
 		"not a JWT":             "opaque-token",
 	}
 
+	// The scheme is matched in any letter case (RFC 9110) by every gate.
+	scheme := "Bearer"
+	authz := func(r *http.Request, tok string) *http.Request {
+		r.Header.Set("Authorization", scheme+" "+tok)
+		return r
+	}
 	bearer := func(tok string) *http.Request {
 		r := httptest.NewRequest(http.MethodPost, "https://"+surfHost+"/v1/x", nil)
-		r.Header.Set("Authorization", "Bearer "+tok)
+		authz(r, tok)
 		return r
 	}
 	errCell := func(v string, err error) string {
@@ -116,21 +122,21 @@ func TestWhichTokensEachGateAccepts(t *testing.T) {
 			return "-"
 		},
 		"direct name": func(tok string) string {
-			r, ok := s.serveDirect(httptest.NewRecorder(), directRequest(tok))
+			r, ok := s.serveDirect(httptest.NewRecorder(), authz(directRequest(tok), tok))
 			if !ok {
 				return "-"
 			}
 			return r.Header.Get("X-Privasys-Sub") + " " + r.Header.Get(AttestationLevelHeader)
 		},
 		"sealed, session p1": func(tok string) string {
-			r := s.assertSealedIdentity(sealedRequest("p1", tok))
+			r := s.assertSealedIdentity(authz(sealedRequest("p1", tok), tok))
 			if e := r.Header.Get(emailHeader); e != "" {
 				return "profile"
 			}
 			return "-"
 		},
 		"sealed, no session subject": func(tok string) string {
-			r := s.assertSealedIdentity(sealedRequest("", tok))
+			r := s.assertSealedIdentity(authz(sealedRequest("", tok), tok))
 			if sub := r.Header.Get("X-Privasys-Sub"); sub != "" {
 				return sub
 			}
@@ -173,18 +179,20 @@ func TestWhichTokensEachGateAccepts(t *testing.T) {
 	if len(want) != len(tokens) {
 		t.Fatalf("the table names %d token kinds, the test makes %d", len(want), len(tokens))
 	}
-	for tk, tok := range tokens {
-		row, ok := want[tk]
-		if !ok {
-			t.Errorf("%s: not in the table", tk)
-			continue
-		}
-		if len(row) != len(gates) {
-			t.Errorf("%s: the table names %d gates, the test has %d", tk, len(row), len(gates))
-		}
-		for g, fn := range gates {
-			if got := fn(tok); got != row[g] {
-				t.Errorf("%s at %s: %q, want %q", tk, g, got, row[g])
+	for _, scheme = range []string{"Bearer", "bearer", "BEARER"} {
+		for tk, tok := range tokens {
+			row, ok := want[tk]
+			if !ok {
+				t.Errorf("%s: not in the table", tk)
+				continue
+			}
+			if len(row) != len(gates) {
+				t.Errorf("%s: the table names %d gates, the test has %d", tk, len(row), len(gates))
+			}
+			for g, fn := range gates {
+				if got := fn(tok); got != row[g] {
+					t.Errorf("%s at %s (%s): %q, want %q", tk, g, scheme, got, row[g])
+				}
 			}
 		}
 	}

@@ -355,12 +355,11 @@ func (s *Server) holderCaller(w http.ResponseWriter, r *http.Request) (sub strin
 		s.jsonError(w, http.StatusServiceUnavailable, "no identity verifier configured")
 		return "", false, false
 	}
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Bearer ") {
+	if bearerToken(r.Header.Get("Authorization")) == "" {
 		s.jsonError(w, http.StatusUnauthorized, "expected the holder's Bearer token")
 		return "", false, false
 	}
-	c, err := s.verifier.Verify(strings.TrimPrefix(auth, "Bearer "), s.verifier.PlatformAudience())
+	c, err := s.callerOf(r).Platform()
 	if err != nil {
 		s.jsonError(w, http.StatusUnauthorized, "invalid holder token")
 		return "", false, false

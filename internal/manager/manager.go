@@ -59,6 +59,7 @@ import (
 	"time"
 
 	ratls "enclave-os-mini/clients/go/ratls"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -791,6 +792,9 @@ func (s *Server) Start(ctx context.Context) error {
 			} else if r.Header.Get(TransportHeader) == TransportSealed {
 				r = s.assertSealedIdentity(r)
 			}
+			// From here on the credential headers stay as they are, so every gate
+			// below reads one verification of each (caller.go).
+			r = s.withCaller(r)
 			// A tool token for this app names the person as the app knows
 			// them; the token itself is withheld from the app
 			// (platformtoken.go). The inbound X-Privasys-Sub was stripped by
@@ -926,11 +930,11 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			s.jsonError(w, http.StatusUnauthorized, "missing Authorization header")
 			return
 		}
-		if !strings.HasPrefix(authHeader, "Bearer ") {
+		token := bearerToken(authHeader)
+		if token == "" {
 			s.jsonError(w, http.StatusUnauthorized, "expected Bearer token")
 			return
 		}
-		token := strings.TrimPrefix(authHeader, "Bearer ")
 
 		if s.verifier == nil {
 			s.jsonError(w, http.StatusInternalServerError, "auth not configured")
@@ -990,12 +994,11 @@ func (s *Server) requireContainerSelf(next http.HandlerFunc) http.HandlerFunc {
 			s.jsonError(w, http.StatusForbidden, "this endpoint is reachable only from inside the enclave")
 			return
 		}
-		authHeader := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authHeader, "Bearer ") {
+		token := bearerToken(r.Header.Get("Authorization"))
+		if token == "" {
 			s.jsonError(w, http.StatusUnauthorized, "expected Bearer PRIVASYS_CONTAINER_TOKEN")
 			return
 		}
-		token := strings.TrimPrefix(authHeader, "Bearer ")
 		boundName := s.launcher.LookupContainerByToken(token)
 		if boundName == "" {
 			s.jsonError(w, http.StatusUnauthorized, "invalid container token")
@@ -2381,16 +2384,9 @@ func (s *Server) authorizeOtherRoute(r *http.Request, containerName string, ra a
 	if ra.Policy == apifees.PolicyAuthenticated && strings.TrimSpace(r.Header.Get("X-Privasys-Sub")) != "" {
 		return nil
 	}
-	if s.verifier == nil {
-		return errors.New("no token verifier configured")
-	}
-	authz := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authz, "Bearer ") {
-		return errors.New("missing bearer token")
-	}
-	c, err := s.verifier.Verify(strings.TrimPrefix(authz, "Bearer "), s.verifier.PlatformAudience())
+	c, err := s.callerOf(r).Platform()
 	if err != nil {
-		return fmt.Errorf("invalid token: %w", err)
+		return err
 	}
 	sub, roles := c.Sub, c.Roles
 	if ra.Policy == apifees.PolicyAuthenticated {
@@ -2473,16 +2469,9 @@ func (s *Server) configureGrant(r *http.Request, containerName string, st launch
 		return "", "", errors.New("this container was loaded without an app id or an owners team, " +
 			"so no caller can be authorised for its configure surface; redeploy it from the platform")
 	}
-	if s.verifier == nil {
-		return "", "", errors.New("no token verifier configured")
-	}
-	authz := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authz, "Bearer ") {
-		return "", "", errors.New("missing bearer token")
-	}
-	c, err := s.verifier.Verify(strings.TrimPrefix(authz, "Bearer "), s.verifier.PlatformAudience())
+	c, err := s.callerOf(r).Platform()
 	if err != nil {
-		return "", "", fmt.Errorf("invalid token: %w", err)
+		return "", "", err
 	}
 	sub, roles := c.Sub, c.Roles
 	// The role is keyed on the canonical hex app id, not the hyphenated UUID the

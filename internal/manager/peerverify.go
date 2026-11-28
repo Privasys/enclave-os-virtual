@@ -487,12 +487,12 @@ func (s *Server) containerFromRequest(w http.ResponseWriter, r *http.Request) (s
 		s.jsonError(w, http.StatusForbidden, "this endpoint is reachable only from inside the enclave")
 		return "", false
 	}
-	authHeader := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authHeader, "Bearer ") {
+	token := bearerToken(r.Header.Get("Authorization"))
+	if token == "" {
 		s.jsonError(w, http.StatusUnauthorized, "expected Bearer PRIVASYS_CONTAINER_TOKEN")
 		return "", false
 	}
-	name := s.launcher.LookupContainerByToken(strings.TrimPrefix(authHeader, "Bearer "))
+	name := s.launcher.LookupContainerByToken(token)
 	if name == "" {
 		s.jsonError(w, http.StatusUnauthorized, "invalid container token")
 		return "", false

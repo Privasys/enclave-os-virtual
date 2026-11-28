@@ -120,11 +120,10 @@ type bearerSubjectKey struct{}
 // The bearer stays in place: apps reading it today keep working until they
 // have moved to the headers.
 func (s *Server) assertSealedIdentity(r *http.Request) *http.Request {
-	authz := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authz, "Bearer ") || s.verifier == nil {
+	token := bearerToken(r.Header.Get("Authorization"))
+	if token == "" || s.verifier == nil {
 		return r
 	}
-	token := strings.TrimPrefix(authz, "Bearer ")
 	if sub := r.Header.Get(directSubHeader); sub != "" {
 		u, err := s.verifier.Verify(token, auth.SameSubject(sub))
 		if err != nil {

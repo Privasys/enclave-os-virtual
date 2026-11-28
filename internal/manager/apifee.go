@@ -86,14 +86,18 @@ func lookupPrice(tbl apifees.Table, reqPath string) (apifees.PricedTool, bool) {
 	return format, foundFm
 }
 
-// callerIdentity resolves who is calling, for charge attribution. A
-// verified platform bearer wins: its sub is the platform-pairwise one the
-// ledger can map to an account. Next is the spend-token payer the gate
-// asserted (spendgate.go: the user allowed the calling app to spend for
-// them, proven by a token bound to that app's key). Fallback is the
-// relay-asserted X-Privasys-Sub, set exclusively by the session-relay
-// middleware after an EncAuth bootstrap; a subject taken from an inner bearer
-// (assertSealedIdentity) is not that, and pays for nothing.
+// callerIdentity resolves who pays for a call. The first that applies:
+//
+//  1. on a direct adopter name, only the spend-token payer (an end user is
+//     never billed there except through the wallet);
+//  2. a verified platform bearer (Authorization, else X-App-Auth): its sub is
+//     the platform-pairwise one the ledger maps to an account;
+//  3. a verified tool token for this app, as the person that app knows;
+//  4. the spend-token payer the spend gate asserted (spendgate.go: the user
+//     allowed the calling app to spend for them, proven by a token bound to
+//     that app's key);
+//  5. the relay-asserted X-Privasys-Sub of a sealed session, unless it came
+//     from an inner bearer (assertSealedIdentity), which pays for nothing.
 //
 // An app-supplied acting user (the former X-Privasys-On-Behalf-Of) is
 // never a payer: the app may say whom it serves, but only the platform or
@@ -105,31 +109,20 @@ func lookupPrice(tbl apifees.Table, reqPath string) (apifees.PricedTool, bool) {
 // wallet app itself makes is exempt, and that is proved per request (see
 // walletCall).
 func (s *Server) callerIdentity(r *http.Request) string {
-	// A direct adopter name never bills an end user (direct.go): only the
-	// wallet makes an account a payer, through a spend token.
 	if r.Header.Get(TransportHeader) == TransportDirect {
 		return strings.TrimSpace(r.Header.Get(spend.HeaderPayer))
 	}
-	tok := ""
-	if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
-		tok = strings.TrimPrefix(authz, "Bearer ")
-	} else if x := r.Header.Get("X-App-Auth"); x != "" {
-		tok = x
+	c := s.callerOf(r)
+	if p := c.PlatformPayer(); p != nil {
+		return p.Sub
 	}
-	if tok != "" && s.verifier != nil {
-		if c, err := s.verifier.Verify(tok, s.verifier.PlatformAudience()); err == nil {
-			return c.Sub
-		}
+	// The runtime consumes a tool token and the app never holds it, so the
+	// app cannot replay it. The app's own tokens never pay.
+	if t := c.Tool(); t != nil {
+		return t.Sub
 	}
-	// A tool token for THIS app pays as the person that app knows
-	// (platformtoken.go): the runtime consumes it and the app never holds it,
-	// so the app cannot replay it. The app's own tokens never pay.
-	if sub, _ := s.toolCaller(r); sub != "" {
-		return sub
-	}
-	// A verified spend token names the paying user outright (spendgate.go
-	// asserted it after verifying token, proof and billability; the header
-	// is stripped from every other request).
+	// The spend gate set this after verifying token, proof and billability;
+	// the header is stripped from every other request.
 	if sub := strings.TrimSpace(r.Header.Get(spend.HeaderPayer)); sub != "" {
 		return sub
 	}
