@@ -10,6 +10,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/Privasys/enclave-os-virtual/internal/edge"
 	"github.com/Privasys/enclave-os-virtual/internal/surfaces"
 )
 
@@ -38,7 +39,7 @@ const webManifest = `{"surfaces":{
 func clearReq(method, path string, hdr map[string]string) *http.Request {
 	r := httptest.NewRequest(method, "https://"+surfHost+path, nil)
 	r.Host = surfHost
-	r.Header.Set(edgeHeader, "terminate")
+	r.Header.Set(edge.Header, "terminate")
 	for k, v := range hdr {
 		r.Header.Set(k, v)
 	}
@@ -261,7 +262,7 @@ func TestDirectLegFollowsTheClearRules(t *testing.T) {
 	s := surfServer(t, webManifest)
 	direct := func(method, path string) *http.Request {
 		r := clearReq(method, path, nil)
-		r.Header.Set(edgeHeader, "direct")
+		r.Header.Set(edge.Header, "direct")
 		return r
 	}
 	if !isClearLeg(direct("GET", "/api/v1/me")) {
@@ -308,7 +309,7 @@ func TestDirectPrivateOptIn(t *testing.T) {
 	r := clearReq("GET", "/api/v1/me", map[string]string{
 		"X-Privasys-Sub": "spoofed", AttestationLevelHeader: "verified",
 	})
-	r.Header.Set(edgeHeader, "direct")
+	r.Header.Set(edge.Header, "direct")
 	rec := httptest.NewRecorder()
 	if _, ok := s.serveDirect(rec, r); !ok {
 		t.Fatalf("anonymous direct request refused: %d", rec.Code)
@@ -322,7 +323,7 @@ func TestDirectPrivateOptIn(t *testing.T) {
 
 	// A bearer this runtime cannot check is refused, never passed through.
 	r = clearReq("GET", "/api/v1/me", map[string]string{"Authorization": "Bearer x.y.z"})
-	r.Header.Set(edgeHeader, "direct")
+	r.Header.Set(edge.Header, "direct")
 	rec = httptest.NewRecorder()
 	if _, ok := s.serveDirect(rec, r); ok || rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unverifiable bearer: ok, code %d; want refused with 401", rec.Code)
@@ -406,7 +407,7 @@ func TestDirectPrivateNeverPassesAnUnverifiedCredential(t *testing.T) {
 	s := surfServer(t, strings.Replace(webManifest, `"cors":"*"`, `"cors":"*","direct":"private"`, 1))
 	direct := func(hdr map[string]string) (*http.Request, *httptest.ResponseRecorder, bool) {
 		r := clearReq("GET", "/api/v1/me", hdr)
-		r.Header.Set(edgeHeader, "direct")
+		r.Header.Set(edge.Header, "direct")
 		rec := httptest.NewRecorder()
 		out, ok := s.serveDirect(rec, r)
 		return out, rec, ok

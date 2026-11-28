@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Privasys/enclave-os-virtual/internal/edge"
 )
 
 // testSession installs a ready-made session (bypassing the bootstrap
@@ -68,7 +70,7 @@ func TestSealedGETViaHeaderEnvelope(t *testing.T) {
 	var gotMethod, gotSub, gotEnvelopeHdr string
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
-		gotSub = r.Header.Get(relaySubHeader)
+		gotSub = r.Header.Get(edge.SubHeader)
 		gotEnvelopeHdr = r.Header.Get(sealedEnvelopeHeader)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"tools":[]}`))
@@ -85,7 +87,7 @@ func TestSealedGETViaHeaderEnvelope(t *testing.T) {
 	req.Header.Set("Authorization", authScheme+" "+sess.ID)
 	req.Header.Set(sealedEnvelopeHeader, base64.RawURLEncoding.EncodeToString(env))
 	// A spoofed identity must not survive the relay.
-	req.Header.Set(relaySubHeader, "attacker")
+	req.Header.Set(edge.SubHeader, "attacker")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -100,7 +102,7 @@ func TestSealedGETViaHeaderEnvelope(t *testing.T) {
 		t.Fatalf("inner method = %q, want GET", gotMethod)
 	}
 	if gotSub != "user-123" {
-		t.Fatalf("inner %s = %q, want the session sub", relaySubHeader, gotSub)
+		t.Fatalf("inner %s = %q, want the session sub", edge.SubHeader, gotSub)
 	}
 	if gotEnvelopeHdr != "" {
 		t.Fatalf("inner request still carries %s", sealedEnvelopeHeader)
@@ -134,8 +136,8 @@ func TestRelaySubInjection(t *testing.T) {
 	var gotSub string
 	var sawHeader bool
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotSub = r.Header.Get(relaySubHeader)
-		_, sawHeader = r.Header[http.CanonicalHeaderKey(relaySubHeader)]
+		gotSub = r.Header.Get(edge.SubHeader)
+		_, sawHeader = r.Header[http.CanonicalHeaderKey(edge.SubHeader)]
 		w.WriteHeader(http.StatusOK)
 	})
 	srv := httptest.NewServer(m.Middleware(inner))
@@ -146,7 +148,7 @@ func TestRelaySubInjection(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodPost, srv.URL+"/x", strings.NewReader(string(env)))
 		req.Header.Set("Content-Type", sealedContentType)
 		req.Header.Set("Authorization", authScheme+" "+sess.ID)
-		req.Header.Set(relaySubHeader, "attacker")
+		req.Header.Set(edge.SubHeader, "attacker")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatalf("do: %v", err)
@@ -170,19 +172,19 @@ func TestRelaySubInjection(t *testing.T) {
 	anon.Host = hostKey(strings.TrimPrefix(srv.URL, "http://"))
 	post(anon, sealA("POST", "/x", []byte(`{}`), 0))
 	if sawHeader {
-		t.Fatalf("sub-less session leaked %s = %q", relaySubHeader, gotSub)
+		t.Fatalf("sub-less session leaked %s = %q", edge.SubHeader, gotSub)
 	}
 
 	// Plaintext passthrough: spoof stripped.
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/plain", nil)
-	req.Header.Set(relaySubHeader, "attacker")
+	req.Header.Set(edge.SubHeader, "attacker")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("do: %v", err)
 	}
 	resp.Body.Close()
 	if sawHeader {
-		t.Fatalf("passthrough leaked %s = %q", relaySubHeader, gotSub)
+		t.Fatalf("passthrough leaked %s = %q", edge.SubHeader, gotSub)
 	}
 }
 
@@ -192,7 +194,7 @@ func TestRelayStripsSubVia(t *testing.T) {
 	m := NewManager()
 	var saw bool
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, saw = r.Header[http.CanonicalHeaderKey(relaySubViaHeader)]
+		_, saw = r.Header[http.CanonicalHeaderKey(edge.SubViaHeader)]
 		w.WriteHeader(http.StatusOK)
 	})
 	srv := httptest.NewServer(m.Middleware(inner))
@@ -202,7 +204,7 @@ func TestRelayStripsSubVia(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/x", strings.NewReader(string(seal("POST", "/x", []byte(`{}`), 0))))
 	req.Header.Set("Content-Type", sealedContentType)
 	req.Header.Set("Authorization", authScheme+" "+sess.ID)
-	req.Header.Set(relaySubViaHeader, "forged-tool")
+	req.Header.Set(edge.SubViaHeader, "forged-tool")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +215,7 @@ func TestRelayStripsSubVia(t *testing.T) {
 	}
 
 	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/plain", nil)
-	req.Header.Set(relaySubViaHeader, "forged-tool")
+	req.Header.Set(edge.SubViaHeader, "forged-tool")
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)

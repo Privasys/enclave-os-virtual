@@ -11,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 
+	"github.com/Privasys/enclave-os-virtual/internal/edge"
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
 	"github.com/Privasys/enclave-os-virtual/internal/surfaces"
 )
@@ -59,10 +60,6 @@ const (
 	TransportPublic   = "public"
 	TransportDirect   = "direct"
 )
-
-// edgeHeader is the gateway's trusted marker that it terminated TLS on
-// this leg (and stripped any client-supplied value).
-const edgeHeader = "X-Privasys-Edge"
 
 var (
 	publicRequests = prometheus.NewCounterVec(
@@ -194,21 +191,7 @@ func (s *Server) clearAllowed(r *http.Request) bool {
 
 // isEdgeTerminated reports whether the gateway terminated TLS on this leg.
 func isEdgeTerminated(r *http.Request) bool {
-	return hasEdgeValue(r, "terminate")
-}
-
-// hasEdgeValue reports whether any copy of the edge marker carries value, in
-// any letter case: a marker a client duplicated or re-cased still counts,
-// and only ever makes the request stricter.
-func hasEdgeValue(r *http.Request, value string) bool {
-	for _, line := range r.Header.Values(edgeHeader) {
-		for _, v := range strings.Split(line, ",") {
-			if strings.EqualFold(strings.TrimSpace(v), value) {
-				return true
-			}
-		}
-	}
-	return false
+	return edge.Says(r.Header, "terminate")
 }
 
 // isDirectLeg reports whether the request arrived on a direct adopter name
@@ -216,7 +199,7 @@ func hasEdgeValue(r *http.Request, value string) bool {
 // the marker from the connection (and overwrites a client's), so a direct
 // request can never pass as RA-TLS.
 func isDirectLeg(r *http.Request) bool {
-	return hasEdgeValue(r, "direct")
+	return edge.Says(r.Header, "direct")
 }
 
 // isClearLeg reports whether the client did not verify the enclave: the

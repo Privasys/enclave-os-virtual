@@ -3,6 +3,8 @@ package manager
 import (
 	"net/http/httptest"
 	"testing"
+
+	"github.com/Privasys/enclave-os-virtual/internal/edge"
 )
 
 func TestEdgeMarkerAnyCopyAnyCase(t *testing.T) {
@@ -11,14 +13,14 @@ func TestEdgeMarkerAnyCopyAnyCase(t *testing.T) {
 	} {
 		r := httptest.NewRequest("GET", "/", nil)
 		for _, v := range vals {
-			r.Header.Add(edgeHeader, v)
+			r.Header.Add(edge.Header, v)
 		}
 		if !isEdgeTerminated(r) {
 			t.Errorf("%q: not read as the terminate leg", vals)
 		}
 	}
 	r := httptest.NewRequest("GET", "/", nil)
-	r.Header.Add(edgeHeader, "Direct")
+	r.Header.Add(edge.Header, "Direct")
 	if !isDirectLeg(r) || isEdgeTerminated(r) {
 		t.Error("Direct: wrong leg")
 	}

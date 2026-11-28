@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
+	"github.com/Privasys/enclave-os-virtual/internal/edge"
 	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 	"go.uber.org/zap"
 )
@@ -85,7 +86,7 @@ func directRequest(token string) *http.Request {
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}
-	r.Header.Set(edgeHeader, "direct")
+	r.Header.Set(edge.Header, "direct")
 	return r
 }
 

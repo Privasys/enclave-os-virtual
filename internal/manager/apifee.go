@@ -23,6 +23,7 @@ import (
 
 	"github.com/Privasys/enclave-os-virtual/internal/apifees"
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
+	"github.com/Privasys/enclave-os-virtual/internal/edge"
 )
 
 const (
@@ -129,7 +130,7 @@ func (s *Server) callerIdentity(r *http.Request) string {
 	if r.Context().Value(bearerSubjectKey{}) != nil {
 		return ""
 	}
-	return r.Header.Get("X-Privasys-Sub")
+	return r.Header.Get(edge.SubHeader)
 }
 
 // serveAppBilled applies the API-fee gate around the ordinary app proxy

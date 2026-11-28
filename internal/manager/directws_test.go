@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Privasys/enclave-os-virtual/internal/edge"
 )
 
 func TestTakeWSBearerKeepsTheAppsProtocols(t *testing.T) {
@@ -105,7 +107,7 @@ func TestDirectWebSocketHandshakeAndExpiry(t *testing.T) {
 		ModifyResponse: func(resp *http.Response) error { answerWSProtocol(resp); return nil },
 	}
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Header.Set(edgeHeader, "direct")
+		r.Header.Set(edge.Header, "direct")
 		r, ok := s.serveDirect(w, r)
 		if !ok {
 			return

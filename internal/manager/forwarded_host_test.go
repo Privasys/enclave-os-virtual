@@ -9,6 +9,8 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"testing"
+
+	"github.com/Privasys/enclave-os-virtual/internal/edge"
 )
 
 // A direct adopter name reaches the container with its X-Forwarded-Host
@@ -30,10 +32,10 @@ func TestDirectAliasKeepsForwardedHost(t *testing.T) {
 		restoreDirectForwardedHost(pr)
 	}}
 
-	send := func(edge, fwd string) (http.Header, string) {
+	send := func(marker, fwd string) (http.Header, string) {
 		req := httptest.NewRequest(http.MethodGet, "http://platform-monitoring.apps.privasys.org/", nil)
-		if edge != "" {
-			req.Header.Set(edgeHeader, edge)
+		if marker != "" {
+			req.Header.Set(edge.Header, marker)
 		}
 		if fwd != "" {
 			req.Header.Set("X-Forwarded-Host", fwd)

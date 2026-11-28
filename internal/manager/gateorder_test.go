@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Privasys/enclave-os-virtual/internal/apifees"
+	"github.com/Privasys/enclave-os-virtual/internal/edge"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 )
 
@@ -28,7 +29,7 @@ func TestTheAppHostGatesRunInOrder(t *testing.T) {
 	s := New(Config{}, log, l, ids.verifier)
 
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "app sub="+r.Header.Get("X-Privasys-Sub")+" via="+r.Header.Get(SubViaHeader))
+		io.WriteString(w, "app sub="+r.Header.Get("X-Privasys-Sub")+" via="+r.Header.Get(edge.SubViaHeader))
 	}))
 	t.Cleanup(app.Close)
 	upstream := strings.TrimPrefix(app.URL, "http://")

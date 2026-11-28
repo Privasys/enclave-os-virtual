@@ -41,6 +41,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Privasys/enclave-os-virtual/internal/edge"
 	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 )
 
@@ -48,14 +49,6 @@ const (
 	sealedContentType       = "application/privasys-sealed+cbor"
 	sealedStreamContentType = "application/privasys-sealed-stream+cbor"
 	authScheme              = "PrivasysSession"
-	// relaySubHeader carries the EncAuth-authenticated subject to the inner
-	// handler. Set exclusively by this middleware; stripped from every
-	// inbound request so neither gateway-leg nor RA-TLS-direct clients can
-	// assert an identity.
-	relaySubHeader = "X-Privasys-Sub"
-	// relaySubViaHeader names the tool behind a runtime-asserted subject;
-	// the manager sets it, never a client.
-	relaySubViaHeader = "X-Privasys-Sub-Via"
 	// TransportHeader tells the app which leg a request arrived on; only the
 	// runtime sets it, and every inbound value is stripped. This middleware
 	// stamps "sealed" on the inner request it unsealed; the manager stamps
@@ -425,8 +418,8 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 		// may set it (from an EncAuth-authenticated session). Strip any
 		// inbound value on EVERY path — passthrough (RA-TLS direct clients
 		// could otherwise spoof it) and sealed alike.
-		r.Header.Del(relaySubHeader)
-		r.Header.Del(relaySubViaHeader)
+		r.Header.Del(edge.SubHeader)
+		r.Header.Del(edge.SubViaHeader)
 		r.Header.Del(TransportHeader)
 		if r.URL.Path == initPath && r.Method == http.MethodPost {
 			m.handleInit(w, r)
@@ -439,7 +432,7 @@ func (m *Manager) Middleware(next http.Handler) http.Handler {
 		if isMuxUpgrade(r) {
 			// The gateway dials the mux leg itself over RA-TLS, so a mux
 			// upgrade on the terminate or direct leg is a client.
-			if onClearLeg(r) {
+			if edge.Says(r.Header, "terminate", "direct") {
 				http.Error(w, "mux upgrade not accepted on this leg", http.StatusForbidden)
 				return
 			}
@@ -741,7 +734,7 @@ func (m *Manager) handleSealed(w http.ResponseWriter, r *http.Request, next http
 	// leaves it empty — the enclave never learns the sub on that path);
 	// the Middleware entry already stripped any spoofed inbound value.
 	if sess.Sub != "" {
-		r2.Header.Set(relaySubHeader, sess.Sub)
+		r2.Header.Set(edge.SubHeader, sess.Sub)
 	}
 	r2.Header.Set(TransportHeader, TransportSealed)
 

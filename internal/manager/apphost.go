@@ -6,6 +6,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/Privasys/enclave-os-virtual/internal/edge"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 )
 
@@ -127,12 +128,12 @@ func (s *Server) assertToolSubject(r *http.Request) {
 	if t := r.Header.Get(TransportHeader); t != TransportAttested && t != TransportSealed {
 		return
 	}
-	if strings.TrimSpace(r.Header.Get("X-Privasys-Sub")) != "" {
+	if strings.TrimSpace(r.Header.Get(edge.SubHeader)) != "" {
 		return
 	}
 	if sub, via := s.toolCaller(r); sub != "" && headerSafeASCII(via) {
 		r.Header.Set("X-Privasys-Sub", sub)
-		r.Header.Set(SubViaHeader, via)
+		r.Header.Set(edge.SubViaHeader, via)
 	}
 }
 

@@ -68,6 +68,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/apppolicy"
 	"github.com/Privasys/enclave-os-virtual/internal/attrbilling"
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
+	"github.com/Privasys/enclave-os-virtual/internal/edge"
 	"github.com/Privasys/enclave-os-virtual/internal/enclaveauth"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/network"
@@ -2232,7 +2233,7 @@ func (s *Server) routeGrant(r *http.Request, containerName string, st launcher.F
 }
 
 func (s *Server) authorizeOtherRoute(r *http.Request, containerName string, ra apifees.RouteAuth) error {
-	if ra.Policy == apifees.PolicyAuthenticated && strings.TrimSpace(r.Header.Get("X-Privasys-Sub")) != "" {
+	if ra.Policy == apifees.PolicyAuthenticated && strings.TrimSpace(r.Header.Get(edge.SubHeader)) != "" {
 		return nil
 	}
 	c, err := s.callerOf(r).Platform()
@@ -2283,17 +2284,11 @@ func configMethodMatches(want string, r *http.Request) bool {
 	return same(r.URL.Query().Get("_method"))
 }
 
-// configPathKey is the form two spellings of one route share: backslashes as
-// slashes, no ";parameters" on any segment, dot segments and doubled or
-// trailing slashes resolved, lower case.
+// configPathKey is the form two spellings of one route share: the canonical
+// path a router resolves (surfaces.CanonicalPath) without its trailing slash,
+// in lower case.
 func configPathKey(p string) string {
-	segs := strings.Split(strings.ReplaceAll(p, `\`, "/"), "/")
-	for i, s := range segs {
-		if j := strings.IndexByte(s, ';'); j >= 0 {
-			segs[i] = s[:j]
-		}
-	}
-	return strings.ToLower(path.Clean("/" + strings.Join(segs, "/")))
+	return strings.ToLower(path.Clean(surfaces.CanonicalPath(p)))
 }
 
 // configureGrant decides whether the caller may hit the container's configure

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
+	"github.com/Privasys/enclave-os-virtual/internal/edge"
 	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
 	"go.uber.org/zap"
 )
@@ -42,10 +43,6 @@ func (s *Server) handleDirectStatus(w http.ResponseWriter, r *http.Request) {
 // enclave's attestation), "unverified" otherwise (passkey, social). Only the
 // runtime sets it; every inbound value is stripped.
 const AttestationLevelHeader = "X-Privasys-Attestation-Level"
-
-// directSubHeader is the subject header the sealed leg also carries
-// (sessionrelay), so an app reads one identity contract on every leg.
-const directSubHeader = "X-Privasys-Sub"
 
 // The person's name and email, as the identity provider put them in the token
 // the runtime just verified. Present only on a token from the code exchange,
@@ -124,7 +121,7 @@ func (s *Server) assertSealedIdentity(r *http.Request) *http.Request {
 	if token == "" || s.verifier == nil {
 		return r
 	}
-	if sub := r.Header.Get(directSubHeader); sub != "" {
+	if sub := r.Header.Get(edge.SubHeader); sub != "" {
 		u, err := s.verifier.Verify(token, auth.SameSubject(sub))
 		if err != nil {
 			s.log.Debug("sealed bearer adds no profile", zap.String("host", hostOnly(r.Host)), zap.Error(err))
@@ -138,7 +135,7 @@ func (s *Server) assertSealedIdentity(r *http.Request) *http.Request {
 		s.log.Debug("sealed bearer adds no identity", zap.String("host", hostOnly(r.Host)), zap.Error(err))
 		return r
 	}
-	r.Header.Set(directSubHeader, u.Sub)
+	r.Header.Set(edge.SubHeader, u.Sub)
 	assertProfile(r.Header, u)
 	// Never a payer: this token is one the app itself may hold, and an app
 	// must not be able to bill a person with it (callerIdentity).
@@ -226,7 +223,7 @@ func isUpgrade(r *http.Request) bool {
 // hold, so nothing the runtime did not verify reaches the app as a
 // credential: the app learns the caller only from the asserted headers.
 func (s *Server) serveDirect(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
-	r.Header.Del(directSubHeader)
+	r.Header.Del(edge.SubHeader)
 	r.Header.Del(AttestationLevelHeader)
 	stripAssertedProfile(r.Header)
 	r.Header.Set(TransportHeader, TransportDirect)
@@ -253,7 +250,7 @@ func (s *Server) serveDirect(w http.ResponseWriter, r *http.Request) (*http.Requ
 		s.jsonError(w, http.StatusUnauthorized, "the token is not valid for this app")
 		return r, false
 	}
-	r.Header.Set(directSubHeader, u.Sub)
+	r.Header.Set(edge.SubHeader, u.Sub)
 	assertProfile(r.Header, u)
 	level := "unverified"
 	if u.Wallet {

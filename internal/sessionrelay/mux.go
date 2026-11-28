@@ -58,6 +58,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/Privasys/enclave-os-virtual/internal/edge"
 	"github.com/coder/websocket"
 )
 
@@ -427,7 +428,7 @@ func (st *muxStream) run(openEnv []byte) {
 	defer cancelDial()
 	hdr := http.Header{}
 	if st.sess.Sub != "" {
-		hdr.Set(relaySubHeader, st.sess.Sub)
+		hdr.Set(edge.SubHeader, st.sess.Sub)
 	}
 	appWS, _, err := websocket.Dial(dialCtx, "ws://"+upstream+st.path, &websocket.DialOptions{HTTPHeader: hdr})
 	if err != nil {
@@ -683,21 +684,4 @@ func readPayload(r io.Reader, n int) ([]byte, error) {
 		}
 	}
 	return buf, nil
-}
-
-// onClearLeg reports whether the request reached the enclave on a leg where
-// the client did not verify it: through the gateway's TLS terminate proxy,
-// or on a direct name with the public certificate. Any copy of the edge
-// marker counts, in any case. Gateways dial the mux leg over RA-TLS, never
-// on either of these.
-func onClearLeg(r *http.Request) bool {
-	for _, line := range r.Header.Values("X-Privasys-Edge") {
-		for _, v := range strings.Split(line, ",") {
-			switch strings.ToLower(strings.TrimSpace(v)) {
-			case "terminate", "direct":
-				return true
-			}
-		}
-	}
-	return false
 }

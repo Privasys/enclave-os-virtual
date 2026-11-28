@@ -221,9 +221,3 @@ func (s *Server) toolCaller(r *http.Request) (sub, via string) {
 	}
 	return "", ""
 }
-
-// SubViaHeader names the tool through which X-Privasys-Sub was asserted
-// (the tool token's act.client_id). Absent when the person signed in to the
-// app itself. Only the runtime sets it; the session relay strips any inbound
-// copy on every path.
-const SubViaHeader = "X-Privasys-Sub-Via"
