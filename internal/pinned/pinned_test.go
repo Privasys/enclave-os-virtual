@@ -16,57 +16,35 @@ func prod(t *testing.T) Settings {
 	return s
 }
 
-// An image needs nothing from manager.env: empty settings take the pinned
-// production values.
-func TestEmptySettingsTakeThePinnedValues(t *testing.T) {
-	g, err := prod(t).Resolve(Given{}, true)
-	if err != nil {
-		t.Fatal(err)
+// The control plane is the one setting read from outside the measurement: a
+// registered enclave given none calls the profile's, an unregistered one
+// calls none, and a name the profile does not allow refuses the start.
+func TestResolveMgmtURL(t *testing.T) {
+	if got, err := prod(t).ResolveMgmtURL("", true); err != nil || got != "https://api.developer.privasys.org" {
+		t.Fatalf("registered, none given: %q %v", got, err)
 	}
-	if g.Issuer != "https://privasys.id" || g.Audience != "privasys-platform" ||
-		g.ManagerRole != "privasys-platform:manager" || g.MonitoringRole != "privasys-platform:monitoring" ||
-		len(g.AttestationServers) != 1 || g.AttestationServers[0] != "https://as.privasys.org/verify" ||
-		g.MgmtURL != "https://api.developer.privasys.org" {
-		t.Fatalf("resolved %+v", g)
+	if got, err := prod(t).ResolveMgmtURL("", false); err != nil || got != "" {
+		t.Fatalf("unregistered: %q %v", got, err)
 	}
-	// Unregistered: no control plane is invented.
-	if g, _ := prod(t).Resolve(Given{}, false); g.MgmtURL != "" {
-		t.Fatalf("unregistered mgmt url %q", g.MgmtURL)
+	if _, err := prod(t).ResolveMgmtURL("https://api-test.developer.privasys.org", true); err == nil || !strings.Contains(err.Error(), "mgmt-url") {
+		t.Fatalf("a foreign control plane: %v", err)
 	}
-}
-
-// Any setting from outside the measurement that the profile does not allow
-// refuses the start, and the error names it.
-func TestAForeignSettingIsRefused(t *testing.T) {
-	for name, g := range map[string]Given{
-		"oidc-issuer":          {Issuer: "https://evil.example"},
-		"oidc-audience":        {Audience: "privasys-platform-test"},
-		"oidc-manager-role":    {ManagerRole: "privasys-platform:admin"},
-		"oidc-monitoring-role": {MonitoringRole: "x"},
-		"attestation-server":   {AttestationServers: []string{"https://as.privasys.org/verify", "https://evil.example/verify"}},
-		"mgmt-url":             {MgmtURL: "https://api-test.developer.privasys.org"},
-		"wallet-provider-jwks": {WalletProviderJWKS: "https://evil.example/jwks"},
-	} {
-		_, err := prod(t).Resolve(g, true)
-		if err == nil || !strings.Contains(err.Error(), name) {
-			t.Errorf("%s: err %v", name, err)
+	dev, _ := For("dev")
+	for _, name := range dev.MgmtURLs {
+		if got, err := dev.ResolveMgmtURL(name, true); err != nil || got != name {
+			t.Fatalf("dev %s: %q %v", name, got, err)
 		}
-	}
-	// The issuer's own JWKS is accepted.
-	if _, err := prod(t).Resolve(Given{WalletProviderJWKS: "https://privasys.id/wallet-provider/jwks"}, true); err != nil {
-		t.Fatal(err)
 	}
 }
 
 // The dev profile serves the test platform, never production's audience.
 func TestDevServesTheTestPlatform(t *testing.T) {
 	s, _ := For("dev")
-	g, err := s.Resolve(Given{MgmtURL: "https://api.developer.test.privasys.org"}, true)
-	if err != nil || g.Audience != "privasys-platform-test" || g.ManagerRole != "privasys-platform-test:manager" {
-		t.Fatalf("%+v %v", g, err)
+	if s.Audience != "privasys-platform-test" || s.ManagerRole != "privasys-platform-test:manager" {
+		t.Fatalf("%+v", s)
 	}
-	if _, err := s.Resolve(Given{Audience: "privasys-platform"}, true); err == nil {
-		t.Fatal("dev accepted the production audience")
+	if s.WalletProviderJWKS() != "https://privasys.id/wallet-provider/jwks" {
+		t.Fatalf("wallet provider %q", s.WalletProviderJWKS())
 	}
 }
 

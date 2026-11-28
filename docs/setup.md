@@ -93,19 +93,15 @@ provided — the manager will refuse to start without them.
 |------|---------|-------------|
 | `--ca-cert` | — | **Required.** CA certificate for RA-TLS |
 | `--ca-key` | — | **Required.** Intermediary CA private key for RA-TLS |
-| `--oidc-issuer` | — | **Required.** OIDC issuer URL (e.g. `https://auth.example.com`) |
 | `--machine-name` | — | Machine name for this instance (e.g. `prod1`); determines all RA-TLS hostnames |
 | `--hostname` | — | **Required.** Hostname suffix appended to the machine name (e.g. `example.com`) |
-| `--attestation-servers` | — | Comma-separated list of attestation server URLs (e.g. `https://as1.example.com,https://as2.example.com`) |
 | `--containerd-socket` | `/run/containerd/containerd.sock` | containerd socket path |
 | `--caddy-listen` | `:443` | External HTTPS listen address for Caddy |
 | `--extensions-dir` | `/run/manager/extensions` | Per-hostname RA-TLS OID extension files |
 | `--dek-origin-file` | `/run/luks/dek-origin` | DEK origin string (`"external"` or `"enclave-generated"`, written by `luks-setup`) |
-| `--oidc-audience` | `enclave-os-virtual` | Expected `aud` claim |
-| `--oidc-manager-role` | `privasys-platform:manager` | Role for mutating operations |
-| `--oidc-monitoring-role` | `privasys-platform:monitoring` | Role for read-only access |
-| `--oidc-role-claim` | `roles` | JWT claim key containing roles |
 | `--log-level` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+
+The identity provider (issuer, audience, manager and monitoring roles) and the attestation server are not flags: each image profile compiles its own (`internal/pinned`), and the profile is read from the measured root. `--mgmt-url` is the one trust setting given at start, and it must be one of the profile's control-plane names.
 
 ### Hostname derivation
 
@@ -129,8 +125,7 @@ The production configuration in `manager.service` reads instance-specific
 values from `/data/manager.env` (on the LUKS-encrypted data partition):
 
 ```ini
-# /data/manager.env — created by the operator on first boot
-OIDC_ISSUER=https://auth.example.com
+# /data/manager.env, written by manager-bootstrap at approval
 HOSTNAME_SUFFIX=example.com
 # CA_CERT=/data/ca.crt        # default; override if needed
 # CA_KEY=/data/ca.key          # default; override if needed
@@ -139,7 +134,6 @@ HOSTNAME_SUFFIX=example.com
 ```ini
 EnvironmentFile=-/data/manager.env
 ExecStart=/usr/bin/manager serve \
-    --attestation-servers ${ATTESTATION_SERVERS} \
     --ca-cert ${CA_CERT:-/data/ca.crt} \
     --ca-key ${CA_KEY:-/data/ca.key} \
     --caddy-listen :443 \
@@ -147,16 +141,12 @@ ExecStart=/usr/bin/manager serve \
     --machine-name %H \
     --hostname ${HOSTNAME_SUFFIX} \
     --dek-origin-file /run/luks/dek-origin \
-    --oidc-issuer ${OIDC_ISSUER} \
-    --oidc-audience ${OIDC_AUDIENCE:-enclave-os-virtual} \
-    --oidc-manager-role ${OIDC_MANAGER_ROLE:-privasys-platform:manager} \
-    --oidc-monitoring-role ${OIDC_MONITORING_ROLE:-privasys-platform:monitoring} \
     --log-level info
 ```
 
 The `-` prefix on `EnvironmentFile` means systemd won't fail if the file
-is missing — but the manager will exit with an error because `--oidc-issuer`
-and `--hostname` are required.
+is missing, but the manager exits with an error because `--hostname` is
+required.
 
 ## File layout (on image)
 

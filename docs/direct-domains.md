@@ -120,7 +120,7 @@ under the declaration.
 Then a request to a private path on a direct name reaches the app with
 transport `direct`. If it carries `Authorization: Bearer <token>` (the
 scheme in any letter case), the runtime verifies the token against the
-identity provider configured with `--oidc-issuer` and requires its audience
+identity provider the image profile pins and requires its audience
 to be this app: `app:<app id hex>`, the app's platform hostname, or one of
 its direct names (never the platform audience, so a token minted for one app
 is refused by every other). On success the runtime adds:

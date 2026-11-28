@@ -1,33 +1,36 @@
 // Package pinned holds the trust settings an Enclave OS image accepts, per
 // image profile, compiled into the measured manager.
 //
-// The manager's issuer, audience, roles, attestation servers and control
-// plane used to reach it through /data/manager.env, which instance metadata
-// (outside the measurement, set by whoever controls the VM) could rewrite.
-// An image now runs only with the values compiled here for its profile:
-// the profile comes from /etc/privasys/image-profile on the dm-verity root,
-// so it is measured too. A value from the environment that differs is
-// refused, never used, and never replaced silently.
+// An image runs only with the values compiled here for its profile: the
+// profile comes from /etc/privasys/image-profile on the dm-verity root, so it
+// is measured too. Nothing outside the measurement (/data/manager.env, which
+// instance metadata can rewrite) names the issuer, audience, roles or
+// attestation server. Only the control plane is read from there, because the
+// dev profile answers on two names, and one the profile does not allow is
+// refused.
 package pinned
 
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 )
 
 // ProfileFile is the measured image-profile marker.
 const ProfileFile = "/etc/privasys/image-profile"
 
-// Settings are the trust settings one profile accepts. Each list holds every
-// value allowed; a setting must equal one of them exactly.
+// Settings are the trust settings one profile accepts. A value is compared
+// exactly.
 type Settings struct {
-	Issuers            []string
-	Audiences          []string
-	ManagerRoles       []string
-	MonitoringRoles    []string
-	AttestationServers []string
-	MgmtURLs           []string
+	Issuer            string
+	Audience          string
+	ManagerRole       string
+	MonitoringRole    string
+	AttestationServer string
+	// MgmtURLs are the names the control plane answers on; the first is the
+	// one a manager calls when it is given none.
+	MgmtURLs []string
 	// AppDomain is the domain the control plane names this fleet's apps and
 	// managers under (its APP_DOMAIN): a manager is reached as
 	// <enclave name>-mgr.<AppDomain> (internal/mgrname). Not a trust setting:
@@ -40,22 +43,22 @@ type Settings struct {
 // images serve the test platform (and its legacy control-plane name).
 var profiles = map[string]Settings{
 	"production": {
-		Issuers:            []string{"https://privasys.id"},
-		Audiences:          []string{"privasys-platform"},
-		ManagerRoles:       []string{"privasys-platform:manager"},
-		MonitoringRoles:    []string{"privasys-platform:monitoring"},
-		AttestationServers: []string{"https://as.privasys.org/verify"},
-		MgmtURLs:           []string{"https://api.developer.privasys.org"},
-		AppDomain:          "apps.privasys.org",
+		Issuer:            "https://privasys.id",
+		Audience:          "privasys-platform",
+		ManagerRole:       "privasys-platform:manager",
+		MonitoringRole:    "privasys-platform:monitoring",
+		AttestationServer: "https://as.privasys.org/verify",
+		MgmtURLs:          []string{"https://api.developer.privasys.org"},
+		AppDomain:         "apps.privasys.org",
 	},
 	"dev": {
-		Issuers:            []string{"https://privasys.id"},
-		Audiences:          []string{"privasys-platform-test"},
-		ManagerRoles:       []string{"privasys-platform-test:manager"},
-		MonitoringRoles:    []string{"privasys-platform-test:monitoring"},
-		AttestationServers: []string{"https://as.privasys.org/verify"},
-		MgmtURLs:           []string{"https://api-test.developer.privasys.org", "https://api.developer.test.privasys.org"},
-		AppDomain:          "apps.test.privasys.org",
+		Issuer:            "https://privasys.id",
+		Audience:          "privasys-platform-test",
+		ManagerRole:       "privasys-platform-test:manager",
+		MonitoringRole:    "privasys-platform-test:monitoring",
+		AttestationServer: "https://as.privasys.org/verify",
+		MgmtURLs:          []string{"https://api-test.developer.privasys.org", "https://api.developer.test.privasys.org"},
+		AppDomain:         "apps.test.privasys.org",
 	},
 }
 
@@ -67,8 +70,7 @@ func For(profile string) (Settings, bool) {
 
 // Profile reads the image profile from path. Every Enclave OS image writes
 // it on its dm-verity root, so a missing or unknown profile is an error:
-// nothing on an image runs unpinned. (A run off an image says so explicitly;
-// see the manager's --unpinned.)
+// nothing on an image runs unpinned.
 func Profile(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -94,80 +96,34 @@ func Current(path string) (string, Settings, error) {
 	return p, profiles[p], nil
 }
 
-// Given are the settings the manager was started with.
-type Given struct {
-	Issuer             string
-	Audience           string
-	ManagerRole        string
-	MonitoringRole     string
-	AttestationServers []string
-	MgmtURL            string // empty: no control plane configured yet
-	WalletProviderJWKS string // empty, or the issuer-derived default
+// WalletProviderJWKS is where the wallet provider (the issuer) publishes the
+// keys that sign wallet instance attestations.
+func (s Settings) WalletProviderJWKS() string {
+	return strings.TrimRight(s.Issuer, "/") + "/wallet-provider/jwks"
 }
 
-// Resolve gives the settings the manager runs with: an empty setting takes
-// the profile's value, so an image needs nothing from manager.env to trust
-// the right parties; a setting that is given must be one the profile allows.
-// MgmtURL stays empty when none is given and the enclave is not registered
-// (no control plane to talk to); registered reports whether it is.
-func (s Settings) Resolve(g Given, registered bool) (Given, error) {
-	if g.Issuer == "" {
-		g.Issuer = s.Issuers[0]
-	}
-	if g.Audience == "" {
-		g.Audience = s.Audiences[0]
-	}
-	if g.ManagerRole == "" {
-		g.ManagerRole = s.ManagerRoles[0]
-	}
-	if g.MonitoringRole == "" {
-		g.MonitoringRole = s.MonitoringRoles[0]
-	}
-	if len(g.AttestationServers) == 0 {
-		g.AttestationServers = append([]string(nil), s.AttestationServers...)
-	}
-	if g.MgmtURL == "" && registered {
-		g.MgmtURL = s.MgmtURLs[0]
-	}
-	return g, s.Check(g)
-}
-
-// Check refuses any setting the profile does not allow. Every problem is
-// listed, so one log line names them all.
-func (s Settings) Check(g Given) error {
-	var bad []string
-	one := func(name, v string, allowed []string) {
-		if !contains(allowed, v) {
-			bad = append(bad, fmt.Sprintf("%s %q (allowed: %s)", name, v, strings.Join(allowed, ", ")))
+// ResolveMgmtURL is the control plane the manager runs with: given, which
+// must be one the profile allows, or when none is given the profile's first
+// for a registered enclave and none for an unregistered one (there is no
+// control plane to talk to yet).
+func (s Settings) ResolveMgmtURL(given string, registered bool) (string, error) {
+	if given == "" {
+		if registered {
+			return s.MgmtURLs[0], nil
 		}
+		return "", nil
 	}
-	one("oidc-issuer", g.Issuer, s.Issuers)
-	one("oidc-audience", g.Audience, s.Audiences)
-	one("oidc-manager-role", g.ManagerRole, s.ManagerRoles)
-	one("oidc-monitoring-role", g.MonitoringRole, s.MonitoringRoles)
-	if len(g.AttestationServers) == 0 {
-		bad = append(bad, "attestation-servers: none given")
+	if !slices.Contains(s.MgmtURLs, given) {
+		return "", fmt.Errorf("mgmt-url %q is outside this image's pinned values (allowed: %s)", given, strings.Join(s.MgmtURLs, ", "))
 	}
-	for _, a := range g.AttestationServers {
-		one("attestation-server", a, s.AttestationServers)
-	}
-	if g.MgmtURL != "" {
-		one("mgmt-url", g.MgmtURL, s.MgmtURLs)
-	}
-	if g.WalletProviderJWKS != "" && g.WalletProviderJWKS != strings.TrimRight(g.Issuer, "/")+"/wallet-provider/jwks" {
-		bad = append(bad, fmt.Sprintf("wallet-provider-jwks %q is not the issuer's", g.WalletProviderJWKS))
-	}
-	if len(bad) > 0 {
-		return fmt.Errorf("settings outside this image's pinned values: %s", strings.Join(bad, "; "))
-	}
-	return nil
+	return given, nil
 }
 
 // MgmtURL is the profile's control plane for a caller that has none yet
 // (registration). A candidate that the profile allows is kept; anything else
 // gives the profile's first value.
 func (s Settings) MgmtURL(candidate string) string {
-	if contains(s.MgmtURLs, candidate) {
+	if slices.Contains(s.MgmtURLs, candidate) {
 		return candidate
 	}
 	return s.MgmtURLs[0]
@@ -176,17 +132,8 @@ func (s Settings) MgmtURL(candidate string) string {
 // CheckAttestationServer refuses an attestation server the profile does not
 // allow.
 func (s Settings) CheckAttestationServer(v string) error {
-	if !contains(s.AttestationServers, v) {
-		return fmt.Errorf("attestation server %q is not pinned for this image (allowed: %s)", v, strings.Join(s.AttestationServers, ", "))
+	if v != s.AttestationServer {
+		return fmt.Errorf("attestation server %q is not pinned for this image (allowed: %s)", v, s.AttestationServer)
 	}
 	return nil
-}
-
-func contains(list []string, v string) bool {
-	for _, x := range list {
-		if x == v {
-			return true
-		}
-	}
-	return false
 }

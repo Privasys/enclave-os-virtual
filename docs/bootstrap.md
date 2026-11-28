@@ -19,7 +19,7 @@ JWKS, with a 5-minute cache.
 |-------|-------|
 | Algorithm | RS256, RS384, RS512, ES256, ES384, ES512 |
 | Audience (`aud`) | `enclave-os-virtual` |
-| Issuer (`iss`) | Must match `--oidc-issuer` |
+| Issuer (`iss`) | Must match the image profile's pinned issuer |
 
 ## Roles
 
@@ -71,7 +71,7 @@ problem — the enclave can verify tokens from boot.
 │     (e.g. Privasys ID, Keycloak, or any OIDC-compliant IdP)│
 │                                                           │
 │  1. Instance boots — manager starts with no containers    │
-│     --oidc-issuer points to the external OIDC provider    │
+│     its image profile pins the external OIDC provider     │
 │                                                           │
 │  2. Operator obtains an OIDC token with manager role:     │
 │     { aud: "enclave-os-virtual",                          │

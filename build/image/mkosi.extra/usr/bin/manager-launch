@@ -21,7 +21,6 @@ set +a
 exec /usr/bin/manager serve \
     --ca-cert "${CA_CERT:-/data/ca.crt}" \
     --ca-key "${CA_KEY:-/data/ca.key}" \
-    --attestation-servers "${ATTESTATION_SERVERS:-}" \
     --caddy-listen :443 \
     --extensions-dir /run/manager/extensions \
     --machine-name "${MACHINE_NAME:-$(hostname)}" \
@@ -29,10 +28,6 @@ exec /usr/bin/manager serve \
     --platform-hostname "${PLATFORM_HOSTNAME:-}" \
     --proxy-url "${PROXY_URL:-http://localhost:8080}" \
     --dek-origin-file /run/luks/dek-origin \
-    --oidc-issuer "${OIDC_ISSUER:-}" \
-    --oidc-audience "${OIDC_AUDIENCE:-}" \
-    --oidc-manager-role "${OIDC_MANAGER_ROLE:-}" \
-    --oidc-monitoring-role "${OIDC_MONITORING_ROLE:-}" \
     --mgmt-url "${MGMT_URL:-}" \
     --enclave-id "${ENCLAVE_ID:-}" \
     --enclave-token "${ENCLAVE_TOKEN:-}" \

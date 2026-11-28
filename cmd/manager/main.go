@@ -9,9 +9,7 @@
 //
 // Usage:
 //
-// manager serve --oidc-issuer https://auth.example.com
-//
-//	--hostname example.com
+//	manager serve --ca-cert ca.crt --ca-key ca.key --hostname example.com
 //
 // manager version
 package main
@@ -41,20 +39,6 @@ import (
 )
 
 const version = "0.2.0"
-
-// stringSliceFlag implements flag.Value for comma-separated string lists.
-type stringSliceFlag []string
-
-func (s *stringSliceFlag) String() string { return strings.Join(*s, ",") }
-func (s *stringSliceFlag) Set(val string) error {
-	for _, v := range strings.Split(val, ",") {
-		v = strings.TrimSpace(v)
-		if v != "" {
-			*s = append(*s, v)
-		}
-	}
-	return nil
-}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -93,7 +77,6 @@ Commands:
 Run 'manager serve --help' for serve flags.
 
 Required flags for serve:
-  --oidc-issuer           OIDC provider URL
   --ca-cert               CA certificate for RA-TLS
   --ca-key                CA private key for RA-TLS
   --hostname              Domain suffix (e.g. example.com)
@@ -107,27 +90,8 @@ func runServe(args []string) error {
 		"Path to the PEM-encoded CA certificate for platform attestation (required)")
 	caKeyPath := fs.String("ca-key", "",
 		"Path to the PEM-encoded intermediary CA private key for RA-TLS (required)")
-	var attestationServers stringSliceFlag
-	fs.Var(&attestationServers, "attestation-servers",
-		"Comma-separated list of attestation server URLs for remote quote verification")
 	containerdSocket := fs.String("containerd-socket", "",
 		"containerd socket path (default: /run/containerd/containerd.sock)")
-
-	// OIDC flags (default: the image's pinned values).
-	oidcIssuer := fs.String("oidc-issuer", "",
-		"OIDC issuer URL for bearer token verification (default: the image's pinned issuer)")
-	oidcAudience := fs.String("oidc-audience", "",
-		"Expected OIDC audience claim (default: the image's pinned audience)")
-	walletProviderJWKS := fs.String("wallet-provider-jwks", os.Getenv("WALLET_PROVIDER_JWKS"),
-		"Wallet-provider JWKS URL used to verify wallet-originated call proofs "+
-			"(the free_for:[\"wallet\"] API-fee exemption). Defaults to "+
-			"<oidc-issuer>/wallet-provider/jwks. Empty disables the exemption.")
-	oidcManagerRole := fs.String("oidc-manager-role", "",
-		"OIDC role required for mutating operations (load/unload); default: the image's pinned role")
-	oidcMonitoringRole := fs.String("oidc-monitoring-role", "",
-		"OIDC role for read-only access (healthz, readyz, status, metrics); default: the image's pinned role")
-	oidcRoleClaim := fs.String("oidc-role-claim", "roles",
-		"JWT claim key containing roles (supports map or array formats)")
 
 	// Caddy / RA-TLS flags.
 	caddyListen := fs.String("caddy-listen", ":443",
@@ -182,24 +146,16 @@ func runServe(args []string) error {
 	}
 
 	// An Enclave OS image runs only with the trust settings compiled for its
-	// measured profile: these flags come from /data/manager.env, which is
-	// outside the measurement. Empty ones take the pinned values.
-	eff, err := resolvePinned(pinned.ProfileFile, pinned.Given{
-		Issuer:             *oidcIssuer,
-		Audience:           *oidcAudience,
-		ManagerRole:        *oidcManagerRole,
-		MonitoringRole:     *oidcMonitoringRole,
-		AttestationServers: []string(attestationServers),
-		MgmtURL:            *rsMgmtURL,
-		WalletProviderJWKS: *walletProviderJWKS,
-	}, *rsEnclaveToken != "")
+	// measured profile (internal/pinned). The control plane is the one setting
+	// read from /data/manager.env, outside the measurement, and it must be one
+	// the profile allows.
+	profile, pin, err := pinned.Current(pinned.ProfileFile)
 	if err != nil {
 		return err
 	}
-	*oidcIssuer, *oidcAudience = eff.Issuer, eff.Audience
-	*oidcManagerRole, *oidcMonitoringRole = eff.ManagerRole, eff.MonitoringRole
-	attestationServers = stringSliceFlag(eff.AttestationServers)
-	*rsMgmtURL = eff.MgmtURL
+	if *rsMgmtURL, err = pin.ResolveMgmtURL(*rsMgmtURL, *rsEnclaveToken != ""); err != nil {
+		return fmt.Errorf("refusing to start on a %s image: %w", profile, err)
+	}
 
 	// Validate required flags.
 	if *caCert == "" {
@@ -221,16 +177,15 @@ func runServe(args []string) error {
 
 	log.Info("starting manager",
 		zap.String("version", version),
-		zap.Int("attestation_servers", len(attestationServers)),
+		zap.String("image_profile", profile),
 	)
 
 	// Build OIDC config.
 	oidcCfg := &auth.OIDCConfig{
-		Issuer:         *oidcIssuer,
-		Audience:       *oidcAudience,
-		ManagerRole:    *oidcManagerRole,
-		MonitoringRole: *oidcMonitoringRole,
-		RoleClaim:      *oidcRoleClaim,
+		Issuer:         pin.Issuer,
+		Audience:       pin.Audience,
+		ManagerRole:    pin.ManagerRole,
+		MonitoringRole: pin.MonitoringRole,
 	}
 
 	// Create the auth verifier.
@@ -239,7 +194,7 @@ func runServe(args []string) error {
 		return fmt.Errorf("failed to create auth verifier: %w", err)
 	}
 	log.Info("auth configured",
-		zap.String("oidc_issuer", *oidcIssuer),
+		zap.String("oidc_issuer", pin.Issuer),
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -280,11 +235,11 @@ func runServe(args []string) error {
 		ProxyProtocolStatePath: "/data/manager-proxy-protocol.json",
 		MachineName:            *machineName,
 		PlatformHostname:       platformHostname,
-		AppDomain:              pinnedAppDomain(pinned.ProfileFile),
+		AppDomain:              pin.AppDomain,
 		ManagementPort:         "9443",
 		CACertPath:             *caCert,
 		CAKeyPath:              *caKeyPath,
-		AttestationServers:     []string(attestationServers),
+		AttestationServers:     []string{pin.AttestationServer},
 		DEKOriginFile:          *dekOriginFile,
 		// Wire tool-spec puller env injection. The launcher only
 		// synthesises TOOL_SPEC_* env vars when ALL three are set —
@@ -294,8 +249,8 @@ func runServe(args []string) error {
 		ToolSpecEnclaveID:    *rsEnclaveID,
 		ToolSpecEnclaveToken: *rsEnclaveToken,
 		IsolationUserns:      *isolationUserns,
-		Issuer:               *oidcIssuer,
-		Audience:             *oidcAudience,
+		Issuer:               pin.Issuer,
+		Audience:             pin.Audience,
 	}
 	// Bring up the container bridge + egress NAT + manager-port guard before
 	// any container is loaded or the management API binds (#45). Fatal on
@@ -333,11 +288,11 @@ func runServe(args []string) error {
 		// Same OIDC issuer used for bearer-token verification is also
 		// the EncAuth IdP: the session-relay middleware uses it to
 		// fetch the JWKS that signs silent-rebind vouchers.
-		IdpIssuer: *oidcIssuer,
+		IdpIssuer: pin.Issuer,
 		// Verifies the wallet's per-call proof (WIA + holder-key signature)
 		// behind the free_for:["wallet"] exemption. The wallet provider is
 		// the IdP, so derive the JWKS from the issuer unless overridden.
-		WalletProviderJWKS: walletJWKSURL(*walletProviderJWKS, *oidcIssuer),
+		WalletProviderJWKS: pin.WalletProviderJWKS(),
 		// Settlement channel for paid attribute disclosures: reuses the
 		// fleet mgmt URL + enclave bearer (same credential as check-in).
 		// The same three also let the manager relay the tool spec on a
@@ -492,45 +447,6 @@ func newLogger(level string) (*zap.Logger, error) {
 	}
 
 	return cfg.Build()
-}
-
-// resolvePinned gives the trust settings the manager runs with: the image
-// profile file must exist, and the settings are its pinned values (an empty
-// one is filled, a different one refuses the start).
-func resolvePinned(profileFile string, g pinned.Given, registered bool) (pinned.Given, error) {
-	profile, s, err := pinned.Current(profileFile)
-	if err != nil {
-		return g, err
-	}
-	eff, err := s.Resolve(g, registered)
-	if err != nil {
-		return g, fmt.Errorf("refusing to start on a %s image: %w", profile, err)
-	}
-	return eff, nil
-}
-
-// pinnedAppDomain is the app domain compiled for the image's profile (the
-// name the control plane gives this manager is <machine-name>-mgr.<domain>),
-// or "" when the profile has none.
-func pinnedAppDomain(profileFile string) string {
-	_, s, err := pinned.Current(profileFile)
-	if err != nil {
-		return ""
-	}
-	return s.AppDomain
-}
-
-// walletJWKSURL resolves the wallet-provider JWKS endpoint used to verify
-// wallet-originated call proofs. An explicit override wins; otherwise it is
-// derived from the OIDC issuer, which is also the wallet provider.
-func walletJWKSURL(override, issuer string) string {
-	if override != "" {
-		return override
-	}
-	if issuer == "" {
-		return ""
-	}
-	return strings.TrimRight(issuer, "/") + "/wallet-provider/jwks"
 }
 
 // signerOrNil keeps a nil *Signer out of the interface field: a typed nil
