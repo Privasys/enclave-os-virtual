@@ -100,19 +100,21 @@ func (s *Server) closeFoldersNotReadOnly(container string, pid int, open map[str
 // unlockHolderFolder is the ONLY way a holder folder becomes unlocked: the
 // wallet's mint (create), the app's open, the runtime's own file access and
 // any reopen after a restart all come here (a source test enforces it). It
-// decides the mode from what the holder approved, makes the container's
-// view of the folder match it, and only then loads the key:
+// decides the mode from what the holder approved:
 //
 //  1. a mint makes the folder, empty and unkeyed, when it does not exist;
 //  2. read-only: the folder is bound read-only, and the container's own
 //     mount view must confirm it (no running task, or a view that is not
-//     read-only, unlocks nothing); writable: any earlier read-only bind is
-//     removed;
+//     read-only, unlocks nothing), BEFORE the key loads;
 //  3. the key loads: a new folder is sealed to it, an existing one must
-//     already be bound to it.
+//     already be bound to it;
+//  4. writable: any earlier read-only bind is removed, AFTER the key loads,
+//     so a failed load leaves a folder already open read-only as it was.
 //
 // Any failure undoes the steps before it: no folder is left open in a mode
-// nobody checked, and a new folder that was not sealed is removed.
+// nobody checked, and a new folder that was not sealed is removed. If the
+// read-only bind cannot be removed after the key loaded, the key is removed
+// too: the folder ends locked, never open in a mode the state does not say.
 func (s *Server) unlockHolderFolder(container string, hf launcher.HolderFolders, holderKey string, perms []string, raw []byte, create bool) (keyID string, readOnly bool, err error) {
 	readOnly, err = holderReadOnly(perms)
 	if err != nil {
@@ -131,9 +133,11 @@ func (s *Server) unlockHolderFolder(container string, hf launcher.HolderFolders,
 		}
 	}
 	exposed := holders.FolderPath(hf.Exposed, holderKey)
-	if err := s.exposeInMode(fs, container, holderKey, exposed, readOnly); err != nil {
-		removeNew()
-		return "", readOnly, err
+	if readOnly {
+		if err := s.exposeReadOnly(fs, container, holderKey, exposed); err != nil {
+			removeNew()
+			return "", readOnly, err
+		}
 	}
 	if created {
 		keyID, err = fs.Seal(hf.Mount, holderKey, raw)
@@ -147,17 +151,21 @@ func (s *Server) unlockHolderFolder(container string, hf launcher.HolderFolders,
 		removeNew()
 		return "", readOnly, err
 	}
+	if !readOnly {
+		if err := fs.Unbind(exposed); err != nil {
+			_, _, _ = fs.Close(hf.Mount, holderKey, keyID)
+			removeNew()
+			return "", readOnly, fmt.Errorf("holders: the folder could not be made writable: %w", err)
+		}
+	}
 	return keyID, readOnly, nil
 }
 
-// exposeInMode makes the container's view of the folder at exposed the
-// grant's mode, before any key loads. For read-only the bind alone is not
-// trusted: the container's own mount view must show a read-only mount, or
-// the bind is undone and the unlock refused.
-func (s *Server) exposeInMode(fs folderBackend, container, holderKey, exposed string, readOnly bool) error {
-	if !readOnly {
-		return fs.Unbind(exposed)
-	}
+// exposeReadOnly binds the folder at exposed read-only for the container,
+// before any key loads. The bind alone is not trusted: the container's own
+// mount view must show a read-only mount, or the bind is undone and the
+// unlock refused.
+func (s *Server) exposeReadOnly(fs folderBackend, container, holderKey, exposed string) error {
 	if err := fs.BindReadOnly(exposed); err != nil {
 		return err
 	}

@@ -46,7 +46,7 @@ func TestMintUnlocksInTheApprovedMode(t *testing.T) {
 		if c.ro {
 			f.check(t, "read-only mint", "make "+mount, "bind-ro "+folder, "check-view 4242 /data/holders/"+holder, "seal "+mount)
 		} else {
-			f.check(t, "writable mint", "make "+mount, "unbind "+folder, "seal "+mount)
+			f.check(t, "writable mint", "make "+mount, "seal "+mount, "unbind "+folder)
 		}
 		st, open := s.holdersOpen.get(grantKey("app1", p.resource, "sub"))
 		if !open || st.ReadOnly != c.ro || st.KeyID != "kid" || st.HolderKey != holder || st.Container != "ctr-a" {

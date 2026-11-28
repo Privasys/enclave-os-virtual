@@ -49,8 +49,9 @@ type fakeFolders struct {
 	// after the bind (the failure the self-check exists for).
 	viewWritable bool
 	// viewWait, when set, blocks the view check until it is closed.
-	viewWait chan struct{}
-	noTask   bool
+	viewWait  chan struct{}
+	noTask    bool
+	unbindErr error
 }
 
 func (f *fakeFolders) add(s string) { f.steps = append(f.steps, s) }
@@ -89,7 +90,7 @@ func (f *fakeFolders) BindReadOnly(dir string) error {
 }
 func (f *fakeFolders) Unbind(dir string) error {
 	f.add("unbind " + dir)
-	return nil
+	return f.unbindErr
 }
 func (f *fakeFolders) TaskPID(container string) (int, bool) { return 4242, !f.noTask }
 func (f *fakeFolders) ViewReadOnly(pid int, inContainer string) (bool, error) {
@@ -116,7 +117,7 @@ func (f *fakeFolders) check(t *testing.T, name string, want ...string) {
 // read-only grant the read-only bind exists, and the container's own view
 // confirms it, BEFORE the key is loaded (no writable window); both are
 // undone if the key then fails to load. A writable grant removes any
-// earlier read-only bind. An unknown permission set touches nothing. A new
+// earlier read-only bind only AFTER its key loaded. An unknown permission set touches nothing. A new
 // folder that is not sealed is removed again.
 func TestUnlockBindsReadOnlyBeforeTheKey(t *testing.T) {
 	hf := launcher.HolderFolders{Mount: "/view", Exposed: "/vol"}
@@ -177,7 +178,24 @@ func TestUnlockBindsReadOnlyBeforeTheKey(t *testing.T) {
 		if _, ro, err := s.unlockHolderFolder("app", hf, key, []string{"read", "write"}, nil, c.create); err != nil || ro {
 			t.Fatalf("%s writable: ro %v err %v", c.name, ro, err)
 		}
-		f.check(t, c.name+" writable", steps(made, []string{"unbind " + folder}, load)...)
+		f.check(t, c.name+" writable", steps(made, load, []string{"unbind " + folder})...)
+
+		// A writable load that fails leaves an earlier read-only bind in place:
+		// a folder already open read-only stays exactly as the state says.
+		f.loadErr = errors.New("no key")
+		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"read", "write"}, nil, c.create); err == nil {
+			t.Fatalf("%s: a failed writable load reported success", c.name)
+		}
+		f.check(t, c.name+" failed writable", steps(made, load, removed)...)
+		f.loadErr = nil
+
+		// The bind cannot be removed after the key loaded: the key goes too.
+		f.unbindErr = errors.New("busy")
+		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"read", "write"}, nil, c.create); err == nil {
+			t.Fatalf("%s: a writable unlock that kept the read-only bind reported success", c.name)
+		}
+		f.check(t, c.name+" unbind fails", steps(made, load, []string{"unbind " + folder, "close-key kid /view"}, removed)...)
+		f.unbindErr = nil
 
 		if _, _, err := s.unlockHolderFolder("app", hf, key, []string{"write"}, nil, c.create); !errors.Is(err, errHolderAccess) {
 			t.Fatalf("%s unknown permissions: %v", c.name, err)
