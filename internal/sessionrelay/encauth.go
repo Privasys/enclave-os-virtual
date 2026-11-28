@@ -54,9 +54,7 @@ type EncAuthPayload struct {
 }
 
 // VerifyContext carries the per-bootstrap inputs the verifier checks a
-// voucher against. It groups what used to be positional args so the
-// app_id binding (Sc 1) could be added without an ever-growing
-// signature.
+// voucher against, so a new binding (the app id) needs no new parameter.
 type VerifyContext struct {
 	// EncStaticPub is the SEC1 uncompressed bytes of the enclave's
 	// identity key; payload.EncPub must equal it byte for byte. This is

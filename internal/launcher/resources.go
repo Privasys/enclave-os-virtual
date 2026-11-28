@@ -65,13 +65,12 @@ func (l *Launcher) ContainerResourceDecls(name string) []ResourceDecl {
 // SetTaskPreStart installs f to run for every new container task after its
 // namespaces exist and before it starts (container.Manager.SetPreStart).
 // The manager calls it before Run has created the container manager, so the
-// hook is kept and applied when Run attaches it (attachContainerManager);
-// installing it only on an existing container manager silently dropped it
-// on 146-dev.
+// hook is kept and applied when Run attaches one (attachContainerManager),
+// never only to a container manager that already exists.
 //
 // f runs INSIDE a load, under the launcher's lock (l.mu): it must never call
-// the launcher (that deadlocked 147-dev), and it must return in bounded
-// time. An error from f keeps the task from starting, so the load fails.
+// the launcher (it would deadlock the host's loads), and it must return in
+// bounded time. An error from f keeps the task from starting, so the load fails.
 func (l *Launcher) SetTaskPreStart(f func(name string, pid int) error) {
 	l.mu.Lock()
 	l.taskPreStart = f

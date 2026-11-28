@@ -185,10 +185,9 @@ type ConfigAPISpec struct {
 
 	// Optional marks a configure endpoint that has a usable default: the
 	// owner/admin-only authz gate still guards it on every call, but the
-	// freeze never engages — the app serves from the start. Without this,
-	// optional-configure apps had NO config_api armed at all, which left
-	// their config surface open to any caller the transport let through
-	// (found on the lightpanda /configure, 2026-07-30).
+	// freeze never engages: the app serves from the start. An optional
+	// configure endpoint is still armed, or its surface would be open to any
+	// caller the transport lets through.
 	Optional bool `json:"optional,omitempty"`
 }
 
@@ -541,8 +540,8 @@ type Launcher struct {
 	// signed policy is not configured, which leaves the request's own values.
 	//
 	// It has its own mutex: it is consulted from Load, which already holds
-	// l.mu, and sync.Mutex is not reentrant. Taking l.mu here deadlocked every
-	// vault-backed load (dev, 2026-09-21).
+	// l.mu, and sync.Mutex is not reentrant: taking l.mu here would deadlock
+	// every vault-backed load.
 	approvedMu             sync.Mutex
 	approvedConstellations ApprovedConstellations
 	approvedDomains        ApprovedDomains
@@ -739,8 +738,8 @@ type Launcher struct {
 	// to run (its full registry), independent of load order. The image GC
 	// (PruneImages, before each pull) must keep these, or a concurrent replay
 	// — apps load in parallel goroutines — would prune a not-yet-loaded app's
-	// cached image, forcing a re-pull that, on a full disk, hangs forever
-	// (the 2026-07-09 m1-tdx-france self-inflicted wedge). Nil = keep only
+	// cached image, forcing a re-pull that hangs forever on a full disk.
+	// Nil = keep only
 	// currently-loaded specs (dev/test).
 	desiredImages func() []string
 
@@ -1644,8 +1643,8 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// Under l.mu: the checks against the containers loaded and the loads on
 	// their way, a reservation of the name, hostname and port, and the image
 	// prune. The image download that follows runs WITHOUT l.mu, because every
-	// app call that reads launcher state waits on it: one stalled pull held it
-	// on 2026-11-11 and every app on prod m1 stopped answering.
+	// app call that reads launcher state waits on it: a stalled pull under it
+	// would stop every app on the host answering.
 	l.mu.Lock()
 	if err := l.reserveLoadLocked(req.Name, loadReservation{image: req.Image, hostname: spec.Hostname, port: req.Port}); err != nil {
 		l.mu.Unlock()
@@ -1656,7 +1655,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// Reclaim disk BEFORE pulling: the containerd image store lives on the
 	// small persistent /data PD, images from every previously-deployed app
 	// version accumulate with no host to prune from, and a full store hangs
-	// the pull at "pulling" forever (2026-07-09 m1-tdx-france wedge). Keep the
+	// the pull at "pulling" forever. Keep the
 	// image about to be pulled, every currently-loaded container's image, the
 	// image of every load on its way (reserved), AND every image in the
 	// manager's registry (`desiredImages`) — the last is essential because
@@ -1987,25 +1986,15 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// Synthesise puller env vars when the manager itself knows where to
 	// fetch tool specs from. Containers that don't care will ignore
 	// these; confidential-ai picks them up via envOr("TOOL_SPEC_URL",...)
-	// and starts polling the mgmt-service /api/v1/enclave/tool-spec
-	// endpoint. Empty fallbacks intentionally — a missing piece (e.g.
-	// pre-bootstrap manager.env) means the puller stays idle, which is
-	// the same behaviour as before this wire-up.
-	// Point the puller at the manager rather than straight at mgmt-service.
+	// and starts polling the tool spec. Before registration (no control
+	// plane, id or credential yet) nothing is injected and the puller stays
+	// idle.
 	//
-	// TOOL_SPEC_TOKEN used to carry l.cfg.EnclaveToken, which is the
-	// fleet-wide enclave bearer: the same credential also authenticates
-	// check-in, runtime status, AI usage, per-call API fees and
-	// attribute-voucher settle/release, and it fetches the attestation token
-	// used to unseal vault keys. A container can read its own environment, so
-	// every workload on a host held the credential gating every other
-	// workload's management endpoints — a cross-tenant capability on a shared
-	// VM.
-	//
-	// The manager now makes that call on the container's behalf and
-	// authenticates the container by its own per-container token. The
-	// workload's contract is unchanged: same two variables, one authenticated
-	// GET, same body — so no app image needs rebuilding.
+	// The puller asks the manager, never the control plane: TOOL_SPEC_TOKEN is
+	// the container's own token, which the manager checks before it fetches
+	// the spec with the enclave credential (toolspec.go). That credential is
+	// fleet-wide and gates every workload's management endpoints, and a
+	// container can read its own environment, so it never enters one.
 	if l.cfg.MgmtURL != "" && l.cfg.EnclaveID != "" && l.cfg.EnclaveToken != "" {
 		runtimeEnv["TOOL_SPEC_URL"] = network.ManagerURL() +
 			"/api/v1/containers/" + url.PathEscape(req.Name) + "/tool-spec"
@@ -2148,7 +2137,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 					zap.String("name", req.Name), zap.Error(err))
 			}
 			// The container now lives in its own netns on a private bridge IP
-			// (bugs-and-fixes #45), so the manager reverse-proxies to
+			//, so the manager reverse-proxies to
 			// <container-ip>:<port> instead of localhost:<port>.
 			containerUpstream := fmt.Sprintf("%s:%d", network.ContainerIP(req.Port), req.Port)
 			// Route external TLS-terminated traffic to the manager so the
@@ -3020,8 +3009,7 @@ func (l *Launcher) SetDependencies(containerName string, set *ratls.DependencySe
 		}
 		// Force Caddy to re-issue: the RA-TLS module caches the issued leaf,
 		// so writing the extensions file alone leaves the OLD dependency set
-		// on the wire until the cached cert expires (observed on dev
-		// 2026-08-06). A dependency change must be visible to verifiers —
+		// on the wire until the cached cert expires. A dependency change must be visible to verifiers —
 		// and to the wallet's re-consent prompt — immediately.
 		if err := l.caddyClient.ReloadForce(); err != nil {
 			l.log.Warn("caddy reload after dependency update failed; the new set lands on the next cert issuance",

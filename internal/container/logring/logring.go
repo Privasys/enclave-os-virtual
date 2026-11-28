@@ -1,10 +1,10 @@
 // Package logring provides a size-capped, never-blocking file sink for
 // container stdout/stderr.
 //
-// It exists to make container logging safe on an enclave host (bugs-and-fixes
-// #50): any drain that can block — a manager-side pipe, an unrotated file on a
-// filling disk — eventually fills the task FIFO and wedges every writer inside
-// the container. The Writer here inverts the failure mode: it ALWAYS accepts
+// It exists to make container logging safe on an enclave host: any drain
+// that can block (a manager-side pipe, an unrotated file on a filling disk)
+// eventually fills the task FIFO and wedges every writer inside the
+// container. The Writer here inverts the failure mode: it ALWAYS accepts
 // and acknowledges the bytes, and when the filesystem misbehaves (full,
 // read-only, missing) it drops them instead of blocking. Losing log lines is
 // acceptable; wedging a model server mid-load is not.

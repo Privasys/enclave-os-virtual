@@ -151,7 +151,7 @@ type holderState struct {
 	// busy serialises the opens, mints and closes of one holder's folder:
 	// each checks the state, works on the folder and records the result,
 	// and two of them interleaved could record a mode the folder is not in
-	// (a read-only mint over a writable open, 2026-11-27 review).
+	// (a read-only mint over a writable open).
 	busy map[string]*sync.Mutex
 }
 
@@ -267,11 +267,9 @@ func (s *Server) handleResourceEvents(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// The metrics middleware wraps the writer (responseWriter in manager.go)
-	// and exposes Unwrap, not Flush: a type assertion on http.Flusher fails
-	// on it, so every listener was answered "streaming unsupported" (HTTP
-	// 500) and no container ever received an event. The response controller
-	// follows Unwrap down to the connection's flusher.
+	// Flush through a response controller, never a type assertion on
+	// http.Flusher: the metrics middleware's writer (manager.go) exposes
+	// Unwrap, not Flush, and the controller follows it to the connection.
 	rc := http.NewResponseController(w)
 	ch, cancel := s.events.subscribe(name)
 	defer cancel()
@@ -653,7 +651,7 @@ func (s *Server) handleResourceOpen(w http.ResponseWriter, r *http.Request) {
 	containerPath := path.Join(holderContainerMount, holders.Dir, g.HolderKey)
 	if st, open := s.holdersOpen.get(key); open {
 		// The keyring is the superblock's: a volume remounted under the
-		// state (a redeploy, 2026-09-18) has no key any more, and "open"
+		// state (a redeploy) has no key any more, and "open"
 		// would hand the app a folder every write answers ENOKEY on. Trust
 		// the state only when the kernel agrees; otherwise load the key
 		// again below.

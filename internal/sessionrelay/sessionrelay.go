@@ -785,12 +785,12 @@ func (m *Manager) evictLocked(id string) {
 //
 // Bootstrap is unauthenticated by design (a session is a transport handle;
 // identity comes later), so the number of live sessions is whatever rate a
-// client sends at times the TTL. It used to be unbounded, and every
-// bootstrap swept the whole table under the global lock that every sealed
-// request also takes, so the cost of each new session grew with the
-// number of sessions a client had already created.
+// client sends times the TTL, and the table is swept under the global lock
+// that every sealed request also takes: unbounded, or swept on every
+// bootstrap, the cost of each new session would grow with the sessions a
+// client had already created.
 //
-// Now the table holds at most maxSessions; past that a bootstrap is
+// So the table holds at most maxSessions; past that a bootstrap is
 // refused and existing sessions carry on. Expired sessions are swept every
 // gcInterval, or at most once a second while the table is full, not on
 // every insert. Lookups check expiry themselves, so a later sweep never

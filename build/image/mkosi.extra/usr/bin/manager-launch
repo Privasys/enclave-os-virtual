@@ -1,16 +1,11 @@
 #!/bin/bash
 # Launch wrapper for manager.service.
 #
-# systemd's `EnvironmentFile=-/data/manager.env` is unreliable early in
-# boot: the file is present and readable (the manager process itself reads
-# other /data files fine), yet for several minutes systemd does not load
-# its variables into the unit environment. The unexpanded
-# ${CA_CERT:-/data/ca.crt} then reaches Caddy's RA-TLS module and it 400s,
-# crash-looping the manager ~25 times until the env finally settles.
-#
-# Sourcing the env here — in the exec'd process, which has the host mount
-# view and runs after data.mount — is reliable, and bash's ${VAR:-default}
-# expansion always works. This makes the manager start once, clean.
+# The environment is read here, not by systemd: early in boot systemd may
+# not load `EnvironmentFile=-/data/manager.env` into the unit for minutes
+# although the file is readable, and an unexpanded ${CA_CERT:-...} would
+# reach Caddy. This process runs after data.mount with the host mount view,
+# so sourcing the file here works on the first start.
 set -u
 
 # Pull in the per-machine config written by manager-bootstrap at approval.

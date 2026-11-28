@@ -309,9 +309,9 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 			// page cache never read-modify-writes a partial tail page. With
 			// 512-byte sectors the integrity tags leave a non-4k-aligned tail,
 			// and the RMW read of never-written sectors fails with INTEGRITY
-			// AEAD ERROR -> EIO at the end of mkfs (first seen on the first
-			// catalogue-sized 80G volume, 2026-07-16; small volumes dodge it
-			// by luck of their tail alignment). Also 8x fewer hmac tags.
+			// AEAD ERROR -> EIO at the end of mkfs (large volumes hit it; small
+			// ones dodge it by the luck of their tail alignment). Also 8x fewer
+			// hmac tags.
 			"--sector-size", "4096",
 			"--iter-time", "2000",
 			"--key-file=-",
@@ -326,20 +326,18 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 
 	// 3. Open LUKS (skip if mapper already exists from prior open).
 	//
-	// A LUKS-headered LV that this key cannot open FAILS CLOSED — always.
-	// There used to be a "stale-LV recovery" here: when the key was freshly
-	// created (not reconstructed), the header was presumed to belong to a
-	// discarded key generation and the LV was REFORMATTED. That inference is
-	// unsound: "every vault reported the handle absent" is exactly what a
-	// transient vault outage, a directory/addressing slip, or a half-migrated
-	// constellation ALSO produce — while the data behind the header is intact
-	// and recoverable the moment the vaults answer again. The LUKS header
+	// A LUKS-headered LV that this key cannot open FAILS CLOSED, always, even
+	// when the key was freshly created: a header is never presumed to belong
+	// to a discarded key generation and reformatted. "Every vault reported
+	// the handle absent" is exactly what a transient vault outage, a
+	// directory or addressing slip, or a half-migrated constellation also
+	// produce, while the data behind the header is intact and recoverable the
+	// moment the vaults answer again. The LUKS header
 	// itself is the strongest evidence there IS data; destroying it on a
 	// key-fetch anomaly is the one outcome the vault architecture exists to
-	// prevent (suspected in prod on the identity-verifier, 2026-08-01).
+	// prevent.
 	//
-	// The stranded-app concern that motivated the auto-reformat has a proper
-	// answer now: the owner explicitly deletes the volume
+	// A stranded app has a deliberate way out: the owner deletes the volume
 	// (DELETE /api/v1/volumes/{id} on mgmt → DELETE /api/v1/volumes/{name}
 	// here) and redeploys — a deliberate, audited act of data destruction,
 	// not a side effect of a deploy.
@@ -390,9 +388,8 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 		// signatures at the device HEAD and TAIL (GPT backup, RAID
 		// superblocks), mke2fs scans for an existing filesystem, and block
 		// readahead pulls unwritten neighbours. A failed read poisons the
-		// device mapping and mkfs's final flush reports EIO (bit the first
-		// catalogue-sized 80G volume, 2026-07-16; the full-device format
-		// wipe demonstrably does not cover these regions on big volumes).
+		// device mapping and mkfs's final flush reports EIO (the full-device
+		// format wipe does not cover these regions on large volumes).
 		// Neutralise every reader:
 		//   - zero the probe-sensitive head+tail (16MiB each) so signature
 		//     scans read initialised sectors;
@@ -410,8 +407,8 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 		// sub-page writes (1KiB backup superblocks), and the page cache
 		// READS the containing page first — a read of never-written
 		// integrity sectors, EIO. Direct I/O never touches the page cache:
-		// no RMW reads, no readahead (proven by fra-4's AEAD errors at the
-		// backup-superblock offsets, 2026-07-16).
+		// no RMW reads, no readahead (buffered, the AEAD errors land at the
+		// backup-superblock offsets).
 		mkfs := func() error {
 			return run("mkfs.ext4", "-F", "-D", "-L", label,
 				"-E", "nodiscard,lazy_itable_init=0,lazy_journal_init=0", mapperPath)
@@ -421,8 +418,7 @@ func (m *Manager) Create(name, size, key string, expectExisting bool) (*VolumeIn
 			// freshly booted host can lose a race with an early-boot reader
 			// whose failed read of unwritten integrity sectors (EILSEQ)
 			// poisons the device mapping; the identical mkfs succeeds moments
-			// later (proven live 2026-07-16 — deployed run failed, the same
-			// command sequence by hand passed, and the redeploy passed).
+			// later.
 			m.log.Warn("mkfs failed — settling and retrying once",
 				zap.String("mapper", mapperName), zap.Error(err))
 			_ = run("udevadm", "settle", "--timeout=10")

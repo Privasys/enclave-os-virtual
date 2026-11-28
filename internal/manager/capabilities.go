@@ -328,9 +328,8 @@ func (b *capabilityBroker) sign(appID string, payload []byte) ([]byte, error) {
 // It carries the declared LABEL and nothing else, under that generic name.
 // The runtime does not know what a service will do with it: Drive makes a
 // folder called that, a mail connector ignores it, and neither meaning is the
-// runtime's to hold. This function used to emit {"folder": ...} for
-// storage.folder, which put one product's vocabulary — and its UX — inside
-// every enclave on the fleet.
+// runtime's to hold, and no product's vocabulary belongs inside every
+// enclave on the fleet.
 //
 // The label comes from the app's measured declaration and is the same string
 // the wallet renders, so what the holder approved and what the service is

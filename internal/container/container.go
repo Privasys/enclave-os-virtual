@@ -564,8 +564,7 @@ func TaskLogPaths(name, stream string) []string {
 }
 
 // taskIO returns the IO creator for a container task. The invariant that
-// matters (bugs-and-fixes #50): the drain must NEVER be able to block the
-// container. Both naive drains wedge under a model server's multi-GB
+// matters: the drain must NEVER be able to block the container. Both naive drains wedge under a model server's multi-GB
 // JIT/startup output:
 //   - cio.WithStdio pipes stdout to the MANAGER process. If that reader
 //     stalls — a manager restart during bootstrap, journal backpressure —
@@ -573,7 +572,7 @@ func TaskLogPaths(name, stream string) []string {
 //   - cio.LogFile has the containerd SHIM write an UNROTATED per-container
 //     file: once its filesystem fills (the small /data when the workspace-SSD
 //     bind fails), the shim's write blocks and the FIFO fills — the same
-//     wedge one layer down. Observed on a clean dev GPU host on 2026-07-23.
+//     wedge one layer down.
 //
 // The logging binary satisfies the invariant a third way: it reads the FIFOs
 // UNCONDITIONALLY and drops bytes whenever the capped ring cannot take them,
@@ -614,14 +613,11 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	// Build OCI spec options.
 	opts := []oci.SpecOpts{
 		oci.WithImageConfig(img),
-		// Per-container network namespace (bugs-and-fixes #45): omitting the
-		// host-netns opt leaves the OCI default network namespace (empty path),
-		// so runc creates a FRESH netns per container — private loopback, no
-		// shared 127.0.0.1. Connectivity is wired after task-create, before
-		// start, by network.Attach (veth into the privasys0 bridge). Previously
-		// this was oci.WithHostNamespace(specs.NetworkNamespace), justified by
-		// "the TEE VM is the boundary" — true for ONE workload, but the platform
-		// co-locates mutually-untrusting apps, so each needs its own netns.
+		// Per-container network namespace: with no host-netns opt runc creates a
+		// FRESH netns per container (private loopback, no shared 127.0.0.1).
+		// The platform co-locates mutually-untrusting apps, so each needs its
+		// own. Connectivity is wired after task-create, before start, by
+		// network.Attach (veth into the privasys0 bridge).
 		//
 		// Bind-mount a resolv.conf with REAL upstream nameservers so DNS works
 		// inside the container. The host's /etc/resolv.conf points at
@@ -844,7 +840,7 @@ func (m *Manager) Create(ctx context.Context, spec manifest.Container, img clien
 	}
 
 	// Wire the container's fresh netns to the bridge on its deterministic IP
-	// (bugs-and-fixes #45). Done after task-create (the netns now exists,
+	//. Done after task-create (the netns now exists,
 	// identified by the init PID) and before start, so the process comes up
 	// with eth0 + default route + egress already in place. An internal-only
 	// container (no external port) still gets an isolated netns; it just has no
@@ -1042,7 +1038,7 @@ func (m *Manager) stop(ctx context.Context, name string, grace time.Duration) er
 		_ = mc.Container.Delete(ctx, client.WithSnapshotCleanup)
 	}
 
-	// Tear down the container's veth (bugs-and-fixes #45). The netns itself is
+	// Tear down the container's veth. The netns itself is
 	// reaped with the task; this frees the host-side interface + its bridge
 	// port so a later reload on the same port re-attaches cleanly.
 	if mc.Spec.Port > 0 {

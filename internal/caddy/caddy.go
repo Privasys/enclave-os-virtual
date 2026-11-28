@@ -308,9 +308,8 @@ func (c *Client) Reload() error {
 // has to re-read it: the per-host extensions file (a dependency-set update) and
 // the CA cert/key both live on disk, so the generated config is identical and a
 // plain Reload is a silent no-op — the module keeps serving the cached leaf and
-// the new OID 6.1 never reaches the wire. Observed in prod 2026-08-08: the
-// manager returned 200 and the extensions file was rewritten, but the leaf kept
-// its original NotBefore and advertised no dependency set.
+// the new OID 6.1 never reaches the wire (the leaf keeps its NotBefore and
+// advertises the old dependency set).
 func (c *Client) ReloadForce() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -572,13 +571,11 @@ func (c *Client) buildConfig() map[string]any {
 				// "request", NOT "require": ask every RA-TLS caller for a
 				// certificate, but let the handshake succeed without one.
 				//
-				// "require" rejected at the TLS layer, which broke every
-				// attested-but-certificate-less client — the wallet and the
-				// CLI both advertise this ALPN to reach the spliced enclave,
-				// and neither can produce a TEE-bound client certificate. On
-				// 2026-07-28 that locked users out of Drive entirely
-				// ("certificate required" during login) the moment
-				// allowed_callers was set.
+				// "require" would reject at the TLS layer every attested but
+				// certificate-less client: the wallet and the CLI both
+				// advertise this ALPN to reach the spliced enclave, and
+				// neither can produce a TEE-bound client certificate, so
+				// setting allowed_callers would lock their users out.
 				//
 				// Asking instead defers the decision to the manager, which is
 				// the only place with enough context to make it: a caller that

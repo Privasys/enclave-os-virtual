@@ -6,7 +6,7 @@
 // Its one hard invariant is that it NEVER stops reading the FIFOs: every
 // failure path (bad args, unwritable log dir, disk full) degrades to draining
 // into a discard or drop-mode sink, exactly like the cio.NullIO it replaces.
-// A logging problem must never become a container wedge (bugs-and-fixes #50).
+// A logging problem must never become a container wedge.
 //
 // Output goes to a per-container two-file ring under the log dir
 // (<dir>/<namespace>/<id>/{stdout,stderr}.log plus .1 predecessors), each file

@@ -905,12 +905,12 @@ func isHostCaller(host string) bool {
 	if ip.Equal(net.ParseIP(network.GatewayIP)) {
 		return true
 	}
-	// Measured on a live host (2026-09-05): a dial from the host to the bridge
-	// gateway 10.88.0.1 (what Caddy uses for every workload route) is sourced
-	// from the VM's PRIMARY interface address (10.200.x.y on GCE), not from the
-	// bridge address and not from loopback. "From the host" therefore means
-	// "from any address configured on one of this VM's interfaces"; containers
-	// live on the 10.88.0.0/16 subnet with their own addresses and never match.
+	// A dial from the host to the bridge gateway 10.88.0.1 (what Caddy uses
+	// for every workload route) is sourced from the VM's PRIMARY interface
+	// address (10.200.x.y on GCE), not from the bridge address and not from
+	// loopback. "From the host" therefore means "from any address configured
+	// on one of this VM's interfaces"; containers live on the 10.88.0.0/16
+	// subnet with their own addresses and never match.
 	return isLocalInterfaceAddr(ip)
 }
 
@@ -1964,13 +1964,12 @@ var metricMethods = map[string]bool{
 
 // metricsMiddleware counts requests by method, route and status.
 //
-// Every label must come from a bounded set. The path label used to be
-// r.URL.Path: this middleware wraps the whole listener, app traffic
-// included, so each distinct path any client sent became a permanent
-// series in the manager's memory (and the paths of other apps' users were
-// kept and served on /metrics). It is now "app" for proxied app traffic,
-// the matched pattern for the manager's own API, and "other" otherwise;
-// an unknown method is counted as "OTHER".
+// Every label must come from a bounded set, never the request path: this
+// middleware wraps the whole listener, app traffic included, so each
+// distinct path a client sent would become a permanent series (and other
+// apps' users' paths would be served on /metrics). The route is "app" for
+// proxied app traffic, the matched pattern for the manager's own API, and
+// "other" otherwise; an unknown method is counted as "OTHER".
 func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		route := new(string)
@@ -2325,8 +2324,7 @@ func (s *Server) configureGrant(r *http.Request, containerName string, st launch
 	sub, roles := c.Sub, c.Roles
 	// The role is keyed on the canonical hex app id, not the hyphenated UUID the
 	// control plane sends in the load envelope: the IdP pins app roles to
-	// [0-9a-f]{32}, so comparing against st.AppID verbatim never matches and every
-	// caller silently fell through to the owners-list fallback below.
+	// [0-9a-f]{32}.
 	if hexID := launcher.AppIDHex(st.AppID); hexID != "" {
 		aud := s.verifier.Audience()
 		ownerRole := aud + ":app:" + hexID + ":owner"
@@ -2346,7 +2344,7 @@ func (s *Server) configureGrant(r *http.Request, containerName string, st launch
 	}
 	for _, owner := range st.Owners {
 		if owner != "" && owner == sub {
-			s.log.Warn("configure authorized by owners-list fallback (token carries no app config role yet — run the config-role backfill)",
+			s.log.Warn("configure authorized by the owners-list fallback (the token carries no app config role)",
 				zap.String("container", containerName),
 				zap.String("sub", sub))
 			return sub, "owner", nil

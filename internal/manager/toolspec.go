@@ -30,13 +30,11 @@ const toolSpecTimeout = 10 * time.Second
 // That bearer is the fleet-wide machine credential: the same token also
 // authenticates check-in, runtime status, AI usage, per-call API fees and
 // attribute-voucher settle/release, and it fetches the attestation token used
-// to unseal vault keys. It used to be injected into every container's
-// environment as TOOL_SPEC_TOKEN, and a container can read its own
-// environment, so every workload on a host held the credential that gates
-// every other workload's management endpoints. On a shared VM that was a
-// cross-tenant capability.
+// to unseal vault keys. It never enters a container's environment: a
+// container can read its own, and on a shared VM that credential would let
+// one workload reach every other workload's management endpoints.
 //
-// The container now authenticates to the manager with its own per-container
+// The container authenticates to the manager with its own per-container
 // token (requireContainerSelf, bound to {name}) and the manager makes the
 // upstream call. The fleet credential never leaves the manager.
 //
@@ -93,8 +91,8 @@ func (s *Server) handleToolSpec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Relay the upstream status so the puller's own retry logic still sees
-	// what it used to see. Deliberately do NOT relay upstream headers: they
+	// Relay the upstream status so the puller's own retry logic sees the
+	// control plane's answer. Deliberately do NOT relay upstream headers: they
 	// are the manager's conversation with the management service, not the
 	// container's.
 	if ct := resp.Header.Get("Content-Type"); ct != "" {

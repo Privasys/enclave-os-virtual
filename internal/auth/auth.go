@@ -222,9 +222,9 @@ type oidcDiscovery struct {
 // A hit on a fresh cache takes only the read lock. A miss or a stale cache
 // refreshes the key set, but at most once per oidcJWKSMinRefresh across all
 // callers, and the network round trip holds refreshMu, not jwksMu, so it
-// never blocks lookups that hit. It used to hold the jwks write lock across
-// discovery and fetch on every miss: a caller sending tokens with random
-// kids serialised every verification behind its own IdP round trips.
+// never blocks lookups that hit: holding the jwks write lock across
+// discovery and fetch would let a caller sending tokens with random kids
+// serialise every verification behind its own IdP round trips.
 func (v *Verifier) getSigningKey(kid, alg string) (*jwkKey, error) {
 	if key, fresh := v.cachedKey(kid, alg); key != nil && fresh {
 		return key, nil

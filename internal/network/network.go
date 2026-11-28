@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 // Package network gives each container its OWN network namespace behind a
-// host bridge, replacing the historical "every container shares the host
-// network namespace" model (see bugs-and-fixes #45).
+// host bridge.
 //
 // Why: the platform co-locates multiple, mutually-untrusting apps on one
-// enclave. Under host networking they shared one loopback, so app A's
-// 127.0.0.1:<port> service (e.g. an embedded Postgres) was reachable by app B.
+// enclave. Sharing the host's network namespace would share one loopback,
+// so app A's 127.0.0.1:<port> service (an embedded Postgres, say) would be
+// reachable by app B.
 // With a private netns per container, 127.0.0.1 is private to each app, and
 // bridge PORT ISOLATION stops apps reaching each other's bridge IP too — the
 // gateway (manager) and egress are the only reachable peers.
@@ -65,11 +65,10 @@ const (
 	upstreamResolvConf = "/run/systemd/resolve/resolv.conf"
 	// fallbackNameserver{Primary,Secondary} are the public resolvers written
 	// into the container resolv.conf when no usable upstream is available.
-	// This used to be the link-local metadata IP (169.254.169.254), but
-	// containers are now firewalled off that address (Setup drops
-	// container->link-local; it exposes the VM's SA token and boot secrets),
-	// and pointing untrusted DNS at the untrusted host metadata plane leaked
-	// query names. Cloudflare + Google, reachable from any cloud via egress.
+	// Never the link-local metadata IP: containers are firewalled off it
+	// (Setup drops container->link-local; it exposes the VM's service account
+	// token and boot secrets), and the host's metadata plane would see every
+	// query name. Cloudflare and Google, reachable from any cloud.
 	fallbackNameserverPrimary   = "1.1.1.1"
 	fallbackNameserverSecondary = "8.8.8.8"
 	// linkLocalCIDR is the range every major cloud's instance metadata service
