@@ -18,8 +18,9 @@ import (
 // TestTheAppHostGatesRunInOrder pins the order of the gates an app request
 // goes through, through the whole handler: each case fails or passes several
 // gates at once and must get the answer of the first. The order is the
-// tool-subject assertion, then the billing freeze, the guarded route, the
-// configure gate and its freeze, and the fee gate last.
+// runtime's own paths, the tool-subject assertion, then the billing freeze,
+// the guarded route, the configure gate and its freeze, and the fee gate
+// last.
 func TestTheAppHostGatesRunInOrder(t *testing.T) {
 	ids, iss := newIdentityServer(t)
 	log := zap.NewNop()
@@ -71,6 +72,8 @@ func TestTheAppHostGatesRunInOrder(t *testing.T) {
 		code                          int
 		body                          string
 	}{
+		{"the runtime answers its holder paths before any gate", "GET", pausedHost, holderFilesPath, "", 404, "keeps nothing for its holders"},
+		{"and its capability paths", "GET", pausedHost, holderCapabilitiesPath, "", 404, "keeps nothing for its holders"},
 		{"a paused app answers before its route gate", "GET", pausedHost, "/v1/owner", "", 503, "app paused"},
 		{"the route gate answers before the configure freeze", "GET", host, "/v1/owner", "", 403, "route /v1/owner requires"},
 		{"past the route gate, the configure freeze holds", "GET", host, "/v1/owner", owner, 503, "awaiting initial configuration"},

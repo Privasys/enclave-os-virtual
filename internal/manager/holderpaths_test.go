@@ -1,9 +1,6 @@
 package manager
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -52,39 +49,5 @@ func TestOtherPathsAreTheApps(t *testing.T) {
 		if s.serveEnclaveHolderPaths(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "https://cai"+p, nil), "cai") {
 			t.Fatalf("%s: taken from the app", p)
 		}
-	}
-}
-
-// The dispatcher consults serveEnclaveHolderPaths and returns when it
-// answered, before any proxy to the app. A wiring check on the source, so
-// removing the call fails here.
-func TestDispatcherAsksHolderPathsFirst(t *testing.T) {
-	f, err := parser.ParseFile(token.NewFileSet(), "manager.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	found := false
-	ast.Inspect(f, func(n ast.Node) bool {
-		ifs, ok := n.(*ast.IfStmt)
-		if !ok {
-			return true
-		}
-		call, ok := ifs.Cond.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "serveEnclaveHolderPaths" {
-			return true
-		}
-		if len(ifs.Body.List) == 1 {
-			if _, ok := ifs.Body.List[0].(*ast.ReturnStmt); ok {
-				found = true
-			}
-		}
-		return true
-	})
-	if !found {
-		t.Fatal("manager.go must call `if s.serveEnclaveHolderPaths(...) { return }` in the app dispatcher")
 	}
 }
