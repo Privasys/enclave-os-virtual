@@ -19,6 +19,7 @@ import (
 
 	"github.com/Privasys/enclave-os-virtual/internal/tdx"
 	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
+	"github.com/Privasys/enclave-os-virtual/internal/ttlmap"
 	"go.uber.org/zap"
 )
 
@@ -90,10 +91,14 @@ type ingressVerifier struct {
 
 	mu       sync.RWMutex
 	policies map[string]*ingressPolicy // lowercase host → allowed callers
-	verdicts map[string]*peerVerdict   // connection id → verdict
-	// lastSweep is when expired verdicts were last dropped (at most once per
-	// verdictSweepInterval, and only once the table is large).
-	lastSweep time.Time
+	// verdicts maps a connection id to its verdict. Full of live verdicts, a
+	// new connection's evidence is refused: evicting a live verdict would
+	// fail a caller that did nothing wrong, while refusing fails only the
+	// newcomer, closed. Expired verdicts are swept once the table is large,
+	// at most once per verdictSweepInterval.
+	verdicts *ttlmap.Map[string, *peerVerdict]
+	// clock is the host clock the sweep reads (tests replace it).
+	clock func() time.Time
 }
 
 const (
@@ -101,37 +106,19 @@ const (
 	// expired ones; verdictSweepInterval bounds how often that happens.
 	verdictSweepAbove    = 4096
 	verdictSweepInterval = time.Second
-	// verdictMax caps the table. Full of live verdicts, a new connection's
-	// evidence is refused: evicting a live verdict would fail a caller that
-	// did nothing wrong, while refusing fails only the newcomer, closed.
+	// verdictMax caps the table.
 	verdictMax = 8192
 )
 
 // errVerdictTableFull refuses new caller evidence while the table is full.
 var errVerdictTableFull = fmt.Errorf("too many attested connections on this host; retry later")
 
-// recordVerdictLocked stores a connection's verdict, first dropping expired
-// verdicts when the table is large and the last sweep is older than
-// verdictSweepInterval. A connection's own
-// verdict is always replaced; a new one is refused while the table is full.
-// Callers hold v.mu.
+// recordVerdictLocked stores a connection's verdict: its own is always
+// replaced, a new one is refused while the table is full. Callers hold v.mu.
 func (v *ingressVerifier) recordVerdictLocked(conn string, pv *peerVerdict) error {
-	now := time.Now()
-	_, known := v.verdicts[conn]
-	// At most one sweep per interval, full or not: a full table must not make
-	// every new caller walk it under the lock every host's requests wait on.
-	if len(v.verdicts) > verdictSweepAbove && now.Sub(v.lastSweep) >= verdictSweepInterval {
-		v.lastSweep = now
-		for k, vd := range v.verdicts {
-			if now.Sub(vd.mono) > verdictTTL {
-				delete(v.verdicts, k)
-			}
-		}
-	}
-	if !known && len(v.verdicts) >= verdictMax {
+	if !v.verdicts.Put(conn, pv) {
 		return errVerdictTableFull
 	}
-	v.verdicts[conn] = pv
 	return nil
 }
 
@@ -161,13 +148,21 @@ func (p *ingressPolicy) admitsAnyCaller() bool {
 }
 
 func newIngressVerifier(log *zap.Logger, attServer func() (string, string), allowDebugImages bool) *ingressVerifier {
-	return &ingressVerifier{
+	v := &ingressVerifier{
 		log:              log.Named("ingress-verify"),
 		attServer:        attServer,
 		allowDebugImages: allowDebugImages,
 		policies:         make(map[string]*ingressPolicy),
-		verdicts:         make(map[string]*peerVerdict),
+		clock:            time.Now,
 	}
+	v.verdicts = ttlmap.New[string](ttlmap.Options[*peerVerdict]{
+		Max:        verdictMax,
+		SweepAbove: verdictSweepAbove,
+		SweepEvery: verdictSweepInterval,
+		Expired:    func(pv *peerVerdict, now time.Time) bool { return now.Sub(pv.mono) > verdictTTL },
+		Now:        func() (time.Time, bool) { return v.clock(), true },
+	})
+	return v
 }
 
 // setPolicy installs (or, with a nil policy, removes) the allowed-caller set for
@@ -241,7 +236,7 @@ func (v *ingressVerifier) enforce(r *http.Request) error {
 	fp := sha256.Sum256(certDER)
 
 	v.mu.RLock()
-	verdict := v.verdicts[conn]
+	verdict, _ := v.verdicts.Get(conn)
 	v.mu.RUnlock()
 	if verdict == nil || verdict.certFP != fp || !verdict.current() {
 		// A caller that presents a certificate must have proven it on this

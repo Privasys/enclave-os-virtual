@@ -171,30 +171,43 @@ func TestAppIDMatches(t *testing.T) {
 	}
 }
 
+// verdictClock drives the verdict table's sweep.
+type verdictClock struct{ t time.Time }
+
+func (c *verdictClock) now() time.Time      { return c.t }
+func (c *verdictClock) add(d time.Duration) { c.t = c.t.Add(d) }
+
+func clockedVerifier() (*ingressVerifier, *verdictClock) {
+	v := newTestVerifier()
+	c := &verdictClock{t: time.Now()}
+	v.clock = c.now
+	return v, c
+}
+
 // A large verdict table sweeps expired verdicts at most once per interval,
 // not on every insert.
 func TestVerdictSweepIsRateLimited(t *testing.T) {
-	v := newTestVerifier()
-	old := time.Now().Add(-2 * verdictTTL)
+	v, c := clockedVerifier()
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	for i := 0; i <= verdictSweepAbove; i++ {
-		v.verdicts[fmt.Sprintf("old-%d", i)] = &peerVerdict{mono: old}
+		_ = v.recordVerdictLocked(fmt.Sprintf("old-%d", i), &peerVerdict{mono: c.t})
 	}
-	_ = v.recordVerdictLocked("a", &peerVerdict{mono: time.Now()})
-	if n := len(v.verdicts); n != 1 {
+	c.add(2 * verdictTTL)
+	_ = v.recordVerdictLocked("a", &peerVerdict{mono: c.t})
+	if n := v.verdicts.Len(); n != 1 {
 		t.Fatalf("after the first sweep the table holds %d, want 1", n)
 	}
 	for i := 0; i <= verdictSweepAbove; i++ {
-		v.verdicts[fmt.Sprintf("old2-%d", i)] = &peerVerdict{mono: old}
+		_ = v.recordVerdictLocked(fmt.Sprintf("old2-%d", i), &peerVerdict{mono: c.t.Add(-2 * verdictTTL)})
 	}
-	_ = v.recordVerdictLocked("b", &peerVerdict{mono: time.Now()})
-	if n := len(v.verdicts); n != verdictSweepAbove+3 {
+	_ = v.recordVerdictLocked("b", &peerVerdict{mono: c.t})
+	if n := v.verdicts.Len(); n != verdictSweepAbove+3 {
 		t.Fatalf("a second sweep ran inside the interval: table holds %d", n)
 	}
-	v.lastSweep = time.Now().Add(-2 * verdictSweepInterval)
-	_ = v.recordVerdictLocked("c", &peerVerdict{mono: time.Now()})
-	if n := len(v.verdicts); n != 3 {
+	c.add(2 * verdictSweepInterval)
+	_ = v.recordVerdictLocked("c", &peerVerdict{mono: c.t})
+	if n := v.verdicts.Len(); n != 3 {
 		t.Fatalf("after the interval the table holds %d, want 3", n)
 	}
 }
@@ -204,36 +217,35 @@ func TestVerdictSweepIsRateLimited(t *testing.T) {
 // table sweeps no more often than any other (once per interval), and a
 // sweep after the interval frees the expired verdicts.
 func TestVerdictTableRefusesWhenFull(t *testing.T) {
-	v := newTestVerifier()
+	v, c := clockedVerifier()
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	for i := 0; i < verdictMax; i++ {
-		v.verdicts[fmt.Sprintf("live-%d", i)] = &peerVerdict{mono: time.Now()}
+		if err := v.recordVerdictLocked(fmt.Sprintf("live-%d", i), &peerVerdict{mono: c.t}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	v.lastSweep = time.Now()
-	if err := v.recordVerdictLocked("new", &peerVerdict{mono: time.Now()}); err != errVerdictTableFull {
+	if err := v.recordVerdictLocked("new", &peerVerdict{mono: c.t}); err != errVerdictTableFull {
 		t.Fatalf("a new verdict in a full table: %v", err)
 	}
-	if len(v.verdicts) != verdictMax || v.verdicts["new"] != nil {
+	if _, ok := v.verdicts.Get("new"); ok || v.verdicts.Len() != verdictMax {
 		t.Fatal("a live verdict was evicted, or the new one recorded")
 	}
-	if err := v.recordVerdictLocked("live-7", &peerVerdict{mono: time.Now()}); err != nil {
+	if err := v.recordVerdictLocked("live-7", &peerVerdict{mono: c.t}); err != nil {
 		t.Fatalf("a known connection's re-attestation was refused: %v", err)
 	}
 
-	old := time.Now().Add(-2 * verdictTTL)
-	for k := range v.verdicts {
-		v.verdicts[k] = &peerVerdict{mono: old}
+	for i := 0; i < verdictMax; i++ {
+		_ = v.recordVerdictLocked(fmt.Sprintf("live-%d", i), &peerVerdict{mono: c.t.Add(-2 * verdictTTL)})
 	}
-	v.lastSweep = time.Now()
-	if err := v.recordVerdictLocked("new", &peerVerdict{mono: time.Now()}); err != errVerdictTableFull {
+	if err := v.recordVerdictLocked("new", &peerVerdict{mono: c.t}); err != errVerdictTableFull {
 		t.Fatalf("a full table swept inside the interval: %v", err)
 	}
-	v.lastSweep = time.Now().Add(-2 * verdictSweepInterval)
-	if err := v.recordVerdictLocked("new", &peerVerdict{mono: time.Now()}); err != nil {
+	c.add(2 * verdictSweepInterval)
+	if err := v.recordVerdictLocked("new", &peerVerdict{mono: c.t}); err != nil {
 		t.Fatalf("a full table of expired verdicts was not swept: %v", err)
 	}
-	if len(v.verdicts) != 1 {
-		t.Fatalf("after the sweep the table holds %d, want 1", len(v.verdicts))
+	if v.verdicts.Len() != 1 {
+		t.Fatalf("after the sweep the table holds %d, want 1", v.verdicts.Len())
 	}
 }
