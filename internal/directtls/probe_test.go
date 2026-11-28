@@ -185,7 +185,9 @@ func TestIssuerPlacesNoOrderWhileTheProbeFails(t *testing.T) {
 	csrDER, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{DNSNames: []string{probeName}}, key)
 	csr, _ := x509.ParseCertificateRequest(csrDER)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// Long enough for the first probe to reach the gateway and fail on its
+	// certificate even under the race detector; it then keeps waiting.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if _, err := iss.Issue(ctx, csr); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Issue = %v, want it to keep waiting for the probe", err)

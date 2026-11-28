@@ -95,6 +95,11 @@ func (s *Service) waitForProbe(ctx context.Context, name string) error {
 	}
 	for {
 		err := s.probe(ctx, name)
+		if ctx.Err() != nil {
+			// Cut short by our own cancellation: that says nothing about the
+			// name, so the last real result stays in the status.
+			return ctx.Err()
+		}
 		s.setProbe(name, err)
 		if err == nil {
 			s.log.Info("direct name reachable for validation, ordering", zap.String("name", name))

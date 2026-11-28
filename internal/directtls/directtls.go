@@ -145,6 +145,7 @@ type app struct {
 	key        *ecdsa.PrivateKey
 	accountURI string
 	cache      *certmagic.Cache
+	storage    *appStorage
 	cancel     context.CancelFunc
 	ct         ctState
 }
@@ -245,14 +246,14 @@ func (s *Service) Apply(container, canonical string, domains []string, key *ecds
 	}
 	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
 
-	a := &app{canonical: canonical, domains: domains, key: key}
+	a := &app{canonical: canonical, domains: domains, key: key, storage: newAppStorage(s.storage)}
 	var magic *certmagic.Config
 	a.cache = certmagic.NewCache(certmagic.CacheOptions{
 		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) { return magic, nil },
 		Logger:           s.log,
 	})
 	magic = certmagic.New(a.cache, certmagic.Config{
-		Storage: s.storage,
+		Storage: a.storage,
 		Logger:  s.log,
 		OnEvent: func(_ context.Context, event string, data map[string]any) error {
 			if event == "cert_obtained" {
@@ -445,12 +446,18 @@ func (s *Service) markerPath(name string) string {
 	return filepath.Join(s.cfg.StorageRoot, MarkerDir, name+".json")
 }
 
+// stop ends the app's certificate management. Once it returns the app
+// writes nothing more to the shared storage (appStorage), so a caller may
+// purge a released name right after.
 func (a *app) stop() {
 	if a.cancel != nil {
 		a.cancel()
 	}
 	if a.cache != nil {
 		a.cache.Stop()
+	}
+	if a.storage != nil {
+		a.storage.stop()
 	}
 }
 
