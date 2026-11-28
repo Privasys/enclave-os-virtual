@@ -48,6 +48,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/tdx"
 	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
+	"github.com/Privasys/enclave-os-virtual/internal/ttlmap"
 	"go.uber.org/zap"
 )
 
@@ -161,20 +162,24 @@ func (g *capabilityGrant) denied() bool { return g != nil && g.Status == "denied
 // (per app id, so a redeploy of the same app keeps its key and its
 // grants); an empty dir keeps everything in memory (dev/test).
 type capabilityBroker struct {
-	mu      sync.Mutex
-	dir     string
-	log     *zap.Logger
-	keys    map[string]ed25519.PrivateKey // app id hex -> key
-	pending map[string]*capabilityPending // nonce -> ask
-	grants  map[string]*capabilityGrant   // grantKey -> outcome
+	mu   sync.Mutex
+	dir  string
+	log  *zap.Logger
+	keys map[string]ed25519.PrivateKey // app id hex -> key
+	// pending maps a nonce to its ask. No global cap: each container holds
+	// at most maxPendingAsksPerContainer (create refuses past it).
+	pending *ttlmap.Map[string, *capabilityPending]
+	grants  map[string]*capabilityGrant // grantKey -> outcome
 	// settled remembers, for the pending TTL, which outcome consumed a nonce:
 	// the wallet mints a holder folder here and then reports the outcome to
 	// "the app" on the nonce route, which is this same process. That second
 	// call must find the ask settled, not unknown.
-	settled map[string]*settledAsk // nonce -> outcome
-	// lastSweep is when expired asks and outcomes were last dropped; sweeps
-	// run at most once per capabilitySweepInterval.
-	lastSweep time.Time
+	// No cap of its own: each entry is a pending ask settled within the TTL.
+	settled *ttlmap.Map[string, *settledAsk] // nonce -> outcome
+	// sweepClock is the clock the tables sweep by (tests replace it). Both
+	// drop entries older than capabilityPendingTTL, at most once per
+	// capabilitySweepInterval; readers check expiry themselves.
+	sweepClock func() time.Time
 	// pushSlots bounds the wallet pushes (each one a quote and a round trip
 	// to the control plane) in flight at once.
 	pushSlots chan struct{}
@@ -206,15 +211,26 @@ func newCapabilityBroker(dir string, log *zap.Logger) *capabilityBroker {
 	if log == nil {
 		log = zap.NewNop()
 	}
-	return &capabilityBroker{
-		dir:       dir,
-		log:       log,
-		keys:      map[string]ed25519.PrivateKey{},
-		pending:   map[string]*capabilityPending{},
-		grants:    map[string]*capabilityGrant{},
-		settled:   map[string]*settledAsk{},
-		pushSlots: make(chan struct{}, maxCapabilityPushes),
+	b := &capabilityBroker{
+		dir:        dir,
+		log:        log,
+		keys:       map[string]ed25519.PrivateKey{},
+		grants:     map[string]*capabilityGrant{},
+		sweepClock: time.Now,
+		pushSlots:  make(chan struct{}, maxCapabilityPushes),
 	}
+	now := func() (time.Time, bool) { return b.sweepClock().UTC(), true }
+	b.pending = ttlmap.New[string](ttlmap.Options[*capabilityPending]{
+		SweepEvery: capabilitySweepInterval,
+		Expired:    func(p *capabilityPending, now time.Time) bool { return now.Sub(p.created) > capabilityPendingTTL },
+		Now:        now,
+	})
+	b.settled = ttlmap.New[string](ttlmap.Options[*settledAsk]{
+		SweepEvery: capabilitySweepInterval,
+		Expired:    func(s *settledAsk, now time.Time) bool { return now.Sub(s.at) > capabilityPendingTTL },
+		Now:        now,
+	})
+	return b
 }
 
 // tryPushSlot takes one of the push slots without waiting; release returns it.
@@ -352,7 +368,7 @@ func (b *capabilityBroker) create(container, appID, resourceApp, subject string,
 	}
 	b.sweepLocked()
 	n := 0
-	for _, q := range b.pending {
+	for _, q := range b.pending.All() {
 		if q.container == container {
 			n++
 		}
@@ -377,7 +393,7 @@ func (b *capabilityBroker) create(container, appID, resourceApp, subject string,
 		subject:   subject,
 		created:   time.Now().UTC(),
 	}
-	b.pending[p.Nonce] = p
+	b.pending.Put(p.Nonce, p)
 	return p, nil
 }
 
@@ -386,33 +402,19 @@ func (b *capabilityBroker) get(nonce string) (*capabilityPending, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.sweepLocked()
-	p, ok := b.pending[nonce]
+	p, ok := b.pending.Get(nonce)
 	if ok && time.Since(p.created) > capabilityPendingTTL {
 		return nil, false
 	}
 	return p, ok
 }
 
-// sweepLocked drops expired asks and outcomes, at most once per
-// capabilitySweepInterval. Readers still check expiry themselves (an entry
-// may outlive its TTL by up to one interval).
+// sweepLocked drops expired asks and outcomes when a sweep is due. Readers
+// still check expiry themselves (an entry may outlive its TTL by up to one
+// interval).
 func (b *capabilityBroker) sweepLocked() {
-	now := time.Now().UTC()
-	if now.Sub(b.lastSweep) < capabilitySweepInterval {
-		return
-	}
-	b.lastSweep = now
-	cut := now.Add(-capabilityPendingTTL)
-	for n, p := range b.pending {
-		if p.created.Before(cut) {
-			delete(b.pending, n)
-		}
-	}
-	for n, s := range b.settled {
-		if s.at.Before(cut) {
-			delete(b.settled, n)
-		}
-	}
+	b.pending.Sweep()
+	b.settled.Sweep()
 }
 
 // settledBy returns the outcome that consumed nonce, when it was settled
@@ -421,7 +423,7 @@ func (b *capabilityBroker) settledBy(nonce, container string) (*capabilityGrant,
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.sweepLocked()
-	s, ok := b.settled[nonce]
+	s, ok := b.settled.Get(nonce)
 	if !ok || s.container != container || time.Since(s.at) > capabilityPendingTTL {
 		return nil, false
 	}
@@ -432,12 +434,12 @@ func (b *capabilityBroker) settledBy(nonce, container string) (*capabilityGrant,
 // outcome must not overwrite a later, narrower one).
 func (b *capabilityBroker) resolve(nonce, status, capabilityID string, result map[string]string) (*capabilityPending, *capabilityGrant, error) {
 	b.mu.Lock()
-	p, ok := b.pending[nonce]
+	p, ok := b.pending.Get(nonce)
 	if !ok || time.Since(p.created) > capabilityPendingTTL {
 		b.mu.Unlock()
 		return nil, nil, errors.New("unknown or expired capability request")
 	}
-	delete(b.pending, nonce)
+	b.pending.Delete(nonce)
 	g := &capabilityGrant{
 		Resource:      p.resource,
 		CapabilityID:  capabilityID,
@@ -450,7 +452,7 @@ func (b *capabilityBroker) resolve(nonce, status, capabilityID string, result ma
 	}
 	key := grantKey(p.appID, p.resource, p.subject)
 	b.grants[key] = g
-	b.settled[nonce] = &settledAsk{container: p.container, grant: g, at: g.At}
+	b.settled.Put(nonce, &settledAsk{container: p.container, grant: g, at: g.At})
 	b.mu.Unlock()
 	if err := b.persist(p.appID, key, g); err != nil {
 		// The outcome holds for this process either way; failing the wallet's
@@ -992,7 +994,7 @@ func (b *capabilityBroker) pendingFor(container, resource, subject string) (*cap
 	defer b.mu.Unlock()
 	b.sweepLocked()
 	cut := time.Now().UTC().Add(-capabilityPendingTTL)
-	for _, p := range b.pending {
+	for _, p := range b.pending.All() {
 		if p.container == container && p.resource == resource && p.subject == subject && !p.created.Before(cut) {
 			return p, true
 		}

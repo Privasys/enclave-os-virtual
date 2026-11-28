@@ -258,8 +258,10 @@ func TestCapabilityAsksAndPushesAreBounded(t *testing.T) {
 
 	// An expired ask is not served even when the sweep has not run yet.
 	b.mu.Lock()
-	b.pending[other.Nonce].created = time.Now().UTC().Add(-2 * capabilityPendingTTL)
-	b.lastSweep = time.Now().UTC()
+	p, _ := b.pending.Get(other.Nonce)
+	p.created = time.Now().UTC().Add(-2 * capabilityPendingTTL)
+	// A clock that never advances: no sweep is ever due.
+	b.sweepClock = func() time.Time { return time.Time{} }
 	b.mu.Unlock()
 	if _, ok := b.get(other.Nonce); ok {
 		t.Fatal("an expired ask was served")
