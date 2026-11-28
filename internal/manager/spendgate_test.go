@@ -195,29 +195,36 @@ func TestSpendGateMgmtOutageFailsOpenWithCache(t *testing.T) {
 		t.Fatal(code)
 	}
 	f.mgmt.Close()
-	f.gate.verdicts = map[string]spendVerdict{} // force a re-ask
+	for k := range f.gate.verdicts.All() { // force a re-ask
+		f.gate.verdicts.Delete(k)
+	}
 	r2 := f.request(t, "cai.apps.test", "alice")
 	if code, _ := f.gate.enforce(r2, "cai.apps.test", ""); code != 0 || r2.Header.Get(spend.HeaderPayer) != "alice" {
 		t.Fatalf("outage with nothing cached must serve: %d", code)
 	}
 }
 
-// The verdict cache drops long-expired verdicts and never grows past its cap.
+// The verdict cache drops long-expired verdicts and never grows past its cap:
+// full, a new answer is not cached and no cached one is evicted for it.
 func TestSpendVerdictCacheIsBounded(t *testing.T) {
 	g := newSpendGate(zap.NewNop(), "", "", "")
 	now := time.Unix(1_700_000_000, 0)
+	g.now = func() time.Time { return now }
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.storeVerdictLocked("old", spendVerdict{billable: true, until: now}, now)
+	g.verdicts.Put("old", spendVerdict{billable: true, until: now})
 	now = now.Add(spendVerdictKeep + 2*spendVerdictSweep)
-	g.storeVerdictLocked("fresh", spendVerdict{billable: true, until: now.Add(spendVerdictOK)}, now)
-	if _, ok := g.verdicts["old"]; ok {
+	g.verdicts.Put("fresh", spendVerdict{billable: true, until: now.Add(spendVerdictOK)})
+	if _, ok := g.verdicts.Get("old"); ok {
 		t.Fatal("a verdict expired beyond the keep window survived the sweep")
 	}
 	for i := 0; i < spendVerdictMax+100; i++ {
-		g.storeVerdictLocked(fmt.Sprintf("k%d", i), spendVerdict{until: now.Add(time.Minute)}, now)
+		g.verdicts.Put(fmt.Sprintf("k%d", i), spendVerdict{until: now.Add(time.Minute)})
 	}
-	if n := len(g.verdicts); n != spendVerdictMax {
+	if n := g.verdicts.Len(); n != spendVerdictMax {
 		t.Fatalf("cache holds %d, want the cap %d", n, spendVerdictMax)
+	}
+	if _, ok := g.verdicts.Get("fresh"); !ok {
+		t.Fatal("a cached verdict was evicted for a newcomer")
 	}
 }

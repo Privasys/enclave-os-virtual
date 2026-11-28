@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
+	"github.com/Privasys/enclave-os-virtual/internal/ttlmap"
 )
 
 // Spend tokens (acting-subject plan v2): the paying user behind a call.
@@ -47,8 +48,8 @@ const (
 	// spendVerdictKeep is how long an expired verdict is kept as the outage
 	// fallback before it is dropped.
 	spendVerdictKeep = time.Hour
-	// spendVerdictMax caps the verdict cache; at the cap an arbitrary entry
-	// makes room for the new one.
+	// spendVerdictMax caps the verdict cache. Full, a new answer is not cached
+	// (the next call asks again); no cached answer is evicted for it.
 	spendVerdictMax = 10_000
 	// spendVerdictSweep bounds how often the cache is swept.
 	spendVerdictSweep = time.Minute
@@ -71,9 +72,11 @@ type spendGate struct {
 	token   string
 	http    *http.Client
 
-	mu        sync.Mutex
-	verdicts  map[string]spendVerdict
-	lastSweep time.Time
+	mu sync.Mutex
+	// verdicts caches billable answers per (user, ledger, app), at most
+	// spendVerdictMax; verdicts expired for longer than spendVerdictKeep go at
+	// a sweep, at most once per spendVerdictSweep.
+	verdicts *ttlmap.Map[string, spendVerdict]
 
 	revMu   sync.RWMutex
 	revoked map[string]struct{}
@@ -86,15 +89,20 @@ type spendGate struct {
 // gate then only strips): a fleet without an IdP cannot name a payer.
 func newSpendGate(log *zap.Logger, issuer, mgmtURL, enclaveToken string) *spendGate {
 	g := &spendGate{
-		log:      log.Named("spend"),
-		issuer:   strings.TrimRight(issuer, "/"),
-		mgmtURL:  strings.TrimRight(mgmtURL, "/"),
-		token:    enclaveToken,
-		http:     &http.Client{Timeout: 10 * time.Second},
-		verdicts: map[string]spendVerdict{},
-		revoked:  map[string]struct{}{},
-		now:      time.Now,
+		log:     log.Named("spend"),
+		issuer:  strings.TrimRight(issuer, "/"),
+		mgmtURL: strings.TrimRight(mgmtURL, "/"),
+		token:   enclaveToken,
+		http:    &http.Client{Timeout: 10 * time.Second},
+		revoked: map[string]struct{}{},
+		now:     time.Now,
 	}
+	g.verdicts = ttlmap.New[string](ttlmap.Options[spendVerdict]{
+		Max:        spendVerdictMax,
+		SweepEvery: spendVerdictSweep,
+		Expired:    func(v spendVerdict, now time.Time) bool { return now.Sub(v.until) > spendVerdictKeep },
+		Now:        func() (time.Time, bool) { return g.now(), true },
+	})
 	if g.issuer != "" {
 		g.verifier = spend.NewVerifier(g.issuer, g.http)
 		g.verifier.Revoked = g.isRevoked
@@ -190,7 +198,7 @@ func (g *spendGate) billable(ctx context.Context, p *spend.Payer) (bool, string)
 	key := p.Sub + "|" + p.Ledger + "|" + p.AppID
 	now := g.now()
 	g.mu.Lock()
-	v, cached := g.verdicts[key]
+	v, cached := g.verdicts.Get(key)
 	g.mu.Unlock()
 	if cached && now.Before(v.until) {
 		return v.billable, v.reason
@@ -208,30 +216,9 @@ func (g *spendGate) billable(ctx context.Context, p *spend.Payer) (bool, string)
 		ttl = spendVerdictNo
 	}
 	g.mu.Lock()
-	g.storeVerdictLocked(key, spendVerdict{billable: ok, reason: reason, until: now.Add(ttl)}, now)
+	g.verdicts.Put(key, spendVerdict{billable: ok, reason: reason, until: now.Add(ttl)})
 	g.mu.Unlock()
 	return ok, reason
-}
-
-// storeVerdictLocked caches a verdict, dropping verdicts expired for longer
-// than spendVerdictKeep (at most once per spendVerdictSweep) and keeping the
-// cache within spendVerdictMax.
-func (g *spendGate) storeVerdictLocked(key string, v spendVerdict, now time.Time) {
-	if now.Sub(g.lastSweep) >= spendVerdictSweep {
-		g.lastSweep = now
-		for k, old := range g.verdicts {
-			if now.Sub(old.until) > spendVerdictKeep {
-				delete(g.verdicts, k)
-			}
-		}
-	}
-	if _, ok := g.verdicts[key]; !ok && len(g.verdicts) >= spendVerdictMax {
-		for k := range g.verdicts {
-			delete(g.verdicts, k)
-			break
-		}
-	}
-	g.verdicts[key] = v
 }
 
 func (g *spendGate) askBillable(ctx context.Context, p *spend.Payer) (bool, string, error) {
