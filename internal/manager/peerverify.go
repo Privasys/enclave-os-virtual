@@ -11,7 +11,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -596,14 +595,4 @@ func (s *Server) handleEgressEvidence(w http.ResponseWriter, r *http.Request) {
 
 func b64urlDecode(s string) ([]byte, error) {
 	return base64.RawURLEncoding.DecodeString(strings.TrimRight(s, "="))
-}
-
-// isDevImageProfile reports whether this VM runs a non-production ("dev") image,
-// read from the dm-verity-measured /etc/privasys/image-profile marker.
-func isDevImageProfile() bool {
-	b, err := os.ReadFile("/etc/privasys/image-profile")
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(string(b)) == "dev"
 }

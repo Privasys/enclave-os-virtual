@@ -250,6 +250,7 @@ func runServe(args []string) error {
 		// The list the control plane pushes replaces the flag once present.
 		ProxyProtocolStatePath: "/data/manager-proxy-protocol.json",
 		ManagerHostname:        managerHostname,
+		ImageProfile:           profile,
 		PlatformHostname:       platformHostname,
 		AppDomain:              pin.AppDomain,
 		ManagementPort:         "9443",
@@ -293,6 +294,7 @@ func runServe(args []string) error {
 	mgrCfg := manager.Config{
 		Addr:             ":9443",
 		PlatformHostname: platformHostname,
+		ImageProfile:     profile,
 		// /data is the per-VM LUKS-encrypted volume — keep the registry
 		// here (entries may carry Env values flagged secret; volume keys
 		// are never persisted). Set to empty to disable persistence.

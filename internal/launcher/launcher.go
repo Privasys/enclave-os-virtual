@@ -105,6 +105,10 @@ type Config struct {
 	// (e.g. "v-fr-1.example.com").  Set by the caller via --platform-hostname.
 	PlatformHostname string
 
+	// ImageProfile is the measured image profile ("production" or "dev",
+	// internal/pinned), stamped at OID 2.8.
+	ImageProfile string
+
 	// ManagerHostname is the control plane's name for this manager
 	// (<enclave name>-mgr.<app domain>, internal/mgrname), whose certificate
 	// carries the platform extensions too, and which no app may serve. Empty:
@@ -2805,22 +2809,6 @@ type ContainerStatus struct {
 // Caddy's RA-TLS module when issuing the platform RA-TLS certificate.
 //
 // Must be called with l.mu held (or at startup before concurrency).
-// imageProfilePath is the marker baked into the dm-verity-measured
-// rootfs that records the image build flavor ("production" or "dev").
-// Package variable so tests can point it at a fixture.
-var imageProfilePath = "/etc/privasys/image-profile"
-
-// imageProfile reads the measured image profile, for the OID 2.8 extension.
-// The manager does not start without one (pinned.Current), so "" is only
-// seen off an image, in tests.
-func imageProfile() string {
-	b, err := os.ReadFile(imageProfilePath)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(b))
-}
-
 func (l *Launcher) writePlatformExtensions() error {
 	if l.cfg.ExtensionsDir == "" || l.cfg.PlatformHostname == "" {
 		return nil
@@ -2843,7 +2831,7 @@ func (l *Launcher) writePlatformExtensions() error {
 		h := l.attestationServersHash
 		exts = append(exts, oids.Extension(oids.AttestationServersHash, h[:]))
 	}
-	if p := imageProfile(); p != "" {
+	if p := l.cfg.ImageProfile; p != "" {
 		exts = append(exts, oids.Extension(oids.ImageProfile, []byte(p)))
 	}
 	// Enclave Instance ID (OID 1.3): the management-service enclave_id this

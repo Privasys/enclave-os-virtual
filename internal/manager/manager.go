@@ -147,6 +147,10 @@ type Config struct {
 	// uniformly to platform and container traffic — see docs/ra-tls.md.
 	PlatformHostname string
 
+	// ImageProfile is the measured image profile ("production" or "dev",
+	// internal/pinned).
+	ImageProfile string
+
 	// RegistryPath is the on-disk JSON file persisting every successful
 	// container Load so the manager can replay them on restart.
 	// Keep it on the per-VM LUKS-encrypted /data volume — entries may
@@ -332,7 +336,7 @@ func New(cfg Config, log *zap.Logger, l *launcher.Launcher, v *auth.Verifier) *S
 	// Ingress mutual-RA-TLS verifier. It resolves the attestation server from
 	// the launcher (updated at runtime via PUT /api/v1/attestation-servers) and
 	// permits dev-image callers only when this VM itself runs a dev image.
-	s.ingress = newIngressVerifier(s.log, l.PrimaryAttestationServer, isDevImageProfile())
+	s.ingress = newIngressVerifier(s.log, l.PrimaryAttestationServer, cfg.ImageProfile == "dev")
 	s.publicLimiter = newPublicLimiter()
 	// Spend-token gate: verifies against the same IdP the sealed relay
 	// trusts, asks mgmt (enclave bearer) whether the payer may spend.
