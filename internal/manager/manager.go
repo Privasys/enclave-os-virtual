@@ -549,6 +549,35 @@ func (s *Server) Start(ctx context.Context) error {
 	// Revoked-consent feed for the spend gate (no-op without an IdP).
 	go s.spend.runRevokedPoller(ctx)
 
+	s.server = &http.Server{
+		Addr:    s.cfg.Addr,
+		Handler: s.handler(),
+	}
+
+	// Start serving in a goroutine.
+	errCh := make(chan error, 1)
+	go func() {
+		s.log.Info("management API listening (plain HTTP, Caddy handles TLS)",
+			zap.String("addr", s.cfg.Addr),
+		)
+		errCh <- s.server.ListenAndServe()
+	}()
+
+	// Wait for context cancellation or server error.
+	select {
+	case <-ctx.Done():
+		s.log.Info("shutting down management API")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		return s.server.Shutdown(shutdownCtx)
+	case err := <-errCh:
+		return err
+	}
+}
+
+// handler is the manager's whole HTTP surface: the platform API and every
+// app host, behind the session relay and the metrics middleware.
+func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// Liveness probe — always unauthenticated (used by infra health checks).
@@ -892,30 +921,7 @@ func (s *Server) Start(ctx context.Context) error {
 		setRouteLabel(r, r.Pattern)
 	})
 
-	s.server = &http.Server{
-		Addr:    s.cfg.Addr,
-		Handler: s.metricsMiddleware(s.sessionRelay.Middleware(dispatcher)),
-	}
-
-	// Start serving in a goroutine.
-	errCh := make(chan error, 1)
-	go func() {
-		s.log.Info("management API listening (plain HTTP, Caddy handles TLS)",
-			zap.String("addr", s.cfg.Addr),
-		)
-		errCh <- s.server.ListenAndServe()
-	}()
-
-	// Wait for context cancellation or server error.
-	select {
-	case <-ctx.Done():
-		s.log.Info("shutting down management API")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer cancel()
-		return s.server.Shutdown(shutdownCtx)
-	case err := <-errCh:
-		return err
-	}
+	return s.metricsMiddleware(s.sessionRelay.Middleware(dispatcher))
 }
 
 // requireAuth wraps a handler with authentication.
