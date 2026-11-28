@@ -14,6 +14,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/edge"
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
 	"github.com/Privasys/enclave-os-virtual/internal/surfaces"
+	"github.com/Privasys/enclave-os-virtual/internal/ttlmap"
 )
 
 // The clear leg. A request that reaches an app in plaintext on the
@@ -426,13 +427,14 @@ func (w *timedPublicWriter) record() {
 		zap.Int("status", w.status), zap.Duration("duration", time.Since(w.start)))
 }
 
-// publicLimiter is a per-(host, client) token bucket. Buckets idle for a
-// while are swept so the map cannot grow with the number of clients seen.
+// publicLimiter is a per-(host, client) token bucket.
 type publicLimiter struct {
-	mu      sync.Mutex
-	buckets map[string]*bucket
+	mu sync.Mutex
+	// buckets holds at most maxLimiterBuckets; full, a client without a
+	// bucket is refused until the sweep (buckets idle for limiterIdle, at
+	// most once per limiterGCInterval) frees room.
+	buckets *ttlmap.Map[string, *bucket]
 	creds   map[string]uint64
-	lastGC  time.Time
 	now     func() time.Time
 }
 
@@ -444,9 +446,8 @@ type bucket struct {
 const limiterGCInterval = time.Minute
 const limiterIdle = 5 * time.Minute
 
-// maxLimiterBuckets caps the bucket table. When it is full a client without
-// a bucket is refused until the periodic sweep frees room, so the table (and
-// the sweep under the lock) stays bounded however many addresses arrive.
+// maxLimiterBuckets caps the bucket table, so it (and the sweep under the
+// lock) stays bounded however many addresses arrive.
 const maxLimiterBuckets = 50_000
 
 // limiterClientKey is the client part of a bucket key: an IPv4 address as
@@ -461,7 +462,14 @@ func limiterClientKey(client string) string {
 }
 
 func newPublicLimiter() *publicLimiter {
-	return &publicLimiter{buckets: map[string]*bucket{}, creds: map[string]uint64{}, now: time.Now}
+	l := &publicLimiter{creds: map[string]uint64{}, now: time.Now}
+	l.buckets = ttlmap.New[string](ttlmap.Options[*bucket]{
+		Max:        maxLimiterBuckets,
+		SweepEvery: limiterGCInterval,
+		Expired:    func(b *bucket, now time.Time) bool { return now.Sub(b.last) > limiterIdle },
+		Now:        func() (time.Time, bool) { return l.now(), true },
+	})
+	return l
 }
 
 func (l *publicLimiter) allow(host, client string, rps float64, burst int) bool {
@@ -471,22 +479,14 @@ func (l *publicLimiter) allow(host, client string, rps float64, burst int) bool 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
-	if now.Sub(l.lastGC) >= limiterGCInterval {
-		for k, b := range l.buckets {
-			if now.Sub(b.last) > limiterIdle {
-				delete(l.buckets, k)
-			}
-		}
-		l.lastGC = now
-	}
+	l.buckets.Sweep()
 	key := host + "|" + limiterClientKey(client)
-	b := l.buckets[key]
-	if b == nil {
-		if len(l.buckets) >= maxLimiterBuckets {
+	b, ok := l.buckets.Get(key)
+	if !ok {
+		b = &bucket{tokens: float64(burst), last: now}
+		if !l.buckets.Put(key, b) {
 			return false
 		}
-		b = &bucket{tokens: float64(burst), last: now}
-		l.buckets[key] = b
 	}
 	b.tokens += now.Sub(b.last).Seconds() * rps
 	if b.tokens > float64(burst) {
@@ -513,9 +513,9 @@ func (l *publicLimiter) forget(host string) {
 	host = publicHostKey(host)
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for k := range l.buckets {
+	for k := range l.buckets.All() {
 		if strings.HasPrefix(k, host+"|") {
-			delete(l.buckets, k)
+			l.buckets.Delete(k)
 		}
 	}
 	delete(l.creds, host)

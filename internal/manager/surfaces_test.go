@@ -359,7 +359,7 @@ func TestServePublicHostSpellingsShareState(t *testing.T) {
 		t.Fatalf("credentials seen = %v, want one entry for %q", seen, surfHost)
 	}
 	s.publicLimiter.forget(strings.ToUpper(surfHost) + ".")
-	if len(s.PublicCredentialsSeen()) != 0 || len(s.publicLimiter.buckets) != 0 {
+	if len(s.PublicCredentialsSeen()) != 0 || s.publicLimiter.buckets.Len() != 0 {
 		t.Fatal("forget must clear every spelling of the host")
 	}
 }
@@ -381,14 +381,14 @@ func TestPublicLimiterBoundsAndIPv6Prefix(t *testing.T) {
 	}
 
 	// A full table refuses a new client but keeps serving known ones.
-	for i := len(l.buckets); i < maxLimiterBuckets; i++ {
-		l.buckets[fmt.Sprintf("fill|%d", i)] = &bucket{tokens: 1, last: now}
+	for i := l.buckets.Len(); i < maxLimiterBuckets; i++ {
+		l.buckets.Put(fmt.Sprintf("fill|%d", i), &bucket{tokens: 1, last: now})
 	}
 	if l.allow("h", "198.51.100.1", 1, 5) {
 		t.Fatal("a full table must refuse a new client")
 	}
-	if len(l.buckets) != maxLimiterBuckets {
-		t.Fatalf("table grew past the cap: %d", len(l.buckets))
+	if l.buckets.Len() != maxLimiterBuckets {
+		t.Fatalf("table grew past the cap: %d", l.buckets.Len())
 	}
 	now = now.Add(2 * time.Second)
 	if !l.allow("h", "2001:db8:1:3::2", 1, 1) {
