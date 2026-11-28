@@ -57,7 +57,6 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/extensions"
 	"github.com/Privasys/enclave-os-virtual/internal/manifest"
 	"github.com/Privasys/enclave-os-virtual/internal/merkle"
-	"github.com/Privasys/enclave-os-virtual/internal/mgrname"
 	"github.com/Privasys/enclave-os-virtual/internal/network"
 	"github.com/Privasys/enclave-os-virtual/internal/oids"
 	"github.com/Privasys/enclave-os-virtual/internal/routeauth"
@@ -102,17 +101,18 @@ type Config struct {
 	// /data), which replaces ProxyProtocolFrom once present.
 	ProxyProtocolStatePath string
 
-	// MachineName is the instance machine name (e.g. "prod1").
-	MachineName string
-
 	// PlatformHostname is the FQDN for the management API route in Caddy
 	// (e.g. "v-fr-1.example.com").  Set by the caller via --platform-hostname.
 	PlatformHostname string
 
+	// ManagerHostname is the control plane's name for this manager
+	// (<enclave name>-mgr.<app domain>, internal/mgrname), whose certificate
+	// carries the platform extensions too, and which no app may serve. Empty:
+	// no such name, or it is the platform hostname.
+	ManagerHostname string
+
 	// AppDomain is the image profile's pinned app domain (pinned.Settings):
-	// the control plane reaches this manager at
-	// <MachineName>-mgr.<AppDomain> (internal/mgrname), whose certificate
-	// must carry the platform extensions too. Empty: no such name.
+	// an app's hostname is one label under it, and no direct domain is.
 	AppDomain string
 
 	// ManagementPort is the local port for the management API
@@ -140,17 +140,13 @@ type Config struct {
 	// is omitted from RA-TLS certificates (data partition is unencrypted).
 	DEKOriginFile string
 
-	// ToolSpecMgmtURL, ToolSpecEnclaveID, ToolSpecEnclaveToken are used
-	// to synthesise the per-container env vars TOOL_SPEC_URL +
-	// TOOL_SPEC_TOKEN that the confidential-ai puller polls for the
-	// fleet's MCP tool catalogue. When any of the three is empty the
-	// env vars are not injected, and tool-using workloads will run with
-	// an empty catalogue. Sourced from the manager's --mgmt-url /
-	// --enclave-id / --enclave-token (i.e. /data/manager.env) — no
-	// per-app config needed.
-	ToolSpecMgmtURL      string
-	ToolSpecEnclaveID    string
-	ToolSpecEnclaveToken string
+	// MgmtURL, EnclaveID and EnclaveToken are the control plane and this
+	// enclave's identity and credential towards it (--mgmt-url, --enclave-id,
+	// --enclave-token). They feed the tool catalogue, backups, vault keys and
+	// the enclave id at OID 1.3; any empty one is a pre-registration enclave.
+	MgmtURL      string
+	EnclaveID    string
+	EnclaveToken string
 
 	// Issuer is the platform identity provider (the manager's OIDC
 	// issuer), injected as PRIVASYS_ISSUER so an app fetches spend tokens
@@ -474,22 +470,6 @@ func rewriteHealthCheckHost(hc *manifest.HealthCheck, port int) *manifest.Health
 	return &out
 }
 
-// parseAppID decodes a UUID string (with or without hyphens) into its raw 16
-// bytes for the OID 3.6 app-id attestation extension. Returns nil for empty or
-// malformed input, which leaves the vault identity in MR_ENCLAVE shape (enclave
-// + code digest only) - the backward-compatible default before the platform
-// starts sending app_id. See the MR_APP / promote-step-up design.
-func parseAppID(s string) []byte {
-	if s == "" {
-		return nil
-	}
-	b, err := hex.DecodeString(strings.ReplaceAll(s, "-", ""))
-	if err != nil || len(b) != 16 {
-		return nil
-	}
-	return b
-}
-
 // AppIDHex normalises an app id string (a UUID, with or without hyphens) to the
 // canonical 32-char lowercase hex encoding: the form the per-app IdP roles use
 // (<audience>:app:<hex>:owner|admin, which the IdP pins to [0-9a-f]{32}) and the
@@ -497,7 +477,7 @@ func parseAppID(s string) []byte {
 // UUID, so the role string must be built from this — never from the raw field.
 // Returns "" for empty or malformed input.
 func AppIDHex(s string) string {
-	b := parseAppID(s)
+	b := oids.IDBytes(s)
 	if b == nil {
 		return ""
 	}
@@ -948,23 +928,8 @@ func (l *Launcher) Run(ctx context.Context) error {
 	l.log.Info("manager ready (no containers loaded)",
 		zap.String("platform_merkle_root", hex.EncodeToString(platformRoot[:])),
 		zap.Int("attestation_servers", len(l.cfg.AttestationServers)),
-		zap.String("machine_name", l.cfg.MachineName),
 		zap.String("platform_hostname", l.cfg.PlatformHostname),
 	)
-	// The manager's name as the control plane derives it from the enclave
-	// name (registration sends machine-name as that name). If an operator
-	// renames the enclave, the control plane's name moves and this one does
-	// not: compare this line with the enclave's manager hostname in the
-	// control plane.
-	if mgr := l.managerHostname(); mgr != "" {
-		l.log.Info("manager hostname carries the platform extensions",
-			zap.String("manager_hostname", mgr), zap.String("machine_name", l.cfg.MachineName),
-			zap.String("app_domain", l.cfg.AppDomain))
-	} else if l.cfg.AppDomain != "" {
-		l.log.Warn("no manager hostname could be derived: its certificate will carry no platform extensions",
-			zap.String("machine_name", l.cfg.MachineName), zap.String("app_domain", l.cfg.AppDomain))
-	}
-
 	// 3. Set up Caddy routes if configured.
 	if l.caddyClient != nil {
 		// Write the platform OID extensions for the management API hostname.
@@ -1344,10 +1309,10 @@ func (l *Launcher) resolveSessionRelayKey(ctx context.Context, req LoadRequest, 
 		Endpoints:            req.VaultEndpoints,
 		MrenclaveHex:         req.VaultMrenclave,
 		AttestationServerURL: req.VaultAttestationServer,
-		MgmtURL:              l.cfg.ToolSpecMgmtURL,
-		EnclaveID:            l.cfg.ToolSpecEnclaveID,
-		EnclaveToken:         l.cfg.ToolSpecEnclaveToken,
-	}, req.SessionRelayKeyHandle, req.SessionRelayKeyGrant, imageDigest, parseAppID(req.AppId))
+		MgmtURL:              l.cfg.MgmtURL,
+		EnclaveID:            l.cfg.EnclaveID,
+		EnclaveToken:         l.cfg.EnclaveToken,
+	}, req.SessionRelayKeyHandle, req.SessionRelayKeyGrant, imageDigest, oids.IDBytes(req.AppId))
 	if err != nil {
 		l.log.Warn("session-relay identity key: vault resolve failed; keeping ephemeral key (restarts force re-auth)",
 			zap.String("host", host), zap.String("handle", req.SessionRelayKeyHandle), zap.Error(err))
@@ -1544,7 +1509,7 @@ func (l *Launcher) ingressAttestationToken() string {
 		l.mu.Unlock()
 		return tok
 	}
-	mgmtURL, encID, encTok := l.cfg.ToolSpecMgmtURL, l.cfg.ToolSpecEnclaveID, l.cfg.ToolSpecEnclaveToken
+	mgmtURL, encID, encTok := l.cfg.MgmtURL, l.cfg.EnclaveID, l.cfg.EnclaveToken
 	l.mu.Unlock()
 	if mgmtURL == "" || encID == "" || encTok == "" {
 		return ""
@@ -1733,10 +1698,10 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 			Endpoints:            req.VaultEndpoints,
 			MrenclaveHex:         req.VaultMrenclave,
 			AttestationServerURL: req.VaultAttestationServer,
-			MgmtURL:              l.cfg.ToolSpecMgmtURL,
-			EnclaveID:            l.cfg.ToolSpecEnclaveID,
-			EnclaveToken:         l.cfg.ToolSpecEnclaveToken,
-		}, req.RegistrySecretHandle, reqDigest, parseAppID(req.AppId))
+			MgmtURL:              l.cfg.MgmtURL,
+			EnclaveID:            l.cfg.EnclaveID,
+			EnclaveToken:         l.cfg.EnclaveToken,
+		}, req.RegistrySecretHandle, reqDigest, oids.IDBytes(req.AppId))
 		vcancel()
 		if err != nil {
 			return nil, fmt.Errorf("launcher: registry credential: %w", err)
@@ -1898,9 +1863,9 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				// mgmt-service (it has no OIDC key); reuse the MGMT_URL +
 				// ENCLAVE_ID + ENCLAVE_TOKEN it already holds for
 				// runtime-status.
-				MgmtURL:      l.cfg.ToolSpecMgmtURL,
-				EnclaveID:    l.cfg.ToolSpecEnclaveID,
-				EnclaveToken: l.cfg.ToolSpecEnclaveToken,
+				MgmtURL:      l.cfg.MgmtURL,
+				EnclaveID:    l.cfg.EnclaveID,
+				EnclaveToken: l.cfg.EnclaveToken,
 				// Secure the LV BEFORE the DEK is created, so the two commit in
 				// an order we can recover from. A key created for a volume that
 				// then cannot be allocated (an exhausted pool is the common
@@ -1914,7 +1879,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 				BeforeProvision: func() error {
 					return l.volMgr.Reserve(req.Name, req.Storage)
 				},
-			}, req.KeyHandle, req.KeyCreationGrant, digest, parseAppID(req.AppId))
+			}, req.KeyHandle, req.KeyCreationGrant, digest, oids.IDBytes(req.AppId))
 			vcancel()
 			if err != nil {
 				return nil, fmt.Errorf("launcher: vault volume key: %w", err)
@@ -2026,7 +1991,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// the same behaviour as before this wire-up.
 	// Point the puller at the manager rather than straight at mgmt-service.
 	//
-	// TOOL_SPEC_TOKEN used to carry l.cfg.ToolSpecEnclaveToken, which is the
+	// TOOL_SPEC_TOKEN used to carry l.cfg.EnclaveToken, which is the
 	// fleet-wide enclave bearer: the same credential also authenticates
 	// check-in, runtime status, AI usage, per-call API fees and
 	// attribute-voucher settle/release, and it fetches the attestation token
@@ -2039,7 +2004,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	// authenticates the container by its own per-container token. The
 	// workload's contract is unchanged: same two variables, one authenticated
 	// GET, same body — so no app image needs rebuilding.
-	if l.cfg.ToolSpecMgmtURL != "" && l.cfg.ToolSpecEnclaveID != "" && l.cfg.ToolSpecEnclaveToken != "" {
+	if l.cfg.MgmtURL != "" && l.cfg.EnclaveID != "" && l.cfg.EnclaveToken != "" {
 		runtimeEnv["TOOL_SPEC_URL"] = network.ManagerURL() +
 			"/api/v1/containers/" + url.PathEscape(req.Name) + "/tool-spec"
 		runtimeEnv["TOOL_SPEC_TOKEN"] = containerToken
@@ -2103,7 +2068,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	l.specs[req.Name] = spec
 	l.pulledImages[req.Name] = img
 	l.imageDigests[req.Name] = digest
-	if appID := parseAppID(req.AppId); appID != nil {
+	if appID := oids.IDBytes(req.AppId); appID != nil {
 		l.appIDs[req.Name] = appID
 	}
 	if len(req.ResourceDecls) > 0 {
@@ -2485,15 +2450,15 @@ func (l *Launcher) RotateVolumeKey(ctx context.Context, req RotateRequest) error
 	if len(digest) == 0 {
 		return fmt.Errorf("launcher: rotate: no image digest recorded for %q", req.Name)
 	}
-	appID := parseAppID(req.AppId)
+	appID := oids.IDBytes(req.AppId)
 	mkCfg := func(endpoints []string, mrenclave, attServer string) vaultkey.Config {
 		return vaultkey.Config{
 			Endpoints:            endpoints,
 			MrenclaveHex:         mrenclave,
 			AttestationServerURL: attServer,
-			MgmtURL:              l.cfg.ToolSpecMgmtURL,
-			EnclaveID:            l.cfg.ToolSpecEnclaveID,
-			EnclaveToken:         l.cfg.ToolSpecEnclaveToken,
+			MgmtURL:              l.cfg.MgmtURL,
+			EnclaveID:            l.cfg.EnclaveID,
+			EnclaveToken:         l.cfg.EnclaveToken,
 		}
 	}
 	oldCfg := mkCfg(req.VaultEndpoints, req.VaultMrenclave, req.VaultAttestationServer)
@@ -2883,7 +2848,7 @@ func (l *Launcher) writePlatformExtensions() error {
 	}
 	// Enclave Instance ID (OID 1.3): the management-service enclave_id this
 	// VM registered under, when the platform supplied it.
-	if id := enclaveIDBytes(l.cfg.ToolSpecEnclaveID); id != nil {
+	if id := oids.IDBytes(l.cfg.EnclaveID); id != nil {
 		exts = append(exts, oids.Extension(oids.EnclaveInstanceID, id))
 	}
 
@@ -2894,39 +2859,12 @@ func (l *Launcher) writePlatformExtensions() error {
 	// it: clients reach the management API there (through the gateway), and
 	// a certificate without the platform extensions is rightly refused. No
 	// other unknown name gets them: those keep the bare leaf.
-	if mgr := l.managerHostname(); mgr != "" {
+	if mgr := l.cfg.ManagerHostname; mgr != "" {
 		if err := extensions.Write(l.cfg.ExtensionsDir, mgr, exts, ""); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// managerHostname is the control plane's name for this manager
-// (<MachineName>-mgr.<AppDomain>), or "" when it cannot be derived or equals
-// the platform hostname. A pure function of the config: it is called from
-// inside loads, which hold l.mu, so it must never take a lock. No app may
-// serve this name (Load refuses it), so an app's extensions file is never
-// overwritten with the platform's.
-func (l *Launcher) managerHostname() string {
-	mgr := mgrname.ManagerHostname(l.cfg.MachineName, l.cfg.AppDomain)
-	if mgr == "" || strings.EqualFold(mgr, l.cfg.PlatformHostname) {
-		return ""
-	}
-	return mgr
-}
-
-// enclaveIDBytes parses a UUID string into its 16 raw bytes, or nil.
-func enclaveIDBytes(s string) []byte {
-	h := strings.ReplaceAll(strings.TrimSpace(s), "-", "")
-	if len(h) != 32 {
-		return nil
-	}
-	b, err := hex.DecodeString(h)
-	if err != nil {
-		return nil
-	}
-	return b
 }
 
 // writeContainerExtensions writes the per-container OID extensions to the
@@ -2962,7 +2900,7 @@ func (l *Launcher) writeContainerExtensions(containerName, hostname string, port
 	exts := oids.ContainerExtensions(root, digest, spec.Image, volEnc, l.storageFacts[containerName], l.appIDs[containerName])
 	// Enclave Instance ID (OID 1.3), as on the manager's leaf: lets a client
 	// pin a deployment to the host it runs on.
-	if id := enclaveIDBytes(l.cfg.ToolSpecEnclaveID); id != nil {
+	if id := oids.IDBytes(l.cfg.EnclaveID); id != nil {
 		exts = append(exts, oids.Extension(oids.EnclaveInstanceID, id))
 	}
 

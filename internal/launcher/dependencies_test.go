@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	ratls "enclave-os-mini/clients/go/ratls"
+
 	"github.com/Privasys/enclave-os-virtual/internal/caddy"
 	"github.com/Privasys/enclave-os-virtual/internal/manifest"
 	"github.com/Privasys/enclave-os-virtual/internal/merkle"
@@ -179,7 +180,7 @@ func TestSetDependenciesUnknownContainer(t *testing.T) {
 func TestWriteContainerExtensionsStampsEnclaveInstanceID(t *testing.T) {
 	dir := t.TempDir()
 	l := depTestLauncher(t, dir, nil)
-	l.cfg.ToolSpecEnclaveID = "dfe7de7b-ec36-4fda-a4e4-5b8422f851a3"
+	l.cfg.EnclaveID = "dfe7de7b-ec36-4fda-a4e4-5b8422f851a3"
 
 	l.mu.Lock()
 	err := l.writeContainerExtensions("app1", "app1.apps.privasys.org", 10101)

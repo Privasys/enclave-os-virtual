@@ -24,7 +24,7 @@ import (
 // checkPlatformName refuses the names the platform keeps for itself. A pure
 // function of the config: safe with or without l.mu.
 func (l *Launcher) checkPlatformName(name string) error {
-	if mgr := l.managerHostname(); mgr != "" && strings.EqualFold(name, mgr) {
+	if mgr := l.cfg.ManagerHostname; mgr != "" && strings.EqualFold(name, mgr) {
 		return fmt.Errorf("hostname %s is this enclave's manager hostname", name)
 	}
 	if l.cfg.PlatformHostname != "" && strings.EqualFold(name, l.cfg.PlatformHostname) {

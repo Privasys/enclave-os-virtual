@@ -45,11 +45,11 @@ func extensionOIDs(t *testing.T, path string) []string {
 func TestManagerHostnameCarriesThePlatformExtensions(t *testing.T) {
 	dir := t.TempDir()
 	l := New(Config{
-		ExtensionsDir:     dir,
-		PlatformHostname:  "m6-dev.privasys.org",
-		MachineName:       "m6-dev",
-		AppDomain:         "apps.test.privasys.org",
-		ToolSpecEnclaveID: "dfe7de7b-ec36-4fda-a4e4-5b8422f851a3",
+		ExtensionsDir:    dir,
+		PlatformHostname: "m6-dev.privasys.org",
+		ManagerHostname:  "m6-dev-mgr.apps.test.privasys.org",
+		AppDomain:        "apps.test.privasys.org",
+		EnclaveID:        "dfe7de7b-ec36-4fda-a4e4-5b8422f851a3",
 	}, zap.NewNop())
 	l.platformTree = merkle.New([]merkle.Leaf{{Name: "test", Data: []byte("x")}})
 
@@ -76,11 +76,10 @@ func TestManagerHostnameCarriesThePlatformExtensions(t *testing.T) {
 	}
 }
 
-// Without a pinned app domain (unpinned builds) no manager name is derived,
-// and nothing beyond the platform hostname is written.
-func TestNoManagerNameWithoutAnAppDomain(t *testing.T) {
+// Without a manager hostname nothing beyond the platform hostname is written.
+func TestNoManagerNameNoExtraExtensions(t *testing.T) {
 	dir := t.TempDir()
-	l := New(Config{ExtensionsDir: dir, PlatformHostname: "m6-dev.privasys.org", MachineName: "m6-dev"}, zap.NewNop())
+	l := New(Config{ExtensionsDir: dir, PlatformHostname: "m6-dev.privasys.org"}, zap.NewNop())
 	l.platformTree = merkle.New([]merkle.Leaf{{Name: "test", Data: []byte("x")}})
 	if err := l.writePlatformExtensions(); err != nil {
 		t.Fatal(err)
@@ -94,7 +93,7 @@ func TestNoManagerNameWithoutAnAppDomain(t *testing.T) {
 // No app may take the manager's hostname: its certificate would show the
 // platform's identity, and the app's own extensions file would be replaced.
 func TestLoadRefusesTheManagerHostname(t *testing.T) {
-	l := New(Config{MachineName: "m6-dev", AppDomain: "apps.test.privasys.org"}, zap.NewNop())
+	l := New(Config{ManagerHostname: "m6-dev-mgr.apps.test.privasys.org", AppDomain: "apps.test.privasys.org"}, zap.NewNop())
 	for _, h := range []string{"m6-dev-mgr.apps.test.privasys.org", "M6-DEV-MGR.apps.test.privasys.org"} {
 		_, err := l.Load(context.Background(), LoadRequest{Name: "evil", Image: "example.invalid/x@sha256:" + strings.Repeat("0", 64), Hostname: h, Port: 8081})
 		if err == nil || !strings.Contains(err.Error(), "manager hostname") {

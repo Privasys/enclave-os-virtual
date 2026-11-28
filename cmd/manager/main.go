@@ -31,6 +31,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/enclaveauth"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/manager"
+	"github.com/Privasys/enclave-os-virtual/internal/mgrname"
 	"github.com/Privasys/enclave-os-virtual/internal/network"
 	"github.com/Privasys/enclave-os-virtual/internal/pinned"
 	"github.com/Privasys/enclave-os-virtual/internal/runtimestatus"
@@ -221,6 +222,21 @@ func runServe(args []string) error {
 	} else if *machineName != "" {
 		platformHostname = *machineName + "." + *hostname
 	}
+	// The control plane's name for this manager, from the enclave name it
+	// registered under (registration sends the machine name). If an operator
+	// renames the enclave, the control plane's name moves and this one does
+	// not: compare this line with the enclave's manager hostname there.
+	managerHostname := mgrname.ManagerHostname(*machineName, pin.AppDomain)
+	if strings.EqualFold(managerHostname, platformHostname) {
+		managerHostname = ""
+	}
+	if managerHostname != "" {
+		log.Info("manager hostname carries the platform extensions",
+			zap.String("manager_hostname", managerHostname), zap.String("machine_name", *machineName))
+	} else {
+		log.Warn("no manager hostname could be derived: its certificate will carry no platform extensions",
+			zap.String("machine_name", *machineName), zap.String("app_domain", pin.AppDomain))
+	}
 
 	// Configure launcher.
 	launcherCfg := launcher.Config{
@@ -233,7 +249,7 @@ func runServe(args []string) error {
 		ProxyProtocolFrom: splitList(*proxyProtocolFrom),
 		// The list the control plane pushes replaces the flag once present.
 		ProxyProtocolStatePath: "/data/manager-proxy-protocol.json",
-		MachineName:            *machineName,
+		ManagerHostname:        managerHostname,
 		PlatformHostname:       platformHostname,
 		AppDomain:              pin.AppDomain,
 		ManagementPort:         "9443",
@@ -241,16 +257,12 @@ func runServe(args []string) error {
 		CAKeyPath:              *caKeyPath,
 		AttestationServers:     []string{pin.AttestationServer},
 		DEKOriginFile:          *dekOriginFile,
-		// Wire tool-spec puller env injection. The launcher only
-		// synthesises TOOL_SPEC_* env vars when ALL three are set —
-		// pre-bootstrap (no enclave_id / token) leaves containers
-		// running with an empty catalogue, same as before.
-		ToolSpecMgmtURL:      *rsMgmtURL,
-		ToolSpecEnclaveID:    *rsEnclaveID,
-		ToolSpecEnclaveToken: *rsEnclaveToken,
-		IsolationUserns:      *isolationUserns,
-		Issuer:               pin.Issuer,
-		Audience:             pin.Audience,
+		MgmtURL:                *rsMgmtURL,
+		EnclaveID:              *rsEnclaveID,
+		EnclaveToken:           *rsEnclaveToken,
+		IsolationUserns:        *isolationUserns,
+		Issuer:                 pin.Issuer,
+		Audience:               pin.Audience,
 	}
 	// Bring up the container bridge + egress NAT + manager-port guard before
 	// any container is loaded or the management API binds (#45). Fatal on

@@ -25,18 +25,17 @@ package bootstrap
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/Privasys/enclave-os-virtual/internal/oids"
 	"github.com/Privasys/enclave-os-virtual/internal/vaultkey"
 )
 
@@ -231,14 +230,13 @@ func writeOrigin(origin string) error {
 	return writeFileAtomic(keySourcePath, []byte("vault\n"), 0o644)
 }
 
-// enclaveIDBytes converts the enclave UUID into the 16 raw bytes stamped at
-// OID 3.6 of the manager's vault client identity (same encoding as an app id).
+// enclaveIDBytes is the enclave id stamped at OID 3.6 of the manager's vault
+// client identity (the same encoding as an app id).
 func enclaveIDBytes(id string) ([]byte, error) {
-	b, err := hex.DecodeString(strings.ReplaceAll(id, "-", ""))
-	if err != nil || len(b) != 16 {
-		return nil, fmt.Errorf("dek: bad enclave id %q", id)
+	if b := oids.IDBytes(id); b != nil {
+		return b, nil
 	}
-	return b, nil
+	return nil, fmt.Errorf("dek: bad enclave id %q", id)
 }
 
 // isLuks and exportToken read the LUKS2 header (tests replace them).

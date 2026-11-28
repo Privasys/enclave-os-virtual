@@ -40,6 +40,7 @@ package oids
 import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -219,4 +220,15 @@ func ContainerExtensions(configMerkleRoot [32]byte, imageDigest []byte, imageRef
 		exts = append(exts, Extension(WorkloadAppID, appID))
 	}
 	return exts
+}
+
+// IDBytes decodes an id the platform writes as a UUID (with or without
+// hyphens) into the 16 raw bytes the identity extensions carry: the enclave
+// id at 1.3, the app id at 3.6. It is nil for anything that is not one.
+func IDBytes(s string) []byte {
+	b, err := hex.DecodeString(strings.ReplaceAll(strings.TrimSpace(s), "-", ""))
+	if err != nil || len(b) != 16 {
+		return nil
+	}
+	return b
 }

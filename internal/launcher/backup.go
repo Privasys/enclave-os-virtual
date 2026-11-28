@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Privasys/enclave-os-virtual/internal/backup"
+	"github.com/Privasys/enclave-os-virtual/internal/oids"
 	"github.com/Privasys/enclave-os-virtual/internal/vaultkey"
 )
 
@@ -104,7 +105,7 @@ func backupRequestFor(req LoadRequest, p BackupPolicy) BackupRequest {
 		Name: req.Name, AppId: req.AppId, KeyHandle: req.KeyHandle,
 		VaultEndpoints: req.VaultEndpoints, VaultMrenclave: req.VaultMrenclave,
 		VaultAttestationServer: req.VaultAttestationServer,
-		Target: p.Target, Retention: p.Retention, Description: "scheduled",
+		Target:                 p.Target, Retention: p.Retention, Description: "scheduled",
 	}
 }
 
@@ -244,14 +245,14 @@ func (l *Launcher) backupContextFor(req BackupRequest) (*backupContext, error) {
 	}
 	return &backupContext{
 		digest: digest,
-		appID:  parseAppID(req.AppId),
+		appID:  oids.IDBytes(req.AppId),
 		cfg: vaultkey.Config{
 			Endpoints:            req.VaultEndpoints,
 			MrenclaveHex:         req.VaultMrenclave,
 			AttestationServerURL: req.VaultAttestationServer,
-			MgmtURL:              l.cfg.ToolSpecMgmtURL,
-			EnclaveID:            l.cfg.ToolSpecEnclaveID,
-			EnclaveToken:         l.cfg.ToolSpecEnclaveToken,
+			MgmtURL:              l.cfg.MgmtURL,
+			EnclaveID:            l.cfg.EnclaveID,
+			EnclaveToken:         l.cfg.EnclaveToken,
 		},
 	}, nil
 }

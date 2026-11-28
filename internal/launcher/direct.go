@@ -29,6 +29,7 @@ import (
 
 	"github.com/Privasys/enclave-os-virtual/internal/directtls"
 	"github.com/Privasys/enclave-os-virtual/internal/extensions"
+	"github.com/Privasys/enclave-os-virtual/internal/oids"
 )
 
 // directBranchInfo is the HKDF label of the direct-TLS branch of an app's
@@ -70,7 +71,7 @@ func (l *Launcher) applySignedPolicy(req *LoadRequest) {
 	l.approvedMu.Lock()
 	src := l.signedPolicy
 	l.approvedMu.Unlock()
-	raw := parseAppID(req.AppId)
+	raw := oids.IDBytes(req.AppId)
 	if src == nil || len(raw) == 0 {
 		return
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/directtls"
 	"github.com/Privasys/enclave-os-virtual/internal/manifest"
 	"github.com/Privasys/enclave-os-virtual/internal/merkle"
+	"github.com/Privasys/enclave-os-virtual/internal/mgrname"
 )
 
 const (
@@ -64,7 +65,7 @@ func hostTestLauncher(t *testing.T, appDomain string) (*Launcher, string, *fakeD
 	l := New(Config{
 		ExtensionsDir:    extDir,
 		PlatformHostname: testPlatform,
-		MachineName:      "m6-dev",
+		ManagerHostname:  mgrname.ManagerHostname("m6-dev", appDomain),
 		AppDomain:        appDomain,
 	}, zap.NewNop())
 	l.caddyClient = caddy.NewClient(caddy.Config{AdminAddr: strings.TrimPrefix(admin.URL, "http://")}, zap.NewNop())
@@ -289,7 +290,7 @@ func TestOneOwnerWithoutAnAppDomain(t *testing.T) {
 // F10: a load's hostname is one concrete lowercase name directly under the
 // app domain, never a pattern and never a platform name.
 func TestLoadHostnameIsOneConcreteName(t *testing.T) {
-	l := New(Config{MachineName: "m6-dev", PlatformHostname: testPlatform, AppDomain: testAppDomain}, zap.NewNop())
+	l := New(Config{ManagerHostname: mgrname.ManagerHostname("m6-dev", testAppDomain), PlatformHostname: testPlatform, AppDomain: testAppDomain}, zap.NewNop())
 	for _, h := range []string{
 		"*." + testAppDomain,
 		"*",
