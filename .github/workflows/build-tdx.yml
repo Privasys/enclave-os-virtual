@@ -61,7 +61,7 @@ env:
   CVM_KERNEL_TAG: kernel-v0.5.2
   CVM_IMAGES_TAG: tdx-base-v0.4.1
   RA_TLS_CLIENTS_REF: 9847bb912706a7c040998c1f4fa0cd3043782c1c
-  VAULTS_CLIENT_REF: 06c6cfa123fcd0bab28b51da9e4f44ebe8b37010
+  VAULTS_CLIENT_REF: d3aab925133c9a5d99391b03e92601943a4dff71
   XCADDY_VERSION: v0.4.7
   CADDY_VERSION: v2.11.7
   # kopia baked into the image: bump version and release checksum together.
