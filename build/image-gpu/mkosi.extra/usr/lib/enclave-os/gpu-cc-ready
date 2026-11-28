@@ -1,17 +1,26 @@
 #!/bin/bash
-# Set the NVIDIA confidential-computing GPUs-ready state when it is not set
-# (see gpu-cc-ready.service). The measured replacement for step 3a of the old
-# metadata startup-script.
+# Sets the NVIDIA confidential-computing GPUs-ready state when it is not set
+# (gpu-cc-ready.service), and fails when the GPUs are still not ready after:
+# with the distro module cvm-runtime-init leaves it unset, and every CUDA
+# call then fails with "system not yet initialized" (Error 802).
 set -uo pipefail
 if ! command -v nvidia-smi >/dev/null 2>&1; then
 	echo "no nvidia-smi: nothing to do"
 	exit 0
 fi
-state=$(nvidia-smi conf-compute --get-gpus-ready-state 2>/dev/null | awk '/Ready state/ {print $NF}')
-if [ "$state" = "ready" ]; then
+ready() {
+	[ "$(nvidia-smi conf-compute --get-gpus-ready-state 2>/dev/null | awk '/Ready state/ {print $NF}')" = "ready" ]
+}
+if ready; then
 	echo "NVIDIA CC already ready"
 	exit 0
 fi
-echo "forcing NVIDIA conf-compute GPUs-ready-state = 1"
-nvidia-smi -pm 1 2>&1 | head -2 || true
-nvidia-smi conf-compute -srs 1 2>&1 | head -2 || true
+echo "setting NVIDIA conf-compute GPUs-ready-state = 1"
+# Persistence mode is best effort; the ready state is what CUDA needs.
+nvidia-smi -pm 1 2>&1 | head -2
+nvidia-smi conf-compute -srs 1 2>&1 | head -2
+if ! ready; then
+	echo "FATAL: the NVIDIA confidential-computing GPUs are not ready" >&2
+	exit 1
+fi
+echo "NVIDIA CC ready"

@@ -2,9 +2,8 @@
 Description=Enclave OS (GPU) — set the NVIDIA confidential-computing GPUs-ready state
 Documentation=https://github.com/Privasys/enclave-os-virtual
 # cvm-runtime-init sets the ready state only when it loads the patched module
-# from /data/nvidia-cc-bundle; with the distro module it skips the step and
-# every CUDA call fails with "system not yet initialized" (Error 802). This
-# flips it, as the metadata startup-script used to, from the measured image.
+# from /data/nvidia-cc-bundle; this sets it with the distro module too, and
+# fails when the GPUs are still not ready.
 After=cvm-runtime-init.service disk-mounter.service data.mount
 Wants=cvm-runtime-init.service
 Before=manager.service

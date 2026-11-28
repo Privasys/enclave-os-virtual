@@ -1,20 +1,18 @@
 #!/bin/sh
 set -eu
 
-# Configure NVIDIA container runtime for containerd.
-# nvidia-ctk modifies the containerd config to register the nvidia
-# runtime, allowing containers to access GPUs automatically.
+# containerd runs GPU containers through the nvidia runtime, which nvidia-ctk
+# registers in its config.
 if command -v nvidia-ctk >/dev/null 2>&1; then
     nvidia-ctk runtime configure --runtime=containerd \
         --config=/etc/containerd/config.toml
     echo "Configured NVIDIA container runtime for containerd"
 fi
 
-# Freeze the real runc as /usr/sbin/runc.real (bind-mount target for
-# the runc-nvidia wrapper installed by cvm-runtime-init). The package's
-# binary path moved between snapshots (/usr/sbin vs /usr/bin), so
-# resolve whichever exists; a missing runc.real breaks every GPU
-# container at task-create time.
+# The real runc is kept as /usr/sbin/runc.real, where cvm-runtime-init binds
+# its runc-nvidia wrapper; without it every GPU container fails at task
+# creation. The package installs runc under /usr/sbin or /usr/bin depending
+# on the snapshot.
 if [ ! -e /usr/sbin/runc.real ]; then
     if [ -f /usr/sbin/runc ]; then
         cp -a /usr/sbin/runc /usr/sbin/runc.real
@@ -26,46 +24,5 @@ if [ ! -e /usr/sbin/runc.real ]; then
     fi
 fi
 
-# Strip sshd from production images. The gcp profile's
-# google-compute-engine package drags in openssh-server as a dependency
-# — AFTER the cvm-images no-sshd assertion ran on the base image — so
-# prod enclaves were shipping a running ssh.service (R14, 2026-07
-# release). The dev profile installs openssh explicitly and keeps it;
-# only a proven "production" image-profile marker triggers removal.
-profile=$(cat /etc/privasys/image-profile 2>/dev/null || echo unknown)
-if [ "$profile" = "production" ]; then
-    rm -f /usr/sbin/sshd
-    systemctl mask ssh.service ssh.socket sshd.service 2>/dev/null || true
-    echo "production profile: sshd binary removed and units masked"
-    if [ -e /usr/sbin/sshd ]; then
-        echo "FATAL: sshd still present in production image" >&2
-        exit 1
-    fi
-fi
-
-# No instance metadata runs as code, on every profile (see
-# build/image/mkosi.postinst.chroot). On bare metal the host answers
-# 169.254.169.254 itself.
-. /usr/lib/enclave-os/strip-metadata-exec.sh
-systemctl enable instance-hostname.service enclave-checkin.service gpu-cc-ready.service
-
-# First-boot dm-integrity format budget for the data PD. Same drop-in the
-# base image installs (build/image/mkosi.postinst.chroot): the What= device
-# of data.mount appears only after luks-data.service finishes, which on a
-# FIRST boot includes the multi-minute dm-integrity format (~1 min per
-# 13 GB). Without this, the GPU image waited systemd's default ~90 s and
-# every first-boot GPU provisioning lost the race by design — observed on
-# m4-tdx-gpu-netherlands 2026-08-24: data.mount dep-failed while luks-data
-# was still formatting, the sealed bootstrap payload had nowhere to
-# persist, and the enclave wedged (token consumed, config lost). The
-# escaped unit name cannot live in mkosi.extra on a Windows checkout,
-# hence postinst. PDs beyond ~200 GB need a bump.
-mkdir -p '/usr/lib/systemd/system/dev-mapper-data\x2dcrypt.device.d'
-cat > '/usr/lib/systemd/system/dev-mapper-data\x2dcrypt.device.d/50-luks-format-timeout.conf' <<'DROPIN'
-[Unit]
-JobRunningTimeoutSec=15min
-DROPIN
-echo "data-crypt device timeout drop-in installed (gpu)"
-
-# The guest clock is kept correct from NTS (etc/chrony/chrony.conf).
-systemctl enable chrony.service
+. /usr/lib/enclave-os/postinst-common.sh
+systemctl enable gpu-cc-ready.service
