@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"slices"
 	"testing"
 
 	"go.uber.org/zap"
@@ -145,7 +146,7 @@ func TestHasMonitoringAccess(t *testing.T) {
 	}
 }
 
-func TestCheckRole_ConfiguredMap(t *testing.T) {
+func TestCollectRoles_ConfiguredMap(t *testing.T) {
 	claims := map[string]interface{}{
 		"app_roles": map[string]interface{}{
 			"privasys-platform:manager": map[string]interface{}{
@@ -153,33 +154,33 @@ func TestCheckRole_ConfiguredMap(t *testing.T) {
 			},
 		},
 	}
-	if !checkRole(claims, "privasys-platform:manager", "app_roles") {
+	if !slices.Contains(collectRoles(claims, "app_roles"), "privasys-platform:manager") {
 		t.Fatal("expected configured map role to match")
 	}
-	if checkRole(claims, "privasys-platform:monitoring", "app_roles") {
+	if slices.Contains(collectRoles(claims, "app_roles"), "privasys-platform:monitoring") {
 		t.Fatal("expected monitoring role not to match")
 	}
 }
 
-func TestCheckRole_StandardArray(t *testing.T) {
+func TestCollectRoles_StandardArray(t *testing.T) {
 	claims := map[string]interface{}{
 		"roles": []interface{}{"privasys-platform:monitoring", "user"},
 	}
-	if !checkRole(claims, "privasys-platform:monitoring", "roles") {
+	if !slices.Contains(collectRoles(claims, "roles"), "privasys-platform:monitoring") {
 		t.Fatal("expected standard roles array to match")
 	}
-	if checkRole(claims, "privasys-platform:manager", "roles") {
+	if slices.Contains(collectRoles(claims, "roles"), "privasys-platform:manager") {
 		t.Fatal("expected manager role not in standard roles")
 	}
 }
 
-func TestCheckRole_KeycloakRealmAccess(t *testing.T) {
+func TestCollectRoles_KeycloakRealmAccess(t *testing.T) {
 	claims := map[string]interface{}{
 		"realm_access": map[string]interface{}{
 			"roles": []interface{}{"privasys-platform:manager"},
 		},
 	}
-	if !checkRole(claims, "privasys-platform:manager", "roles") {
+	if !slices.Contains(collectRoles(claims, "roles"), "privasys-platform:manager") {
 		t.Fatal("expected Keycloak realm_access role to match")
 	}
 }
@@ -187,7 +188,7 @@ func TestCheckRole_KeycloakRealmAccess(t *testing.T) {
 func TestCollectRoles_AllClaimPaths(t *testing.T) {
 	// The configure-authz gate reads the FULL role list (it looks for
 	// <audience>:app:<hex>:owner|admin, not a fixed platform tier), so
-	// collectRoles must surface roles from every path checkRole consults:
+	// collectRoles must surface roles from every claim path:
 	// the configured claim (map or array), the standard "roles" array, and
 	// Keycloak's realm_access.roles — de-duplicated.
 	claims := map[string]interface{}{

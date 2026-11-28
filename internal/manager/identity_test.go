@@ -196,7 +196,7 @@ func TestSealedAssertsTheInnerBearersProfile(t *testing.T) {
 
 func TestAssertProfileLeavesOutWhatAHeaderCannotCarry(t *testing.T) {
 	h := http.Header{}
-	assertProfile(h, auth.AppUser{Email: "a@example.com\r\nX-Evil: 1", Name: "a\r\nb"})
+	assertProfile(h, &auth.Claims{Email: "a@example.com\r\nX-Evil: 1", Name: "a\r\nb"})
 	if h.Get(emailHeader) != "" {
 		t.Fatalf("email = %q", h.Get(emailHeader))
 	}

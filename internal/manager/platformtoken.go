@@ -232,7 +232,7 @@ func setConfigureGrant(pr *httputil.ProxyRequest) {
 }
 
 // toolCaller is the person a verified TOOL token presents for the app on
-// host (auth.AuthenticateToolCaller), or "". Only Authorization and
+// host (auth.ToolFor), or "". Only Authorization and
 // X-App-Auth are read.
 func (s *Server) toolCaller(r *http.Request) (sub, via string) {
 	if s.verifier == nil {
@@ -253,8 +253,8 @@ func (s *Server) toolCaller(r *http.Request) (sub, via string) {
 		if tok == "" {
 			continue
 		}
-		if sub, via, err := s.verifier.AuthenticateToolCaller(tok, appHex); err == nil {
-			return sub, via
+		if c, err := s.verifier.Verify(tok, auth.ToolFor(appHex)); err == nil {
+			return c.Sub, c.ActClientID
 		}
 	}
 	return "", ""

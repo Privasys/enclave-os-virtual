@@ -169,9 +169,6 @@ func TestVerifyVoucher_RejectsZeroExp(t *testing.T) {
 }
 
 // --- JWT lifetime --------------------------------------------------------
-//
-// auth_test.go had no expiry coverage at all: the same absence bug lived in
-// Authenticate's `if exp, ok := claims["exp"].(float64); ok { ... }`.
 
 func (f *voucherFixture) validTokenClaims() map[string]any {
 	return map[string]any{
@@ -182,40 +179,40 @@ func (f *voucherFixture) validTokenClaims() map[string]any {
 	}
 }
 
-func TestAuthenticateUser_AcceptsValidToken(t *testing.T) {
+func TestVerify_AcceptsValidToken(t *testing.T) {
 	f := newVoucherFixture(t)
-	sub, _, err := f.verifier.AuthenticateUser(f.sign(t, "JWT", f.validTokenClaims()))
+	c, err := f.verifier.Verify(f.sign(t, "JWT", f.validTokenClaims()), f.verifier.PlatformAudience())
 	if err != nil {
 		t.Fatalf("a well-formed token was rejected: %v", err)
 	}
-	if sub != "user-1" {
-		t.Fatalf("wrong sub: %q", sub)
+	if c.Sub != "user-1" {
+		t.Fatalf("wrong sub: %q", c.Sub)
 	}
 }
 
-func TestAuthenticateUser_RejectsMissingExp(t *testing.T) {
+func TestVerify_RejectsMissingExp(t *testing.T) {
 	f := newVoucherFixture(t)
 	claims := f.validTokenClaims()
 	delete(claims, "exp")
-	if _, _, err := f.verifier.AuthenticateUser(f.sign(t, "JWT", claims)); err == nil {
+	if _, err := f.verifier.Verify(f.sign(t, "JWT", claims), f.verifier.PlatformAudience()); err == nil {
 		t.Fatal("a token with no exp was accepted; it would be valid as long as the signing key")
 	}
 }
 
-func TestAuthenticateUser_RejectsExpired(t *testing.T) {
+func TestVerify_RejectsExpired(t *testing.T) {
 	f := newVoucherFixture(t)
 	claims := f.validTokenClaims()
 	claims["exp"] = float64(time.Now().Add(-time.Minute).Unix())
-	if _, _, err := f.verifier.AuthenticateUser(f.sign(t, "JWT", claims)); err == nil {
+	if _, err := f.verifier.Verify(f.sign(t, "JWT", claims), f.verifier.PlatformAudience()); err == nil {
 		t.Fatal("an expired token was accepted")
 	}
 }
 
-func TestAuthenticateUser_RejectsNotYetValid(t *testing.T) {
+func TestVerify_RejectsNotYetValid(t *testing.T) {
 	f := newVoucherFixture(t)
 	claims := f.validTokenClaims()
 	claims["nbf"] = float64(time.Now().Add(10 * time.Minute).Unix())
-	if _, _, err := f.verifier.AuthenticateUser(f.sign(t, "JWT", claims)); err == nil {
+	if _, err := f.verifier.Verify(f.sign(t, "JWT", claims), f.verifier.PlatformAudience()); err == nil {
 		t.Fatal("a token with nbf in the future was accepted")
 	}
 }

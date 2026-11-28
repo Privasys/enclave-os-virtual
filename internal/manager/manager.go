@@ -937,7 +937,11 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		result, err := s.verifier.Authenticate(token)
+		var result *auth.AuthResult
+		c, err := s.verifier.Verify(token, s.verifier.PlatformAudience())
+		if err == nil {
+			result, err = s.verifier.ManagementAccess(c)
+		}
 		if err != nil {
 			s.log.Debug("authentication failed",
 				zap.String("method", r.Method),
@@ -2384,10 +2388,11 @@ func (s *Server) authorizeOtherRoute(r *http.Request, containerName string, ra a
 	if !strings.HasPrefix(authz, "Bearer ") {
 		return errors.New("missing bearer token")
 	}
-	sub, roles, err := s.verifier.AuthenticateUser(strings.TrimPrefix(authz, "Bearer "))
+	c, err := s.verifier.Verify(strings.TrimPrefix(authz, "Bearer "), s.verifier.PlatformAudience())
 	if err != nil {
 		return fmt.Errorf("invalid token: %w", err)
 	}
+	sub, roles := c.Sub, c.Roles
 	if ra.Policy == apifees.PolicyAuthenticated {
 		return nil
 	}
@@ -2475,10 +2480,11 @@ func (s *Server) configureGrant(r *http.Request, containerName string, st launch
 	if !strings.HasPrefix(authz, "Bearer ") {
 		return "", "", errors.New("missing bearer token")
 	}
-	sub, roles, err := s.verifier.AuthenticateUser(strings.TrimPrefix(authz, "Bearer "))
+	c, err := s.verifier.Verify(strings.TrimPrefix(authz, "Bearer "), s.verifier.PlatformAudience())
 	if err != nil {
 		return "", "", fmt.Errorf("invalid token: %w", err)
 	}
+	sub, roles := c.Sub, c.Roles
 	// The role is keyed on the canonical hex app id, not the hyphenated UUID the
 	// control plane sends in the load envelope: the IdP pins app roles to
 	// [0-9a-f]{32}, so comparing against st.AppID verbatim never matches and every

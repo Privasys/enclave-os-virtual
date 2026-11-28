@@ -1,6 +1,10 @@
 package manager
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/Privasys/enclave-os-virtual/internal/auth"
+)
 
 // A step-up approval (vault_op) is for one vault operation: it is never an
 // ordinary bearer on any manager path, and never reaches an app, even a
@@ -10,21 +14,21 @@ func TestAVaultApprovalIsNotABearer(t *testing.T) {
 	approval := iss.token(t, "owner-1", "enclave-os-virtual", map[string]any{"typ": "at+jwt", "vault_op": "promote:apps.privasys.org/x/storage-kek/v1"})
 	plain := iss.token(t, "owner-1", "enclave-os-virtual", nil)
 
-	if _, _, err := s.verifier.AuthenticateCaller(approval); err == nil {
-		t.Fatal("AuthenticateCaller accepted a vault approval")
-	}
-	if _, _, err := s.verifier.AuthenticateUser(approval); err == nil {
-		t.Fatal("AuthenticateUser accepted a vault approval")
-	}
-	if _, err := s.verifier.Authenticate(approval); err == nil {
-		t.Fatal("Authenticate accepted a vault approval")
+	for name, rule := range map[string]auth.AudienceRule{
+		"platform": s.verifier.PlatformAudience(),
+		"app":      auth.AppAudience([]string{"enclave-os-virtual"}),
+		"subject":  auth.SameSubject("owner-1"),
+	} {
+		if _, err := s.verifier.Verify(approval, rule); err == nil {
+			t.Fatalf("Verify (%s) accepted a vault approval", name)
+		}
 	}
 	// The approval path still takes it, and the same token without vault_op
 	// is still an ordinary bearer.
 	if c, err := s.verifier.VerifyApprovalToken(approval); err != nil || c["vault_op"] == nil {
 		t.Fatalf("VerifyApprovalToken: %v %v", c, err)
 	}
-	if _, _, err := s.verifier.AuthenticateCaller(plain); err != nil {
+	if _, err := s.verifier.Verify(plain, s.verifier.PlatformAudience()); err != nil {
 		t.Fatalf("an ordinary bearer was refused: %v", err)
 	}
 

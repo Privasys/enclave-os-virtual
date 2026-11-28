@@ -66,7 +66,7 @@ func stripAssertedProfile(h http.Header) {
 
 // assertProfile sets the profile headers from a verified token. An email a
 // header cannot carry as it stands is left out, and the app sees the absence.
-func assertProfile(h http.Header, u auth.AppUser) {
+func assertProfile(h http.Header, u *auth.Claims) {
 	if u.Email != "" && headerSafeASCII(u.Email) {
 		h.Set(emailHeader, u.Email)
 	}
@@ -126,7 +126,7 @@ func (s *Server) assertSealedIdentity(r *http.Request) *http.Request {
 	}
 	token := strings.TrimPrefix(authz, "Bearer ")
 	if sub := r.Header.Get(directSubHeader); sub != "" {
-		u, err := s.verifier.AuthenticateSubject(token, sub)
+		u, err := s.verifier.Verify(token, auth.SameSubject(sub))
 		if err != nil {
 			s.log.Debug("sealed bearer adds no profile", zap.String("host", hostOnly(r.Host)), zap.Error(err))
 			return r
@@ -134,7 +134,7 @@ func (s *Server) assertSealedIdentity(r *http.Request) *http.Request {
 		assertProfile(r.Header, u)
 		return r
 	}
-	u, err := s.verifier.AuthenticateAppUser(token, s.appAudiences(hostOnly(r.Host)))
+	u, err := s.verifier.Verify(token, auth.AppAudience(s.appAudiences(hostOnly(r.Host))))
 	if err != nil {
 		s.log.Debug("sealed bearer adds no identity", zap.String("host", hostOnly(r.Host)), zap.Error(err))
 		return r
@@ -248,7 +248,7 @@ func (s *Server) serveDirect(w http.ResponseWriter, r *http.Request) (*http.Requ
 		return r, false
 	}
 	host := hostOnly(r.Host)
-	u, err := s.verifier.AuthenticateAppUser(token, s.appAudiences(host))
+	u, err := s.verifier.Verify(token, auth.AppAudience(s.appAudiences(host)))
 	if err != nil {
 		s.log.Info("direct bearer refused", zap.String("host", host), zap.Error(err))
 		s.jsonError(w, http.StatusUnauthorized, "the token is not valid for this app")
@@ -261,7 +261,7 @@ func (s *Server) serveDirect(w http.ResponseWriter, r *http.Request) (*http.Requ
 		level = "verified"
 	}
 	r.Header.Set(AttestationLevelHeader, level)
-	if isUpgrade(r) && !u.Expires.IsZero() {
+	if isUpgrade(r) && !u.Exp.IsZero() {
 		// The app proxy closes an upgraded connection when its request's
 		// context ends. The token was just checked against trusted time, so
 		// its remaining life is measured from there.
@@ -270,7 +270,7 @@ func (s *Server) serveDirect(w http.ResponseWriter, r *http.Request) (*http.Requ
 			s.jsonError(w, http.StatusServiceUnavailable, "no trusted time to bound the connection")
 			return r, false
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), u.Expires.Sub(now))
+		ctx, cancel := context.WithTimeout(r.Context(), u.Exp.Sub(now))
 		context.AfterFunc(r.Context(), cancel)
 		r = r.WithContext(ctx)
 	}

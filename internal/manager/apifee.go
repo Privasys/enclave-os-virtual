@@ -117,8 +117,8 @@ func (s *Server) callerIdentity(r *http.Request) string {
 		tok = x
 	}
 	if tok != "" && s.verifier != nil {
-		if sub, _, err := s.verifier.AuthenticateCaller(tok); err == nil && sub != "" {
-			return sub
+		if c, err := s.verifier.Verify(tok, s.verifier.PlatformAudience()); err == nil {
+			return c.Sub
 		}
 	}
 	// A tool token for THIS app pays as the person that app knows

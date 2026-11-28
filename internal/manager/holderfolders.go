@@ -360,14 +360,14 @@ func (s *Server) holderCaller(w http.ResponseWriter, r *http.Request) (sub strin
 		s.jsonError(w, http.StatusUnauthorized, "expected the holder's Bearer token")
 		return "", false, false
 	}
-	sub, walletClaim, err := s.verifier.AuthenticateCaller(strings.TrimPrefix(auth, "Bearer "))
-	if err != nil || sub == "" {
+	c, err := s.verifier.Verify(strings.TrimPrefix(auth, "Bearer "), s.verifier.PlatformAudience())
+	if err != nil {
 		s.jsonError(w, http.StatusUnauthorized, "invalid holder token")
 		return "", false, false
 	}
 	_, proven := s.walletCall.IsWalletCall(r)
 	stripWalletProof(r)
-	return sub, proven || walletClaim, true
+	return c.Sub, proven || c.Wallet, true
 }
 
 // mintHolderCapability: the wallet delivers the holder's key with the
