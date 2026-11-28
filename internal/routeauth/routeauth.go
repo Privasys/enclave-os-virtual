@@ -1,8 +1,13 @@
-package apifees
+// Package routeauth reads and names the access policy of an app's routes:
+// each tool's x-privasys.auth in the measured manifest (appmanifest). The
+// manager checks it before a request reaches the app.
+package routeauth
 
 import (
 	"fmt"
 	"strings"
+
+	"github.com/Privasys/enclave-os-virtual/internal/appmanifest"
 )
 
 // Policy is a route's access policy, as a tool's x-privasys.auth declares it.
@@ -66,17 +71,17 @@ func ParseAuthAnnotation(value string) (Policy, []string, error) {
 	return "", nil, fmt.Errorf("unrecognised auth %q (expected public, authenticated, owner or role(...))", v)
 }
 
-// ParseRouteAuth reads every tool's access policy from the raw
+// Parse reads every tool's access policy from the raw
 // org.privasys.manifest label. Public tools and tools without an annotation
 // are left out: they need nothing. The configure endpoint is left out too,
 // because it has its own owner gate whatever it declares. An annotation that
 // does not parse, or an annotated tool without an absolute endpoint, is an
 // error, so the load is refused rather than run with a route unguarded.
-func ParseRouteAuth(raw string) ([]RouteAuth, error) {
+func Parse(raw string) ([]RouteAuth, error) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, nil
 	}
-	doc, err := decodeManifest(raw)
+	doc, err := appmanifest.Decode(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -87,14 +92,14 @@ func ParseRouteAuth(raw string) ([]RouteAuth, error) {
 		}
 		policy, roles, err := ParseAuthAnnotation(t.XPrivasys.Auth)
 		if err != nil {
-			return nil, fmt.Errorf("apifees: tool %q: %w", t.Name, err)
+			return nil, fmt.Errorf("routeauth: tool %q: %w", t.Name, err)
 		}
 		if policy == PolicyPublic {
 			continue
 		}
 		p := strings.TrimSpace(t.Endpoint)
 		if p == "" || !strings.HasPrefix(p, "/") || p == "/" {
-			return nil, fmt.Errorf("apifees: tool %q declares auth %q but its endpoint %q is not a route", t.Name, t.XPrivasys.Auth, t.Endpoint)
+			return nil, fmt.Errorf("routeauth: tool %q declares auth %q but its endpoint %q is not a route", t.Name, t.XPrivasys.Auth, t.Endpoint)
 		}
 		if p == doc.Configure.Endpoint {
 			continue

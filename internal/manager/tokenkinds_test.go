@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Privasys/enclave-os-virtual/internal/apifees"
 	"github.com/Privasys/enclave-os-virtual/internal/auth"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
+	"github.com/Privasys/enclave-os-virtual/internal/routeauth"
 )
 
 // TestWhichTokensEachGateAccepts pins, for every kind of bearer, what each
@@ -97,10 +97,10 @@ func TestWhichTokensEachGateAccepts(t *testing.T) {
 			return errCell(role+" "+sub, err)
 		},
 		"route authenticated": func(tok string) string {
-			return errCell("ok", s.authorizeOtherRoute(bearer(tok), "c", apifees.RouteAuth{Policy: apifees.PolicyAuthenticated}))
+			return errCell("ok", s.authorizeOtherRoute(bearer(tok), "c", routeauth.RouteAuth{Policy: routeauth.PolicyAuthenticated}))
 		},
 		"route role": func(tok string) string {
-			return errCell("ok", s.authorizeOtherRoute(bearer(tok), "c", apifees.RouteAuth{Policy: apifees.PolicyRole, Roles: []string{"drive:reader"}}))
+			return errCell("ok", s.authorizeOtherRoute(bearer(tok), "c", routeauth.RouteAuth{Policy: routeauth.PolicyRole, Roles: []string{"drive:reader"}}))
 		},
 		"payer": func(tok string) string {
 			if sub := s.callerIdentity(bearer(tok)); sub != "" {

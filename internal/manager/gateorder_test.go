@@ -14,6 +14,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/apifees"
 	"github.com/Privasys/enclave-os-virtual/internal/edge"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
+	"github.com/Privasys/enclave-os-virtual/internal/routeauth"
 )
 
 // TestTheAppHostGatesRunInOrder pins the order of the gates an app request
@@ -38,11 +39,11 @@ func TestTheAppHostGatesRunInOrder(t *testing.T) {
 	st := launcher.FreezeState{
 		AppID:     toolAppHex,
 		ConfigAPI: &launcher.ConfigAPISpec{Method: http.MethodPost, Path: "/configure"},
-		RouteAuth: []apifees.RouteAuth{
-			{Tool: "owner", Path: "/v1/owner", Policy: apifees.PolicyOwner},
-			{Tool: "me", Path: "/v1/me", Policy: apifees.PolicyAuthenticated},
+		RouteAuth: []routeauth.RouteAuth{
+			{Tool: "owner", Path: "/v1/owner", Policy: routeauth.PolicyOwner},
+			{Tool: "me", Path: "/v1/me", Policy: routeauth.PolicyAuthenticated},
 			// Never applied: the configure gate guards the configure path.
-			{Tool: "configure", Path: "/configure", Policy: apifees.PolicyRole, Roles: []string{"nobody"}},
+			{Tool: "configure", Path: "/configure", Policy: routeauth.PolicyRole, Roles: []string{"nobody"}},
 		},
 	}
 	prices := apifees.Table{"/v1/priced": {Tool: "priced", Rule: apifees.PriceRule{Credits: 1}}}

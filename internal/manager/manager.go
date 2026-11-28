@@ -72,6 +72,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/enclaveauth"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
 	"github.com/Privasys/enclave-os-virtual/internal/network"
+	"github.com/Privasys/enclave-os-virtual/internal/routeauth"
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
 	"github.com/Privasys/enclave-os-virtual/internal/surfaces"
 	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
@@ -2190,9 +2191,9 @@ func sameRouteAnyFormat(got, want string) bool {
 // like the configure endpoint: every spelling a router reads as the same
 // path, any format suffix. A tool names no method, so every method of the
 // path is guarded.
-func matchRouteAuth(routes []apifees.RouteAuth, r *http.Request) (apifees.RouteAuth, bool) {
+func matchRouteAuth(routes []routeauth.RouteAuth, r *http.Request) (routeauth.RouteAuth, bool) {
 	if len(routes) == 0 {
-		return apifees.RouteAuth{}, false
+		return routeauth.RouteAuth{}, false
 	}
 	got := configPathKey(r.URL.Path)
 	for _, ra := range routes {
@@ -2200,14 +2201,14 @@ func matchRouteAuth(routes []apifees.RouteAuth, r *http.Request) (apifees.RouteA
 			return ra, true
 		}
 	}
-	return apifees.RouteAuth{}, false
+	return routeauth.RouteAuth{}, false
 }
 
-func routeAuthLabel(ra apifees.RouteAuth) string {
+func routeAuthLabel(ra routeauth.RouteAuth) string {
 	switch ra.Policy {
-	case apifees.PolicyOwner:
+	case routeauth.PolicyOwner:
 		return "the app owner or admin"
-	case apifees.PolicyRole:
+	case routeauth.PolicyRole:
 		return "one of the roles " + strings.Join(ra.Roles, ", ")
 	default:
 		return "a signed-in caller"
@@ -2225,15 +2226,15 @@ func routeAuthLabel(ra apifees.RouteAuth) string {
 //
 // For an owner route it returns who passed it (as configureGrant); other
 // policies return no subject or role.
-func (s *Server) routeGrant(r *http.Request, containerName string, st launcher.FreezeState, ra apifees.RouteAuth) (string, string, error) {
-	if ra.Policy == apifees.PolicyOwner {
+func (s *Server) routeGrant(r *http.Request, containerName string, st launcher.FreezeState, ra routeauth.RouteAuth) (string, string, error) {
+	if ra.Policy == routeauth.PolicyOwner {
 		return s.configureGrant(r, containerName, st)
 	}
 	return "", "", s.authorizeOtherRoute(r, containerName, ra)
 }
 
-func (s *Server) authorizeOtherRoute(r *http.Request, containerName string, ra apifees.RouteAuth) error {
-	if ra.Policy == apifees.PolicyAuthenticated && strings.TrimSpace(r.Header.Get(edge.SubHeader)) != "" {
+func (s *Server) authorizeOtherRoute(r *http.Request, containerName string, ra routeauth.RouteAuth) error {
+	if ra.Policy == routeauth.PolicyAuthenticated && strings.TrimSpace(r.Header.Get(edge.SubHeader)) != "" {
 		return nil
 	}
 	c, err := s.callerOf(r).Platform()
@@ -2241,7 +2242,7 @@ func (s *Server) authorizeOtherRoute(r *http.Request, containerName string, ra a
 		return err
 	}
 	sub, roles := c.Sub, c.Roles
-	if ra.Policy == apifees.PolicyAuthenticated {
+	if ra.Policy == routeauth.PolicyAuthenticated {
 		return nil
 	}
 	for _, have := range roles {

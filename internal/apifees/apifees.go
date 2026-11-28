@@ -4,15 +4,12 @@
 //
 // # Where the price comes from
 //
-// The price rules are read from the app's MCP manifest carried in the OCI
-// image label "org.privasys.manifest" — the same manifest the control plane
-// reads at detect time for `package` apps. The label lives in the image
-// config blob, so it is covered by the digest-pinned image digest that the
-// launcher verifies and attests (Config Merkle Tree leaf
-// container.image_digest, OID 3.2). Enforcement therefore only ever uses a
-// MEASURED price: an image change that moves a price moves the attested
-// identity, exactly like a wasm price change moving configuration_hash.
-// There is deliberately NO platform-supplied fallback — a price the platform
+// The price rules are read from the app's measured MCP manifest
+// (appmanifest), the label the control plane also reads at detect time for
+// `package` apps. Enforcement therefore only ever uses a MEASURED price: an
+// image change that moves a price moves the attested identity, exactly like
+// a wasm price change moving configuration_hash.
+// There is deliberately NO platform-supplied fallback: a price the platform
 // merely asserts would not be provable through attestation.
 //
 // # What is enforced
@@ -30,22 +27,16 @@ package apifees
 
 import (
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 
+	"github.com/Privasys/enclave-os-virtual/internal/appmanifest"
 	"go.uber.org/zap"
 )
-
-// ManifestLabel is the OCI image label carrying the app's MCP manifest —
-// the same label the management-service reads at detect time, so the
-// advertised and the enforced price sets share one measured source.
-const ManifestLabel = "org.privasys.manifest"
 
 // maxEvents bounds the UNACKNOWLEDGED fee events. An unacknowledged event is
 // never dropped: when this many wait for the puller, new priced calls are
@@ -83,65 +74,6 @@ type PricedTool struct {
 // spelling of an endpoint that reaches the app as that endpoint is priced.
 type Table map[string]PricedTool
 
-// manifest mirrors just the fields of the MCP manifest that pricing needs.
-type manifestDoc struct {
-	Tools []struct {
-		Name      string `json:"name"`
-		Role      string `json:"role"`
-		Endpoint  string `json:"endpoint"`
-		XPrivasys struct {
-			Price *PriceRule `json:"price"`
-			// Auth is the route's access policy, in the grammar of Enclave
-			// OS Mini's WIT @auth: public, authenticated, owner or role(a, b).
-			Auth string `json:"auth"`
-		} `json:"x-privasys"`
-	} `json:"tools"`
-	Configure struct {
-		Endpoint string `json:"endpoint"`
-	} `json:"configure"`
-	XPrivasys struct {
-		// AttributeProvider is the marketplace namespace this app attests
-		// for ("privasys" for the identity verifier). A disclosure voucher
-		// names the provider whose work it pays for, and only an app that
-		// declares that namespace may consume one.
-		//
-		// It belongs in the manifest, next to the prices, because the label
-		// is covered by the image digest the launcher verifies and attests.
-		// The alternative was a provider-to-app mapping delivered by the
-		// control plane, which would have made the runtime enforce something
-		// nobody could verify.
-		AttributeProvider string `json:"attribute_provider"`
-	} `json:"x-privasys"`
-}
-
-// ParseAttributeProvider reads the marketplace namespace an app attests for
-// from its manifest label, or "" when it declares none. An app that declares
-// none is not an attester and must never consume a disclosure voucher.
-func ParseAttributeProvider(raw string) string {
-	doc, err := decodeManifest(raw)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(doc.XPrivasys.AttributeProvider)
-}
-
-// decodeManifest accepts both label encodings in the wild: raw JSON, or
-// base64-encoded JSON.
-func decodeManifest(raw string) (*manifestDoc, error) {
-	var doc manifestDoc
-	if err := json.Unmarshal([]byte(raw), &doc); err == nil {
-		return &doc, nil
-	}
-	decoded, derr := base64.StdEncoding.DecodeString(raw)
-	if derr != nil {
-		return nil, fmt.Errorf("apifees: manifest label is neither JSON nor base64 JSON")
-	}
-	if err := json.Unmarshal(decoded, &doc); err != nil {
-		return nil, fmt.Errorf("apifees: manifest label parse: %w", err)
-	}
-	return &doc, nil
-}
-
 // ParseManifest builds the price table from the raw org.privasys.manifest
 // label value (JSON, or base64-encoded JSON — both label encodings are in
 // the wild). Only caller-priced tools with positive credits are
@@ -149,15 +81,21 @@ func decodeManifest(raw string) (*manifestDoc, error) {
 // tools are skipped. A parse error prices nothing: unpriced is always safe,
 // mis-priced never is.
 func ParseManifest(raw string) (Table, error) {
-	doc, err := decodeManifest(raw)
+	doc, err := appmanifest.Decode(raw)
 	if err != nil {
 		return nil, err
 	}
 
 	tbl := make(Table)
 	for _, t := range doc.Tools {
-		p := t.XPrivasys.Price
-		if p == nil || p.Credits == 0 {
+		if len(t.XPrivasys.Price) == 0 {
+			continue
+		}
+		var p PriceRule
+		if err := json.Unmarshal(t.XPrivasys.Price, &p); err != nil {
+			return nil, fmt.Errorf("apifees: tool %q: price: %w", t.Name, err)
+		}
+		if p.Credits == 0 {
 			continue
 		}
 		if t.Endpoint == "" || t.Role == "config" || t.Endpoint == doc.Configure.Endpoint {
@@ -172,7 +110,7 @@ func ParseManifest(raw string) (Table, error) {
 			// First declaration wins, deterministically.
 			continue
 		}
-		tbl[t.Endpoint] = PricedTool{Tool: t.Name, Rule: *p}
+		tbl[t.Endpoint] = PricedTool{Tool: t.Name, Rule: p}
 	}
 	if len(tbl) == 0 {
 		return nil, nil

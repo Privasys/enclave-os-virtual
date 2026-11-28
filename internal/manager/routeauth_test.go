@@ -5,14 +5,14 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Privasys/enclave-os-virtual/internal/apifees"
 	"github.com/Privasys/enclave-os-virtual/internal/launcher"
+	"github.com/Privasys/enclave-os-virtual/internal/routeauth"
 )
 
-var guarded = []apifees.RouteAuth{
-	{Tool: "unload_model", Path: "/v1/models/unload", Policy: apifees.PolicyOwner},
-	{Tool: "billing", Path: "/configure", Policy: apifees.PolicyRole, Roles: []string{"privasys-platform:manager"}},
-	{Tool: "me", Path: "/v1/me", Policy: apifees.PolicyAuthenticated},
+var guarded = []routeauth.RouteAuth{
+	{Tool: "unload_model", Path: "/v1/models/unload", Policy: routeauth.PolicyOwner},
+	{Tool: "billing", Path: "/configure", Policy: routeauth.PolicyRole, Roles: []string{"privasys-platform:manager"}},
+	{Tool: "me", Path: "/v1/me", Policy: routeauth.PolicyAuthenticated},
 }
 
 // Every spelling a router reads as the guarded path is guarded, whatever the
@@ -71,7 +71,7 @@ func TestAuthorizeRoute(t *testing.T) {
 	plain := iss.token(t, "carol", aud, nil)
 	unload, billing, me := guarded[0], guarded[1], guarded[2]
 
-	check := func(name string, ra apifees.RouteAuth, r *http.Request, allow bool) {
+	check := func(name string, ra routeauth.RouteAuth, r *http.Request, allow bool) {
 		t.Helper()
 		_, _, err := s.routeGrant(r, "app", st, ra)
 		if allow && err != nil {

@@ -1,4 +1,4 @@
-package apifees
+package routeauth
 
 import (
 	"encoding/base64"
@@ -46,14 +46,14 @@ const authManifest = `{
 
 // Public and unannotated tools need nothing; the configure endpoint keeps
 // its own gate; the rest are guarded, in both label encodings.
-func TestParseRouteAuth(t *testing.T) {
+func TestParse(t *testing.T) {
 	want := []RouteAuth{
 		{Tool: "unload_model", Path: "/v1/models/unload", Policy: PolicyOwner},
 		{Tool: "billing", Path: "/configure", Policy: PolicyRole, Roles: []string{"privasys-platform:manager"}},
 		{Tool: "me", Path: "/v1/me", Policy: PolicyAuthenticated},
 	}
 	for _, raw := range []string{authManifest, base64.StdEncoding.EncodeToString([]byte(authManifest))} {
-		got, err := ParseRouteAuth(raw)
+		got, err := Parse(raw)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -61,21 +61,21 @@ func TestParseRouteAuth(t *testing.T) {
 			t.Fatalf("got %+v\nwant %+v", got, want)
 		}
 	}
-	if got, err := ParseRouteAuth(""); err != nil || got != nil {
+	if got, err := Parse(""); err != nil || got != nil {
 		t.Fatalf("empty label: %v %v", got, err)
 	}
 }
 
 // A policy the developer did not write is never applied: the load is
 // refused instead.
-func TestParseRouteAuthRefuses(t *testing.T) {
+func TestParseRefuses(t *testing.T) {
 	for _, raw := range []string{
 		`{"tools": [{"name": "x", "endpoint": "/x", "x-privasys": {"auth": "admins"}}]}`,
 		`{"tools": [{"name": "x", "x-privasys": {"auth": "owner"}}]}`,
 		`{"tools": [{"name": "x", "endpoint": "x", "x-privasys": {"auth": "owner"}}]}`,
 		`{"tools": [{"name": "x", "endpoint": "/", "x-privasys": {"auth": "owner"}}]}`,
 	} {
-		if _, err := ParseRouteAuth(raw); err == nil {
+		if _, err := Parse(raw); err == nil {
 			t.Errorf("accepted %s", raw)
 		}
 	}

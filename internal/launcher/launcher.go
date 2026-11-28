@@ -48,6 +48,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Privasys/enclave-os-virtual/internal/apifees"
+	"github.com/Privasys/enclave-os-virtual/internal/appmanifest"
 	"github.com/Privasys/enclave-os-virtual/internal/apppolicy"
 	"github.com/Privasys/enclave-os-virtual/internal/backup"
 	"github.com/Privasys/enclave-os-virtual/internal/caddy"
@@ -59,6 +60,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/mgrname"
 	"github.com/Privasys/enclave-os-virtual/internal/network"
 	"github.com/Privasys/enclave-os-virtual/internal/oids"
+	"github.com/Privasys/enclave-os-virtual/internal/routeauth"
 	"github.com/Privasys/enclave-os-virtual/internal/sessionrelay"
 	"github.com/Privasys/enclave-os-virtual/internal/surfaces"
 	"github.com/Privasys/enclave-os-virtual/internal/tpm"
@@ -688,7 +690,7 @@ type Launcher struct {
 	attributeProviders map[string]string
 	// routeAuth is each container's guarded routes: the x-privasys.auth
 	// annotations of its measured manifest tools. Guarded by freezeMu.
-	routeAuth map[string][]apifees.RouteAuth
+	routeAuth map[string][]routeauth.RouteAuth
 	// surfaces is what each container declared it serves in the clear
 	// (manifest "surfaces" plus the legacy static label), for the status
 	// report the control plane reads. Guarded by freezeMu.
@@ -796,7 +798,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		configOwners:       make(map[string][]string),
 		prices:             make(map[string]apifees.Table),
 		attributeProviders: make(map[string]string),
-		routeAuth:          make(map[string][]apifees.RouteAuth),
+		routeAuth:          make(map[string][]routeauth.RouteAuth),
 		surfaces:           make(map[string]*surfaces.Surfaces),
 		failures:           make(map[string]string),
 		loading:            make(map[string]*pendingLoad),
@@ -1781,7 +1783,7 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 	var attributeProvider string
 	// The guarded routes: each tool's x-privasys.auth, from the same label.
 	// An annotation that does not parse refuses the load.
-	var routeAuth []apifees.RouteAuth
+	var routeAuth []routeauth.RouteAuth
 	// What the app serves in the clear (surfaces): from the same measured
 	// label, plus the older static-prefixes label as an alias. A malformed
 	// declaration refuses the load (the developer must see it), and so does
@@ -1792,19 +1794,19 @@ func (l *Launcher) Load(ctx context.Context, req LoadRequest) ([]byte, error) {
 		l.log.Warn("image labels unreadable; app runs unpriced and fully sealed",
 			zap.String("name", req.Name), zap.Error(lerr))
 	} else {
-		parsed, serr := surfaces.Parse(labels[apifees.ManifestLabel])
+		parsed, serr := surfaces.Parse(labels[appmanifest.Label])
 		if serr != nil {
 			return nil, fmt.Errorf("launcher: %s: %w", req.Name, serr)
 		}
 		surf = surfaces.AddLegacyStatic(parsed, labels[surfaces.StaticLabel])
 	}
-	if raw := labels[apifees.ManifestLabel]; lerr == nil && raw != "" {
-		ra, aerr := apifees.ParseRouteAuth(raw)
+	if raw := labels[appmanifest.Label]; lerr == nil && raw != "" {
+		ra, aerr := routeauth.Parse(raw)
 		if aerr != nil {
 			return nil, fmt.Errorf("launcher: %s: %w", req.Name, aerr)
 		}
 		routeAuth = ra
-		if ns := apifees.ParseAttributeProvider(raw); ns != "" {
+		if ns := appmanifest.AttributeProvider(raw); ns != "" {
 			attributeProvider = ns
 			l.log.Info("attribute provider declared",
 				zap.String("name", req.Name), zap.String("namespace", ns))
@@ -3162,7 +3164,7 @@ type FreezeState struct {
 	Owners []string
 	// RouteAuth is the container's guarded routes (tools[].x-privasys.auth
 	// in the measured manifest): the manager checks each before the app.
-	RouteAuth []apifees.RouteAuth
+	RouteAuth []routeauth.RouteAuth
 }
 
 // ContainerPrices returns the API-fee table for a container (path →
