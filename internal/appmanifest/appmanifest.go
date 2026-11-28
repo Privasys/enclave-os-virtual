@@ -24,12 +24,31 @@ type Tool struct {
 	Role      string `json:"role"`
 	Endpoint  string `json:"endpoint"`
 	XPrivasys struct {
-		// Price is the tool's fee rule, read by apifees.
-		Price json.RawMessage `json:"price"`
+		// Price is the tool's fee rule, read by apifees. Typed here, so a
+		// malformed price fails the whole manifest and the load is refused.
+		Price *PriceRule `json:"price"`
 		// Auth is the route's access policy, in the grammar of Enclave OS
 		// Mini's WIT @auth: public, authenticated, owner or role(a, b).
 		Auth string `json:"auth"`
 	} `json:"x-privasys"`
+}
+
+// PriceRule is a per-tool fee declaration, wire-compatible with the wasm
+// runtime's PriceRule (enclave-os-mini protocol.rs).
+type PriceRule struct {
+	Credits uint64   `json:"credits"`
+	Payer   string   `json:"payer,omitempty"`    // "caller" (default) | "sponsor"
+	FreeFor []string `json:"free_for,omitempty"` // v1 class: "wallet"
+}
+
+// FreeForWallet reports whether the rule exempts wallet-class callers.
+func (r PriceRule) FreeForWallet() bool {
+	for _, c := range r.FreeFor {
+		if c == "wallet" {
+			return true
+		}
+	}
+	return false
 }
 
 // Doc is the manifest, as far as the runtime reads it.

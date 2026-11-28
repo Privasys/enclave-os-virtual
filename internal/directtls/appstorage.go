@@ -51,13 +51,21 @@ func (a *appStorage) Delete(ctx context.Context, key string) error {
 	return a.write(func() error { return a.FileStorage.Delete(ctx, key) })
 }
 
-// Lock and Unlock write lock files named after the certificate, which the
-// name's next owner uses too: a stopped app neither takes nor removes one (a
-// lock it left goes stale on its own).
+// Lock and TryLock take a lock file named after the certificate, which the
+// name's next owner uses too: a stopped app takes none.
 func (a *appStorage) Lock(ctx context.Context, name string) error {
 	return a.write(func() error { return a.FileStorage.Lock(ctx, name) })
 }
 
-func (a *appStorage) Unlock(ctx context.Context, name string) error {
-	return a.write(func() error { return a.FileStorage.Unlock(ctx, name) })
+func (a *appStorage) TryLock(ctx context.Context, name string) (bool, error) {
+	var ok bool
+	err := a.write(func() (err error) {
+		ok, err = a.FileStorage.TryLock(ctx, name)
+		return err
+	})
+	return ok, err
 }
+
+// Unlock is always let through, stopped or not: it removes the lock this
+// app took, which certmagic keeps fresh until it is removed, so refusing it
+// would block the name's next owner for as long as the manager runs.

@@ -29,7 +29,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -43,23 +42,8 @@ import (
 // refused (Full) rather than served unbilled.
 const maxEvents = 4096
 
-// PriceRule is a per-tool fee declaration, wire-compatible with the wasm
-// runtime's PriceRule (enclave-os-mini protocol.rs).
-type PriceRule struct {
-	Credits uint64   `json:"credits"`
-	Payer   string   `json:"payer,omitempty"`    // "caller" (default) | "sponsor"
-	FreeFor []string `json:"free_for,omitempty"` // v1 class: "wallet"
-}
-
-// FreeForWallet reports whether the rule exempts wallet-class callers.
-func (r PriceRule) FreeForWallet() bool {
-	for _, c := range r.FreeFor {
-		if c == "wallet" {
-			return true
-		}
-	}
-	return false
-}
+// PriceRule is a per-tool fee declaration (appmanifest.PriceRule).
+type PriceRule = appmanifest.PriceRule
 
 // PricedTool is one enforceable endpoint price: the manifest tool name (for
 // fee-event attribution) plus its rule.
@@ -88,14 +72,8 @@ func ParseManifest(raw string) (Table, error) {
 
 	tbl := make(Table)
 	for _, t := range doc.Tools {
-		if len(t.XPrivasys.Price) == 0 {
-			continue
-		}
-		var p PriceRule
-		if err := json.Unmarshal(t.XPrivasys.Price, &p); err != nil {
-			return nil, fmt.Errorf("apifees: tool %q: price: %w", t.Name, err)
-		}
-		if p.Credits == 0 {
+		p := t.XPrivasys.Price
+		if p == nil || p.Credits == 0 {
 			continue
 		}
 		if t.Endpoint == "" || t.Role == "config" || t.Endpoint == doc.Configure.Endpoint {
@@ -110,7 +88,7 @@ func ParseManifest(raw string) (Table, error) {
 			// First declaration wins, deterministically.
 			continue
 		}
-		tbl[t.Endpoint] = PricedTool{Tool: t.Name, Rule: p}
+		tbl[t.Endpoint] = PricedTool{Tool: t.Name, Rule: *p}
 	}
 	if len(tbl) == 0 {
 		return nil, nil

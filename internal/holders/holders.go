@@ -214,6 +214,7 @@ func Open(mount, holderKey string, rawKey []byte) (keyID string, err error) {
 	}
 	have, err := policyIdentifier(folder)
 	if err != nil {
+		_, _ = removeKey(mount, id)
 		return "", err
 	}
 	if have != id {

@@ -80,3 +80,15 @@ func TestParseRefuses(t *testing.T) {
 		}
 	}
 }
+
+// A malformed price fails the whole manifest, so a load is refused rather
+// than run with its guarded routes read from a manifest the runtime could not
+// fully parse.
+func TestParseRefusesAMalformedPrice(t *testing.T) {
+	for _, price := range []string{`{"credits": "5"}`, `{"credits": 1.5}`, `"free"`} {
+		raw := `{"tools": [{"name": "x", "endpoint": "/x", "x-privasys": {"auth": "owner", "price": ` + price + `}}]}`
+		if _, err := Parse(raw); err == nil {
+			t.Errorf("price %s: accepted", price)
+		}
+	}
+}

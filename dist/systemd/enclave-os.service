@@ -9,13 +9,10 @@ Wants=network-online.target
 Type=notify
 EnvironmentFile=-/data/manager.env
 ExecStart=/usr/bin/manager serve \
-    --oidc-issuer ${OIDC_ISSUER} \
-    --oidc-audience ${OIDC_AUDIENCE} \
     --ca-cert /data/ca.crt \
     --ca-key /data/ca.key \
     --hostname ${HOSTNAME} \
     --machine-name ${MACHINE_NAME} \
-    --attestation-servers ${ATTESTATION_SERVERS} \
     --log-level info
 Restart=on-failure
 RestartSec=5
