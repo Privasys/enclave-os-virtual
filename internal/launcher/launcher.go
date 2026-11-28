@@ -64,6 +64,7 @@ import (
 	"github.com/Privasys/enclave-os-virtual/internal/surfaces"
 	"github.com/Privasys/enclave-os-virtual/internal/tpm"
 	"github.com/Privasys/enclave-os-virtual/internal/trustedtime"
+	"github.com/Privasys/enclave-os-virtual/internal/ttlmap"
 	"github.com/Privasys/enclave-os-virtual/internal/vaultkey"
 	"github.com/Privasys/enclave-os-virtual/internal/volume"
 
@@ -726,10 +727,7 @@ type Launcher struct {
 
 	// mintedIdentities maps container name → SPKI hash of each client
 	// identity minted for it → expiry (MintIdentity, ContainerOwnsIdentity).
-	mintedIdentities map[string]map[[32]byte]time.Time
-	// mintedSweptAt is when each container's mintedIdentities was last
-	// swept of expired entries (at most once per mintedSweepInterval).
-	mintedSweptAt map[string]time.Time
+	mintedIdentities map[string]*ttlmap.Map[[32]byte, time.Time]
 
 	// Loaded container specs (mirrors what is running).
 	specs map[string]manifest.Container
@@ -791,7 +789,7 @@ func New(cfg Config, log *zap.Logger) *Launcher {
 		billingFrozen:      make(map[string]string),
 		containerTokens:    make(map[string]string),
 		resourceDecls:      make(map[string][]ResourceDecl),
-		mintedIdentities:   make(map[string]map[[32]byte]time.Time),
+		mintedIdentities:   make(map[string]*ttlmap.Map[[32]byte, time.Time]),
 		attestationTokens:  make(map[string]string),
 		sovereignBranches:  make(map[string][]byte),
 		holderWrapKeys:     make(map[string][]byte),
@@ -3248,15 +3246,11 @@ func (l *Launcher) MintIdentity(name string) (certPEM, keyPEM []byte, err error)
 		return nil, nil, err
 	}
 	l.mu.Lock()
-	if l.mintedIdentities[name] == nil {
-		l.mintedIdentities[name] = make(map[[32]byte]time.Time)
-	}
-	if len(l.mintedIdentities[name]) >= maxMintedIdentities {
+	if !l.mintedFor(name).Put(id.SPKIHash, id.NotAfter) {
 		// Another mint took the last slot while this one was signing.
 		l.mu.Unlock()
 		return nil, nil, fmt.Errorf("launcher: container %q holds %d live identities; retry later", name, maxMintedIdentities)
 	}
-	l.mintedIdentities[name][id.SPKIHash] = id.NotAfter
 	l.mu.Unlock()
 	return vaultkey.EncodeIdentityPEM(id.Cert)
 }
@@ -3270,27 +3264,38 @@ const (
 	mintedSweepInterval = time.Minute
 )
 
-// mintRoom sweeps the container's expired identities when the last sweep is
-// older than mintedSweepInterval, and reports whether there is room for one
-// more. Without trusted time the sweep is skipped.
+// mintedNow is the clock the identity tables sweep by: trusted time, and no
+// sweep without it (tests replace it).
+var mintedNow = func() (time.Time, bool) {
+	t, err := trustedtime.Now()
+	return t, err == nil
+}
+
+// mintedFor is the container's identity table: at most maxMintedIdentities;
+// full, a mint is refused until expired identities are swept, at most once
+// per mintedSweepInterval. Callers hold l.mu for writing.
+func (l *Launcher) mintedFor(name string) *ttlmap.Map[[32]byte, time.Time] {
+	m := l.mintedIdentities[name]
+	if m == nil {
+		m = ttlmap.New[[32]byte](ttlmap.Options[time.Time]{
+			Max:        maxMintedIdentities,
+			SweepEvery: mintedSweepInterval,
+			Expired:    func(notAfter, now time.Time) bool { return now.After(notAfter) },
+			Now:        func() (time.Time, bool) { return mintedNow() },
+		})
+		l.mintedIdentities[name] = m
+	}
+	return m
+}
+
+// mintRoom reports whether the container may hold one more identity, after
+// a sweep when one is due.
 func (l *Launcher) mintRoom(name string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	minted := l.mintedIdentities[name]
-	if now, err := trustedtime.Now(); err == nil && len(minted) > 0 {
-		if l.mintedSweptAt == nil {
-			l.mintedSweptAt = make(map[string]time.Time)
-		}
-		if now.Sub(l.mintedSweptAt[name]) >= mintedSweepInterval {
-			for h, exp := range minted {
-				if now.After(exp) {
-					delete(minted, h)
-				}
-			}
-			l.mintedSweptAt[name] = now
-		}
-	}
-	return len(minted) < maxMintedIdentities
+	m := l.mintedFor(name)
+	m.Sweep()
+	return !m.Full()
 }
 
 // ContainerOwnsIdentity reports whether spkiHash is the key of an unexpired
@@ -3303,7 +3308,11 @@ func (l *Launcher) ContainerOwnsIdentity(name string, spkiHash [32]byte) bool {
 	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	exp, ok := l.mintedIdentities[name][spkiHash]
+	m := l.mintedIdentities[name]
+	if m == nil {
+		return false
+	}
+	exp, ok := m.Get(spkiHash)
 	return ok && now.Before(exp)
 }
 
