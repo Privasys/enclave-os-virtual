@@ -100,16 +100,17 @@ type carried struct {
 	exportable bool
 }
 
-// readCarried reads handle's policy, version and the billing id from EVERY
-// source vault, and all must agree (by the policy's JCS digest, as vault
+// readCarried reads handle's policy, its version and the key's shape from
+// EVERY source vault, and all must agree (by the policy's JCS digest, as vault
 // builds may serialise differently). An owner's policy update lands vault by
 // vault, so k agreeing answers could still be the version before it; carrying
 // that would undo the update. Any vault that does not answer, or disagrees,
 // fails the renewal closed, and it is retried later.
 //
-// v1Billing, set for a v1 source (which cannot name its billing), is the
-// interim billing id derived from the source's issuer and audience.
-func readCarried(ctx context.Context, log *zap.Logger, cfg Config, opts vault.DialOptions, handle, v1Billing string) (carried, error) {
+// billing is the source's billing id: the one identify read from every
+// source vault, or for a v1 source (which cannot name its billing) the
+// interim id derived from its issuer and audience.
+func readCarried(ctx context.Context, cfg Config, opts vault.DialOptions, handle, billing string) (carried, error) {
 	type answer struct {
 		c      carried
 		digest string
@@ -125,14 +126,6 @@ func readCarried(ctx context.Context, log *zap.Logger, cfg Config, opts vault.Di
 			policy, version, err := c.GetPolicyRaw(ctx, handle)
 			if err != nil {
 				return answer{}, err
-			}
-			billing := v1Billing
-			if billing == "" {
-				id, err := c.GetVaultIdentity(ctx)
-				if err != nil {
-					return answer{}, err
-				}
-				billing = id.BillingID
 			}
 			info, err := c.GetKeyInfo(ctx, handle)
 			if err != nil {
@@ -154,7 +147,7 @@ func readCarried(ctx context.Context, log *zap.Logger, cfg Config, opts vault.Di
 	}
 	first := answers[0]
 	for _, a := range answers[1:] {
-		if a.digest != first.digest || a.c.policyVersion != first.c.policyVersion || a.c.billingID != first.c.billingID {
+		if a.digest != first.digest || a.c.policyVersion != first.c.policyVersion {
 			return carried{}, fmt.Errorf("vaultkey: the source vaults disagree on the policy of %q (versions %d and %d); retry once they converge", handle, first.c.policyVersion, a.c.policyVersion)
 		}
 		if a.c.keyType != first.c.keyType || a.c.exportable != first.c.exportable {
@@ -195,32 +188,19 @@ func Rotate(ctx context.Context, log *zap.Logger, src, dst Config, oldHandle, ne
 
 // planCarry decides how the next key is created on dst. nil: the v1 create.
 func planCarry(ctx context.Context, log *zap.Logger, src, dst Config, oldHandle string, imageDigest, appID []byte, inPlaceOK bool) (renewalFor, error) {
-	for _, c := range []Config{src, dst} {
-		if err := c.validate(); err != nil {
-			return nil, err
-		}
-	}
-	srcOpts, err := optsFor(ctx, src, imageDigest, appID)
+	p, err := newRenewalPair(ctx, src, dst, imageDigest, appID)
 	if err != nil {
 		return nil, err
 	}
-	dstOpts, err := optsFor(ctx, dst, imageDigest, appID)
-	if err != nil {
+	if err := p.identify(ctx, src, dst, false); err != nil {
 		return nil, err
 	}
-	target, err := identify(ctx, dst, dstOpts)
-	if err != nil {
-		return nil, err
-	}
+	source, target := p.source, p.target
 	if target.v1 {
 		log.Info("target constellation is v1: the grant carries the policy", zap.String("handle", oldHandle))
 		return nil, nil
 	}
-	source, err := identify(ctx, src, srcOpts)
-	if err != nil {
-		return nil, err
-	}
-	v1Billing := ""
+	billing := source.billingID
 	if source.v1 {
 		// A v1 vault cannot name its billing. Its interim id is derived from
 		// its issuer and audience, which the control plane's constellation
@@ -229,14 +209,14 @@ func planCarry(ctx context.Context, log *zap.Logger, src, dst Config, oldHandle 
 		if src.V1Issuer == "" || src.V1Audience == "" {
 			return nil, ErrV1Source
 		}
-		v1Billing = vault.ImplicitBillingID(src.V1Issuer, src.V1Audience)
+		billing = vault.ImplicitBillingID(src.V1Issuer, src.V1Audience)
 	}
 	if inPlaceOK && source.same(target) {
 		return func([]byte) (*vault.Renewal, error) {
 			return &vault.Renewal{Predecessor: oldHandle}, nil
 		}, nil
 	}
-	got, err := readCarried(ctx, log, src, srcOpts, oldHandle, v1Billing)
+	got, err := readCarried(ctx, src, p.srcOpts, oldHandle, billing)
 	if err != nil {
 		return nil, err
 	}
@@ -259,6 +239,46 @@ func planCarry(ctx context.Context, log *zap.Logger, src, dst Config, oldHandle 
 			CarriedKeyType:    got.keyType,
 		}, nil
 	}, nil
+}
+
+// renewalPair is the source and the target of a renewal or a retire: how to
+// dial each over attested sessions, and what each says about itself.
+type renewalPair struct {
+	srcOpts, dstOpts vault.DialOptions
+	source, target   constellation
+}
+
+// newRenewalPair validates both configurations and prepares the dial options
+// of each.
+func newRenewalPair(ctx context.Context, src, dst Config, imageDigest, appID []byte) (*renewalPair, error) {
+	for _, c := range []Config{src, dst} {
+		if err := c.validate(); err != nil {
+			return nil, err
+		}
+	}
+	srcOpts, err := optsFor(ctx, src, imageDigest, appID)
+	if err != nil {
+		return nil, err
+	}
+	dstOpts, err := optsFor(ctx, dst, imageDigest, appID)
+	if err != nil {
+		return nil, err
+	}
+	return &renewalPair{srcOpts: srcOpts, dstOpts: dstOpts}, nil
+}
+
+// identify asks both constellations who they are, the target first. A v1
+// target is not followed by the source unless needSource.
+func (p *renewalPair) identify(ctx context.Context, src, dst Config, needSource bool) error {
+	var err error
+	if p.target, err = identify(ctx, dst, p.dstOpts); err != nil {
+		return err
+	}
+	if p.target.v1 && !needSource {
+		return nil
+	}
+	p.source, err = identify(ctx, src, p.srcOpts)
+	return err
 }
 
 func optsFor(ctx context.Context, cfg Config, imageDigest, appID []byte) (vault.DialOptions, error) {
@@ -285,30 +305,17 @@ func RetirePredecessor(ctx context.Context, log *zap.Logger, src, dst Config, ol
 	if oldHandle == "" || newHandle == "" || oldHandle == newHandle {
 		return fmt.Errorf("vaultkey: retire needs two distinct handles")
 	}
-	for _, c := range []Config{src, dst} {
-		if err := c.validate(); err != nil {
-			return err
-		}
-	}
-	dstOpts, err := optsFor(ctx, dst, imageDigest, appID)
-	if err != nil {
-		return err
-	}
-	srcOpts, err := optsFor(ctx, src, imageDigest, appID)
+	p, err := newRenewalPair(ctx, src, dst, imageDigest, appID)
 	if err != nil {
 		return err
 	}
 	// Only in place: a vault retires only a generation it can see superseded
 	// on itself (formats §9.1). After a move the old generation expires on its
 	// own constellation, or goes when that constellation retires.
-	target, err := identify(ctx, dst, dstOpts)
-	if err != nil {
+	if err := p.identify(ctx, src, dst, true); err != nil {
 		return fmt.Errorf("%w: %v", ErrNotRetired, err)
 	}
-	source, err := identify(ctx, src, srcOpts)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrNotRetired, err)
-	}
+	srcOpts, dstOpts, source, target := p.srcOpts, p.dstOpts, p.source, p.target
 	switch {
 	case target.v1 || source.v1:
 		return fmt.Errorf("%w: a v1 constellation does not retire keys", ErrNotRetired)
